@@ -1,0 +1,797 @@
+name: Apply Claude review fixes
+
+on:
+  push:
+    branches:
+      - feat/immutable-history-events
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Apply review fixes
+        run: |
+          python <<'PY'
+          from pathlib import Path
+
+          def replace(path, old, new, count=1):
+              p = Path(path)
+              text = p.read_text()
+              actual = text.count(old)
+              if actual < count:
+                  raise SystemExit(f'{path}: expected at least {count} occurrence(s), found {actual}: {old[:80]!r}')
+              p.write_text(text.replace(old, new, count))
+
+          def replace_all(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              if old not in text:
+                  raise SystemExit(f'{path}: missing {old!r}')
+              p.write_text(text.replace(old, new))
+
+          # Event sequencing: no counter allocation before save. Unique seq + retry
+          # makes a sequence visible only when the event itself commits.
+          replace('src/db.ts', '''const getNextEventSeq = async (): Promise<number> => {
+            const counterId = `${getCollectionName()}:eventSeq`;
+            const counter = await TicketCounter.findOneAndUpdate(
+              { _id: counterId },
+              { $inc: { seq: 1 } },
+              { upsert: true, new: true, setDefaultsOnInsert: true },
+            );
+
+            if (!counter) throw new Error('Failed to allocate event sequence');
+            return counter.seq;
+          };
+          ''', '''const MAX_EVENT_APPEND_RETRIES = 8;
+
+          function isDuplicateSequenceError(err: unknown): boolean {
+            const mongoError = err as { code?: number; keyPattern?: Record<string, number> };
+            return mongoError?.code === 11000 && Boolean(mongoError.keyPattern?.seq);
+          }
+
+          async function nextEventSequenceCandidate(): Promise<number> {
+            const latest = await AnalyticsEvent.findOne({ seq: { $exists: true } })
+              .sort({ seq: -1 })
+              .select('seq');
+            return (latest?.seq ?? 0) + 1;
+          }
+
+          /**
+           * Assign sequence/id fields to pre-event-log analytics documents.
+           * If the deployment already contains sequenced events, legacy rows are
+           * appended after the current maximum so an existing cursor never moves.
+           */
+          export async function backfillLegacyEvents(): Promise<number> {
+            const latest = await AnalyticsEvent.findOne({ seq: { $exists: true } })
+              .sort({ seq: -1 })
+              .select('seq');
+            let nextSeq = latest?.seq ?? 0;
+            let migrated = 0;
+
+            const legacyEvents = await AnalyticsEvent.find({
+              $or: [
+                { seq: { $exists: false } },
+                { seq: null },
+                { event_id: { $exists: false } },
+                { event_id: null },
+              ],
+            }).sort({ timestamp: 1, _id: 1 });
+
+            for (const event of legacyEvents) {
+              const updates: Record<string, unknown> = {};
+              if (!event.event_id) updates.event_id = randomUUID();
+              if (!Number.isSafeInteger(event.seq)) {
+                nextSeq += 1;
+                updates.seq = nextSeq;
+              } else {
+                nextSeq = Math.max(nextSeq, event.seq as number);
+              }
+              if (Object.keys(updates).length > 0) {
+                await AnalyticsEvent.updateOne({ _id: event._id }, { $set: updates });
+                migrated += 1;
+              }
+            }
+
+            if (migrated > 0) log.info(`Backfilled ${migrated} legacy analytics events.`);
+            return migrated;
+          }
+          ''')
+
+          replace('src/db.ts', '''  const connection = await mongoose.connect(getMongoUri(), {
+            serverSelectionTimeoutMS: 5000,
+          });
+
+          return connection;
+          ''', '''  const connection = await mongoose.connect(getMongoUri(), {
+            serverSelectionTimeoutMS: 5000,
+          });
+
+          await backfillLegacyEvents();
+          return connection;
+          ''')
+
+          replace('src/db.ts', '''export async function addTicketMessage(
+            ticketId: number,
+            sender: 'user' | 'staff' | 'ai',
+            sender_id: string,
+            text: string,
+          ): Promise<void> {
+            try {
+              const msg = new TicketMessage({ ticketId, sender, sender_id, text });
+              await msg.save();
+              await recordAnalyticsEvent(`ticket.message.${sender}`, ticketId, sender_id || null);
+            } catch (err) {
+              log.error('DB addTicketMessage error:', err);
+            }
+          }
+          ''', '''export async function addTicketMessage(
+            ticketId: number,
+            sender: 'user' | 'staff' | 'ai',
+            sender_id: string,
+            text: string,
+          ): Promise<void> {
+            const msg = new TicketMessage({ ticketId, sender, sender_id, text });
+            try {
+              await msg.save();
+            } catch (err) {
+              log.error('DB addTicketMessage error:', err);
+              throw err;
+            }
+
+            // Keep event persistence outside the message-save catch. History may be
+            // durable while event persistence fails, but that failure is observable
+            // to the caller instead of being silently swallowed.
+            await recordAnalyticsEvent(`ticket.message.${sender}`, ticketId, sender_id || null);
+          }
+          ''')
+
+          replace('src/db.ts', '''export async function recordAnalyticsEvent(
+            type: string,
+            ticketId: number,
+            agent_id: string | null = null,
+            metadata: Record<string, any> = {},
+          ): Promise<void> {
+            try {
+              const seq = await getNextEventSeq();
+              const event = new AnalyticsEvent({
+                event_id: randomUUID(),
+                seq,
+                type,
+                ticketId,
+                agent_id,
+                metadata,
+              });
+              await event.save();
+            } catch (err) {
+              log.error('DB recordAnalyticsEvent error:', err);
+            }
+          }
+          ''', '''export async function recordAnalyticsEvent(
+            type: string,
+            ticketId: number,
+            agent_id: string | null = null,
+            metadata: Record<string, any> = {},
+          ): Promise<IAnalyticsEvent> {
+            const eventId = randomUUID();
+            let lastError: unknown = null;
+
+            for (let attempt = 0; attempt < MAX_EVENT_APPEND_RETRIES; attempt += 1) {
+              const seq = await nextEventSequenceCandidate();
+              const event = new AnalyticsEvent({
+                event_id: eventId,
+                seq,
+                type,
+                ticketId,
+                agent_id,
+                metadata,
+              });
+
+              try {
+                await event.save();
+                return event as IAnalyticsEvent;
+              } catch (err) {
+                lastError = err;
+                // A concurrent process may have committed this seq first. Since
+                // seq is unique, retry against the now-visible maximum.
+                if (isDuplicateSequenceError(err)) continue;
+                log.error('DB recordAnalyticsEvent error:', err);
+                throw err;
+              }
+            }
+
+            const error = lastError instanceof Error
+              ? lastError
+              : new Error('Failed to append analytics event after sequence retries');
+            log.error('DB recordAnalyticsEvent error:', error);
+            throw error;
+          }
+          ''')
+
+          replace('src/db.ts', '''export async function getEventsSince(
+            since: number = 0,
+            limit: number = 100,
+          ): Promise<IAnalyticsEvent[]> {
+            try {
+              const safeSince = Number.isSafeInteger(since) && since >= 0 ? since : 0;
+              const safeLimit = Math.max(1, Math.min(limit, 500));
+              return await AnalyticsEvent.find({ seq: { $gt: safeSince } })
+                .sort({ seq: 1 })
+                .limit(safeLimit)
+                .lean<IAnalyticsEvent[]>();
+            } catch (err) {
+              log.error('DB getEventsSince error:', err);
+              return [];
+            }
+          }
+          ''', '''export async function getEventsSince(
+            since: number = 0,
+            limit: number = 100,
+          ): Promise<IAnalyticsEvent[]> {
+            try {
+              const safeSince = Number.isSafeInteger(since) && since >= 0 ? since : 0;
+              // 501 lets the HTTP layer request one look-ahead row for has_more.
+              const safeLimit = Math.max(1, Math.min(limit, 501));
+              const events = await AnalyticsEvent.find({ seq: { $gt: safeSince } })
+                .sort({ seq: 1 })
+                .limit(safeLimit)
+                .lean<IAnalyticsEvent[]>();
+
+              // Never advance a replay cursor past a hole. New writes cannot burn
+              // sequence numbers; this is defense-in-depth for manual corruption.
+              const contiguous: IAnalyticsEvent[] = [];
+              let expected = safeSince + 1;
+              for (const event of events) {
+                if (event.seq !== expected) break;
+                contiguous.push(event);
+                expected += 1;
+              }
+              return contiguous;
+            } catch (err) {
+              log.error('DB getEventsSince error:', err);
+              return [];
+            }
+          }
+          ''')
+
+          # One canonical dotted event taxonomy.
+          for path in ['src/analytics.ts', 'src/workflows.ts', 'src/commands.ts', 'src/staff.ts']:
+              p = Path(path)
+              text = p.read_text()
+              text = text.replace("'ticket_created'", "'ticket.created'")
+              text = text.replace("'ticket_closed'", "'ticket.closed'")
+              text = text.replace("'ticket_escalated'", "'ticket.escalated'")
+              text = text.replace("'staff_reply'", "'ticket.replied'")
+              text = text.replace("'first_reply'", "'ticket.replied'")
+              p.write_text(text)
+
+          # Configurable dedicated event API port/host. Bare runs are loopback-only;
+          # Compose opts into 0.0.0.0 inside the container while publishing on host loopback.
+          replace('src/interfaces.ts', '''  api_enabled: boolean = false;
+            api_token: string = '';
+          ''', '''  api_enabled: boolean = false;
+            api_token: string = '';
+            api_port: number = 8081;
+            api_host: string = '127.0.0.1';
+          ''')
+          replace('src/interfaces.ts', '''  lastContactDate: number;
+            groupCategory: string | null;
+          ''', '''  lastContactDate: number;
+            lastOfflineNoticeDate?: number;
+            groupCategory: string | null;
+          ''')
+          replace('src/cache.ts', '''  api_enabled: false,
+            autoreply: [],
+          ''', '''  api_enabled: false,
+            api_token: '',
+            api_port: 8081,
+            api_host: '127.0.0.1',
+            autoreply: [],
+          ''')
+          replace('src/addons/telegram/index.ts', '''      lastContactDate: 0,
+                groupCategory: null,
+          ''', '''      lastContactDate: 0,
+                lastOfflineNoticeDate: 0,
+                groupCategory: null,
+          ''')
+
+          replace('src/users.ts', '''  if (!workflows.isWithinBusinessHours()) {
+            const offlineMsg = config.language.businessHoursClosed || 'Our support team is currently offline. We will respond during business hours.';
+            await reply(ctx, offlineMsg);
+          }
+          ''', '''  if (!workflows.isWithinBusinessHours()) {
+            const now = Date.now();
+            if (
+              ctx.session.lastOfflineNoticeDate === undefined ||
+              ctx.session.lastOfflineNoticeDate < now - TIME_BETWEEN_CONFIRMATION_MESSAGES
+            ) {
+              ctx.session.lastOfflineNoticeDate = now;
+              const offlineMsg = config.language.businessHoursClosed || 'Our support team is currently offline. We will respond during business hours.';
+              await reply(ctx, offlineMsg);
+            }
+          }
+          ''')
+
+          replace('config/config-sample.yaml', '''api_enabled: false # Enable REST API for programmatic access
+          api_token: '' # Bearer token for API authentication
+          ''', '''api_enabled: false # Enable the read-only event replay API
+          api_token: '' # Bearer token for API authentication
+          api_port: 8081 # Dedicated event API port; avoids the legacy web addon on 8080
+          api_host: '127.0.0.1' # Safe default for bare-metal runs; Compose overrides internally
+          ''')
+
+          replace('docker-compose.yml', '''    ports:
+                - "127.0.0.1:8080:8080"
+              environment:
+                - MONGO_URI=${MONGO_URI:?set authenticated app MONGO_URI in .env}
+          ''', '''    ports:
+                - "127.0.0.1:8080:8080"
+                - "127.0.0.1:8081:8081"
+              environment:
+                - MONGO_URI=${MONGO_URI:?set authenticated app MONGO_URI in .env}
+                - API_HOST=0.0.0.0
+          ''')
+
+          # Replace the small event API module in full to keep auth/rate-limit/close
+          # semantics straightforward.
+          Path('src/events-api.ts').write_text(r'''import { createHash, timingSafeEqual } from 'crypto';
+          import { rateLimit } from 'express-rate-limit';
+          import cache from './cache';
+          import * as db from './db';
+          import * as log from './logger';
+
+          let server: any = null;
+
+          function configView(): {
+            api_enabled?: boolean;
+            api_token?: string;
+            api_port?: number;
+            api_host?: string;
+          } {
+            return cache.config as unknown as {
+              api_enabled?: boolean;
+              api_token?: string;
+              api_port?: number;
+              api_host?: string;
+            };
+          }
+
+          function bearerToken(req: any): string {
+            const header = String(req.headers?.authorization || '');
+            return header.startsWith('Bearer ') ? header.slice(7).trim() : '';
+          }
+
+          function authorized(req: any, expected: string): boolean {
+            const actualDigest = createHash('sha256').update(bearerToken(req)).digest();
+            const expectedDigest = createHash('sha256').update(expected).digest();
+            return timingSafeEqual(actualDigest, expectedDigest);
+          }
+
+          /**
+           * Read-only catch-up API for out-of-process subscribers.
+           * Bare-metal runs bind to loopback by default. Docker Compose overrides
+           * API_HOST to 0.0.0.0 inside the container and publishes only host loopback.
+           */
+          export function startEventsApi(): any {
+            const config = configView();
+            if (!config.api_enabled) return null;
+            if (server) return server;
+
+            const token = String(config.api_token || '').trim();
+            if (!token) {
+              throw new Error('api_enabled requires a non-empty api_token');
+            }
+
+            const express = require('express');
+            const app = express();
+            app.disable('x-powered-by');
+            app.use('/events', rateLimit({ windowMs: 60_000, limit: 120 }));
+
+            // Minimal unauthenticated liveness endpoint. It contains no runtime data.
+            app.get('/healthz', (_req: any, res: any) => {
+              res.status(200).json({ ok: true });
+            });
+
+            app.get('/events', async (req: any, res: any) => {
+              if (!authorized(req, token)) {
+                res.status(401).json({ error: 'unauthorized' });
+                return;
+              }
+
+              const rawSince = Number(req.query?.since ?? 0);
+              const rawLimit = Number(req.query?.limit ?? 100);
+              const since = Number.isSafeInteger(rawSince) && rawSince >= 0 ? rawSince : 0;
+              const limit = Number.isSafeInteger(rawLimit) ? Math.max(1, Math.min(rawLimit, 500)) : 100;
+
+              const rows = await db.getEventsSince(since, Math.min(limit + 1, 501));
+              const hasMore = rows.length > limit;
+              const events = hasMore ? rows.slice(0, limit) : rows;
+              const payload = events.map((event) => ({
+                event_id: event.event_id,
+                seq: event.seq,
+                type: event.type,
+                ticket_id: event.ticketId,
+                actor_id: event.agent_id,
+                timestamp: event.timestamp instanceof Date
+                  ? event.timestamp.toISOString()
+                  : new Date(event.timestamp).toISOString(),
+                metadata: event.metadata || {},
+              }));
+
+              const nextSince = payload.length > 0
+                ? payload[payload.length - 1].seq ?? since
+                : since;
+
+              res.status(200).json({ events: payload, next_since: nextSince, has_more: hasMore });
+            });
+
+            const port = Number(config.api_port || 8081);
+            const host = String(process.env.API_HOST || config.api_host || '127.0.0.1');
+            server = app.listen(port, host, () => {
+              log.info(`Event replay API listening on ${host}:${port}`);
+            });
+            return server;
+          }
+
+          export async function stopEventsApi(): Promise<void> {
+            if (!server) return;
+            const current = server;
+            await new Promise<void>((resolve, reject) => {
+              current.close((err?: Error) => err ? reject(err) : resolve());
+            });
+            if (server === current) server = null;
+          }
+          ''')
+
+          Path('docs/EVENTS.md').write_text(r'''# Event replay API
+
+          Enable the read-only event feed in `config.yaml`:
+
+          ```yaml
+          api_enabled: true
+          api_token: "replace-with-a-long-random-secret"
+          api_port: 8081
+          api_host: "127.0.0.1"
+          ```
+
+          Bare-metal runs bind to loopback by default. Docker Compose sets `API_HOST=0.0.0.0` **inside the container** so Docker can forward the socket, while publishing it only as `127.0.0.1:8081` on the host. The legacy web addon remains on port `8080`.
+
+          Request:
+
+          ```text
+          GET /events?since=123&limit=100
+          Authorization: Bearer <api_token>
+          ```
+
+          Response events are contiguous and ordered by ascending `seq`. Each event includes `event_id`, `seq`, `type`, `ticket_id`, `actor_id`, `timestamp`, and `metadata`. The response also contains `next_since` and `has_more`. Persist `next_since` only after successfully processing the returned page.
+
+          Existing analytics rows from deployments before the sequenced event log are backfilled on startup. They receive UUID event IDs and sequence numbers; if a deployment already contains sequenced rows, older unsequenced rows are appended after the current maximum so an existing cursor is never rewound.
+
+          Current message event types are `ticket.message.user`, `ticket.message.staff`, and `ticket.message.ai`. Domain events use dotted names such as `ticket.created`, `ticket.replied`, `ticket.closed`, `ticket.escalated`, `ticket.priority_changed`, `ticket.queue_changed`, `ticket.note_added`, and `csat.rated`.
+
+          Ticket message bodies are not copied into event metadata. Full conversation history remains in the append-only `TicketMessage` collection; `llm_memory_depth` only limits AI reads. Some trusted-module events may contain identifiers such as Telegram `user_id` in metadata; treat replay subscribers as privileged internal components.
+
+          `GET /healthz` is intentionally unauthenticated and returns only `{ "ok": true }`. `/events` requires Bearer authentication and is rate-limited.
+
+          The existing push-webhook subsystem is still a legacy delivery path and does not yet share `event_id`/`seq` with replay. It must not be used for cross-channel deduplication until webhook delivery is moved behind the persisted event log.
+          ''')
+
+          # CI: tests run only if build succeeded; diagnostic upload is the only always-step.
+          replace('.github/workflows/most-core-ci.yml', '''      - name: Unit tests
+                if: always()
+                run: |
+          ''', '''      - name: Unit tests
+                run: |
+          ''')
+
+          # Focused unit-test updates for the new sequence allocator and API contract.
+          Path('test/db-history-events.test.ts').write_text(r'''jest.unmock('../src/db');
+
+          const mockMessageSave = jest.fn().mockResolvedValue(undefined);
+          const mockEventSave = jest.fn().mockResolvedValue(undefined);
+          const mockCounterFindOneAndUpdate = jest.fn();
+          const mockMessageFind = jest.fn();
+          const mockEventFind = jest.fn();
+          const mockEventFindOne = jest.fn();
+          const mockEventUpdateOne = jest.fn().mockResolvedValue({ modifiedCount: 1 });
+          const capturedEvents: any[] = [];
+
+          const TicketMessageModel: any = jest.fn(function (this: any, data: any) {
+            Object.assign(this, data);
+            this.save = mockMessageSave;
+          });
+          TicketMessageModel.find = mockMessageFind;
+
+          const AnalyticsEventModel: any = jest.fn(function (this: any, data: any) {
+            Object.assign(this, data);
+            capturedEvents.push(data);
+            this.save = mockEventSave;
+          });
+          AnalyticsEventModel.find = mockEventFind;
+          AnalyticsEventModel.findOne = mockEventFindOne;
+          AnalyticsEventModel.updateOne = mockEventUpdateOne;
+
+          const SupporteeModel: any = {
+            findOne: jest.fn(),
+            find: jest.fn(),
+            findOneAndUpdate: jest.fn(),
+            updateMany: jest.fn(),
+            create: jest.fn(),
+          };
+
+          jest.mock('mongoose', () => {
+            const Schema = jest.fn().mockImplementation(() => ({ index: jest.fn() }));
+            (Schema as any).Types = { Mixed: {}, ObjectId: {} };
+
+            const module = {
+              connect: jest.fn().mockResolvedValue({}),
+              connection: { on: jest.fn() },
+              Schema,
+              model: jest.fn((name: string) => {
+                if (name === 'TicketMessage') return TicketMessageModel;
+                if (name === 'AnalyticsEvent') return AnalyticsEventModel;
+                if (name === 'TicketCounter') return { findOneAndUpdate: mockCounterFindOneAndUpdate };
+                if (name === 'InternalNote') return jest.fn();
+                if (name === 'UserBan') return { findOne: jest.fn(), findOneAndUpdate: jest.fn(), deleteOne: jest.fn() };
+                return SupporteeModel;
+              }),
+            };
+            return { __esModule: true, default: module, ...module };
+          });
+
+          jest.mock('../src/cache', () => ({
+            config: { mongodb_uri: 'mongodb://localhost/test', llm_memory_depth: 2 },
+            recoveryBaseline: 0,
+          }));
+
+          import * as db from '../src/db';
+
+          function latestSeq(value: number | null) {
+            const q: any = {};
+            q.sort = jest.fn(() => q);
+            q.select = jest.fn().mockResolvedValue(value === null ? null : { seq: value });
+            return q;
+          }
+
+          describe('append-only ticket history and event log', () => {
+            beforeEach(() => {
+              jest.clearAllMocks();
+              capturedEvents.length = 0;
+              mockEventFindOne.mockImplementation(() => latestSeq(0));
+              mockEventSave.mockResolvedValue(undefined);
+            });
+
+            it('appends a ticket message without querying or pruning older messages', async () => {
+              await db.addTicketMessage(7, 'user', '123', 'hello');
+
+              expect(TicketMessageModel).toHaveBeenCalledWith({
+                ticketId: 7,
+                sender: 'user',
+                sender_id: '123',
+                text: 'hello',
+              });
+              expect(mockMessageSave).toHaveBeenCalledTimes(1);
+              expect(mockMessageFind).not.toHaveBeenCalled();
+              expect(mockEventSave).toHaveBeenCalledTimes(1);
+            });
+
+            it('keeps the LLM context bounded at read time', async () => {
+              const q: any = {};
+              q.sort = jest.fn(() => q);
+              q.limit = jest.fn(() => q);
+              q.lean = jest.fn().mockResolvedValue([{ text: 'new' }, { text: 'old' }]);
+              mockMessageFind.mockReturnValue(q);
+
+              const result = await db.getConversationHistory(7);
+
+              expect(mockMessageFind).toHaveBeenCalledWith({ ticketId: 7 });
+              expect(q.sort).toHaveBeenCalledWith({ timestamp: -1 });
+              expect(q.limit).toHaveBeenCalledWith(2);
+              expect(result).toHaveLength(2);
+            });
+
+            it('assigns a monotonic sequence and UUID-shaped id to every event', async () => {
+              mockEventFindOne.mockImplementation(() => latestSeq(41));
+
+              await db.recordAnalyticsEvent('ticket.priority_changed', 7, 'agent-1', { to: 'high' });
+
+              expect(capturedEvents[0]).toEqual(expect.objectContaining({
+                seq: 42,
+                type: 'ticket.priority_changed',
+                ticketId: 7,
+                agent_id: 'agent-1',
+                metadata: { to: 'high' },
+                event_id: expect.stringMatching(/^[0-9a-f-]{36}$/i),
+              }));
+              expect(mockEventSave).toHaveBeenCalledTimes(1);
+            });
+
+            it('retries a duplicate sequence without creating a replay hole', async () => {
+              mockEventFindOne
+                .mockImplementationOnce(() => latestSeq(4))
+                .mockImplementationOnce(() => latestSeq(5));
+              mockEventSave
+                .mockRejectedValueOnce({ code: 11000, keyPattern: { seq: 1 } })
+                .mockResolvedValueOnce(undefined);
+
+              await db.recordAnalyticsEvent('ticket.closed', 7);
+
+              expect(capturedEvents.map((event) => event.seq)).toEqual([5, 6]);
+              expect(mockEventSave).toHaveBeenCalledTimes(2);
+            });
+
+            it('propagates a failed event write so loss is never silent', async () => {
+              mockEventFindOne.mockImplementation(() => latestSeq(4));
+              mockEventSave.mockRejectedValueOnce(new Error('mongo write failed'));
+
+              await expect(db.recordAnalyticsEvent('ticket.closed', 7)).rejects.toThrow('mongo write failed');
+              expect(capturedEvents[0].seq).toBe(5);
+            });
+
+            it('stops replay at the first sequence hole', async () => {
+              const q: any = {};
+              q.sort = jest.fn(() => q);
+              q.limit = jest.fn(() => q);
+              q.lean = jest.fn().mockResolvedValue([{ seq: 11 }, { seq: 13 }, { seq: 14 }]);
+              mockEventFind.mockReturnValue(q);
+
+              const result = await db.getEventsSince(10, 25);
+
+              expect(mockEventFind).toHaveBeenCalledWith({ seq: { $gt: 10 } });
+              expect(q.sort).toHaveBeenCalledWith({ seq: 1 });
+              expect(q.limit).toHaveBeenCalledWith(25);
+              expect(result).toEqual([{ seq: 11 }]);
+            });
+          });
+          ''')
+
+          Path('test/events-api.test.ts').write_text(r'''const handlers: Record<string, (req: any, res: any) => any> = {};
+          const close = jest.fn((cb: (err?: Error) => void) => cb());
+          const listen = jest.fn((_port: number, _host: string, cb: () => void) => {
+            cb();
+            return { close };
+          });
+          const app = {
+            disable: jest.fn(),
+            use: jest.fn(),
+            get: jest.fn((path: string, handler: (req: any, res: any) => any) => {
+              handlers[path] = handler;
+            }),
+            listen,
+          };
+
+          jest.mock('express', () => jest.fn(() => app));
+          const limiter = jest.fn((_req: any, _res: any, next: () => void) => next());
+          jest.mock('express-rate-limit', () => ({ rateLimit: jest.fn(() => limiter) }));
+
+          const getEventsSince = jest.fn();
+          jest.mock('../src/db', () => ({ getEventsSince }));
+          jest.mock('../src/logger', () => ({ info: jest.fn(), error: jest.fn() }));
+          jest.mock('../src/cache', () => ({
+            config: {
+              api_enabled: true,
+              api_token: 'test-secret',
+              api_port: 8081,
+              api_host: '127.0.0.1',
+            },
+          }));
+
+          import { startEventsApi, stopEventsApi } from '../src/events-api';
+
+          function response() {
+            const res: any = {};
+            res.status = jest.fn(() => res);
+            res.json = jest.fn(() => res);
+            return res;
+          }
+
+          describe('event replay API', () => {
+            beforeEach(() => {
+              jest.clearAllMocks();
+              Object.keys(handlers).forEach((key) => delete handlers[key]);
+              startEventsApi();
+            });
+
+            afterEach(async () => {
+              await stopEventsApi();
+            });
+
+            it('binds to configured loopback host and dedicated port', () => {
+              expect(listen).toHaveBeenCalledWith(8081, '127.0.0.1', expect.any(Function));
+            });
+
+            it('rejects missing bearer authentication', async () => {
+              const res = response();
+
+              await handlers['/events']({ headers: {}, query: {} }, res);
+
+              expect(res.status).toHaveBeenCalledWith(401);
+              expect(getEventsSince).not.toHaveBeenCalled();
+            });
+
+            it('returns ordered replay events, next_since and exact has_more', async () => {
+              getEventsSince.mockResolvedValue([
+                {
+                  event_id: 'event-11',
+                  seq: 11,
+                  type: 'ticket.message.user',
+                  ticketId: 7,
+                  agent_id: '123',
+                  timestamp: new Date('2026-09-17T12:00:00Z'),
+                  metadata: {},
+                },
+                {
+                  event_id: 'event-12',
+                  seq: 12,
+                  type: 'ticket.priority_changed',
+                  ticketId: 7,
+                  agent_id: 'agent-1',
+                  timestamp: new Date('2026-09-17T12:01:00Z'),
+                  metadata: { to: 'high' },
+                },
+                {
+                  event_id: 'event-13',
+                  seq: 13,
+                  type: 'ticket.closed',
+                  ticketId: 7,
+                  agent_id: 'agent-1',
+                  timestamp: new Date('2026-09-17T12:02:00Z'),
+                  metadata: {},
+                },
+              ]);
+              const res = response();
+
+              await handlers['/events']({
+                headers: { authorization: 'Bearer test-secret' },
+                query: { since: '10', limit: '2' },
+              }, res);
+
+              expect(getEventsSince).toHaveBeenCalledWith(10, 3);
+              expect(res.status).toHaveBeenCalledWith(200);
+              expect(res.json).toHaveBeenCalledWith({
+                events: [
+                  expect.objectContaining({ event_id: 'event-11', seq: 11, ticket_id: 7 }),
+                  expect.objectContaining({ event_id: 'event-12', seq: 12, ticket_id: 7 }),
+                ],
+                next_since: 12,
+                has_more: true,
+              });
+            });
+          });
+          ''')
+          PY
+
+      - name: Check legacy event names are gone
+        run: |
+          if grep -R -n -E "'(ticket_created|ticket_closed|ticket_escalated|staff_reply|first_reply)'" src; then
+            echo 'Legacy analytics event names remain.'
+            exit 1
+          fi
+
+      - name: Install and verify
+        run: |
+          npm ci
+          npm run build
+          npm test
+
+      - name: Commit fixes and remove one-shot workflow
+        run: |
+          rm .github/workflows/claude-review-fixes.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix: address event replay review"
+          git push origin HEAD:feat/immutable-history-events
