@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { randomUUID } from 'crypto';
 import cache from './cache';
 import { Messenger, TicketPriority } from './interfaces';
 import * as log from './logger'
@@ -58,6 +59,10 @@ export const SupporteeSchema = new mongoose.Schema<ISupportee>({
   timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' },
 });
 
+SupporteeSchema.index({ userid: 1, messenger: 1, ticketId: -1 });
+SupporteeSchema.index({ internalIds: 1 });
+SupporteeSchema.index({ status: 1, category: 1, assigned_to: 1 });
+
 const Supportee = mongoose.model(getCollectionName(), SupporteeSchema);
 
 export { Supportee };
@@ -79,10 +84,13 @@ const TicketMessageSchema = new mongoose.Schema<ITicketMessage>({
   text: { type: String, required: true },
   timestamp: { type: Date, default: Date.now },
 });
+TicketMessageSchema.index({ ticketId: 1, timestamp: -1 });
 
 const TicketMessage = mongoose.model('TicketMessage', TicketMessageSchema);
 
 export interface IAnalyticsEvent extends mongoose.Document {
+  event_id?: string;
+  seq?: number;
   type: string;
   ticketId: number;
   timestamp: Date;
@@ -91,12 +99,17 @@ export interface IAnalyticsEvent extends mongoose.Document {
 }
 
 const AnalyticsEventSchema = new mongoose.Schema<IAnalyticsEvent>({
+  event_id: { type: String, required: false },
+  seq: { type: Number, required: false },
   type: { type: String, required: true },
   ticketId: { type: Number, required: true },
   timestamp: { type: Date, default: Date.now },
   agent_id: { type: String, default: null },
   metadata: { type: mongoose.Schema.Types.Mixed, default: {} },
 });
+AnalyticsEventSchema.index({ event_id: 1 }, { unique: true, sparse: true });
+AnalyticsEventSchema.index({ seq: 1 }, { unique: true, sparse: true });
+AnalyticsEventSchema.index({ ticketId: 1, timestamp: -1 });
 
 const AnalyticsEvent = mongoose.model('AnalyticsEvent', AnalyticsEventSchema);
 
@@ -113,6 +126,7 @@ const InternalNoteSchema = new mongoose.Schema<IInternalNote>({
   text: { type: String, required: true },
   timestamp: { type: Date, default: Date.now },
 });
+InternalNoteSchema.index({ ticketId: 1, timestamp: -1 });
 
 const InternalNote = mongoose.model('InternalNote', InternalNoteSchema);
 
@@ -190,6 +204,18 @@ export const getNextTicketId = async (): Promise<number> => {
   return counter.seq;
 };
 
+const getNextEventSeq = async (): Promise<number> => {
+  const counterId = `${getCollectionName()}:eventSeq`;
+  const counter = await TicketCounter.findOneAndUpdate(
+    { _id: counterId },
+    { $inc: { seq: 1 } },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  );
+
+  if (!counter) throw new Error('Failed to allocate event sequence');
+  return counter.seq;
+};
+
 const allowedStatusSources: Record<TicketStatus, TicketStatus[]> = {
   open: ['open', 'waiting_user', 'closed'],
   waiting_user: ['open', 'waiting_user'],
@@ -261,11 +287,12 @@ export async function getTicketByUserId (
   userId: string | number,
   category: string | null
 ) {
-  const query = {
+  const query: Record<string, unknown> = {
     $or: [{ userid: userId }],
-    ...(category ? { category } : { category: null }),
   };
-  // Newest ticket first: with ticket_per_message a user has several documents
+  if (category) query.category = category;
+  // Newest ticket first: with ticket_per_message a user has several documents.
+  // A null category means "any queue/category", used by internal correlation paths.
   const result = await Supportee.findOne(query).sort({ ticketId: -1 });
   return result;
 };
@@ -281,6 +308,7 @@ export const addNewTicket = async (
 ): Promise<number> => {
   const ticketId = await getNextTicketId();
   await Supportee.create({ userid, messenger, ticketId, status: 'open', category: category ?? null });
+  await recordAnalyticsEvent('ticket.created', ticketId, null, { user_id: String(userid) });
   return ticketId;
 };
 
@@ -468,7 +496,7 @@ export async function getAllUsers(): Promise<Array<{ userid: string; messenger: 
   }
 }
 
-// --- Ticket Message methods (conversation memory) ---
+// --- Ticket Message methods (append-only audit history + bounded read window) ---
 
 export async function addTicketMessage(
   ticketId: number,
@@ -479,26 +507,20 @@ export async function addTicketMessage(
   try {
     const msg = new TicketMessage({ ticketId, sender, sender_id, text });
     await msg.save();
-    // Keep only last N messages per ticket (configurable)
-    const depth = cache.config.llm_memory_depth || 10;
-    const excess = await TicketMessage.find({ ticketId })
-      .sort({ timestamp: -1 })
-      .skip(depth);
-    if (excess.length > 0) {
-      const ids = excess.map((m) => m._id);
-      await TicketMessage.deleteMany({ _id: { $in: ids } });
-    }
+    await recordAnalyticsEvent(`ticket.message.${sender}`, ticketId, sender_id || null);
   } catch (err) {
     log.error('DB addTicketMessage error:', err);
   }
 }
 
+/** LLM context is a bounded read; stored ticket history is never pruned. */
 export async function getConversationHistory(
   ticketId: number,
   depth?: number,
 ): Promise<ITicketMessage[]> {
   try {
-    const limit = depth || (cache.config.llm_memory_depth ?? 10);
+    const configured = depth ?? cache.config.llm_memory_depth ?? 10;
+    const limit = Math.max(1, Math.min(configured, 100));
     return await TicketMessage.find({ ticketId })
       .sort({ timestamp: -1 })
       .limit(limit)
@@ -509,7 +531,24 @@ export async function getConversationHistory(
   }
 }
 
-// --- Analytics Event methods ---
+/** Full chronological ticket history for audit/export/KB workflows. */
+export async function getTicketMessageHistory(
+  ticketId: number,
+  limit: number = 1000,
+): Promise<ITicketMessage[]> {
+  try {
+    const safeLimit = Math.max(1, Math.min(limit, 5000));
+    return await TicketMessage.find({ ticketId })
+      .sort({ timestamp: 1 })
+      .limit(safeLimit)
+      .lean<ITicketMessage[]>();
+  } catch (err) {
+    log.error('DB getTicketMessageHistory error:', err);
+    return [];
+  }
+}
+
+// --- Analytics / event log methods ---
 
 export async function recordAnalyticsEvent(
   type: string,
@@ -518,10 +557,35 @@ export async function recordAnalyticsEvent(
   metadata: Record<string, any> = {},
 ): Promise<void> {
   try {
-    const event = new AnalyticsEvent({ type, ticketId, agent_id, metadata });
+    const seq = await getNextEventSeq();
+    const event = new AnalyticsEvent({
+      event_id: randomUUID(),
+      seq,
+      type,
+      ticketId,
+      agent_id,
+      metadata,
+    });
     await event.save();
   } catch (err) {
     log.error('DB recordAnalyticsEvent error:', err);
+  }
+}
+
+export async function getEventsSince(
+  since: number = 0,
+  limit: number = 100,
+): Promise<IAnalyticsEvent[]> {
+  try {
+    const safeSince = Number.isSafeInteger(since) && since >= 0 ? since : 0;
+    const safeLimit = Math.max(1, Math.min(limit, 500));
+    return await AnalyticsEvent.find({ seq: { $gt: safeSince } })
+      .sort({ seq: 1 })
+      .limit(safeLimit)
+      .lean<IAnalyticsEvent[]>();
+  } catch (err) {
+    log.error('DB getEventsSince error:', err);
+    return [];
   }
 }
 
