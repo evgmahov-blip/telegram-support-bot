@@ -1,6 +1,6 @@
 import { ISupportee, Supportee } from './db';
 
-const ACTIVE_STATUSES = ['open', 'waiting_user'] as const;
+const ACTIVE_STATUSES: Array<'open' | 'waiting_user'> = ['open', 'waiting_user'];
 
 /**
  * Atomically take an unowned active ticket. Taking a ticket already owned by
