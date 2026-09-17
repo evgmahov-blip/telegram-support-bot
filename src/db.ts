@@ -9,12 +9,8 @@ function getMongoUri(): string {
   return cache.config?.mongodb_uri || process.env.MONGO_URI || 'mongodb://localhost:27017/support';
 }
 
-function getBotTokenSuffix(): string {
-  return cache.config?.bot_token?.slice(-5) || '';
-}
-
 function getCollectionName(): string {
-  return `bot_${cache.config?.owner_id}_${getBotTokenSuffix()}`;
+  return process.env.MONGO_COLLECTION || `bot_${cache.config?.owner_id || 'support'}`;
 }
 
 export interface ISupportee extends mongoose.Document {
@@ -36,6 +32,8 @@ export interface ISupportee extends mongoose.Document {
   // Analytics fields
   first_response_at: Date | null;
   closed_at: Date | null;
+  created_at: Date;
+  updated_at: Date;
 }
 
 export const SupporteeSchema = new mongoose.Schema<ISupportee>({
@@ -54,6 +52,8 @@ export const SupporteeSchema = new mongoose.Schema<ISupportee>({
   sentiment_score: { type: Number, default: null },
   first_response_at: { type: Date, default: null },
   closed_at: { type: Date, default: null },
+}, {
+  timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' },
 });
 
 const Supportee = mongoose.model(getCollectionName(), SupporteeSchema);
@@ -114,6 +114,18 @@ const InternalNoteSchema = new mongoose.Schema<IInternalNote>({
 
 const InternalNote = mongoose.model('InternalNote', InternalNoteSchema);
 
+interface ITicketCounter extends mongoose.Document {
+  _id: string;
+  seq: number;
+}
+
+const TicketCounterSchema = new mongoose.Schema<ITicketCounter>({
+  _id: { type: String, required: true },
+  seq: { type: Number, required: true, default: 0 },
+});
+
+const TicketCounter = mongoose.model('TicketCounter', TicketCounterSchema);
+
 export async function connect() {
   mongoose.connection.on('open', () => {
     log.info('Connected to mongo server.');
@@ -133,14 +145,30 @@ export async function connect() {
 
 /** Methods **/
 
-export const getNextTicketId = async () => {
+export const getNextTicketId = async (): Promise<number> => {
   const lastEntry = await Supportee.findOne()
     .sort({ ticketId: -1 })
     .select('ticketId');
   const dbMax = lastEntry ? lastEntry.ticketId : 0;
-  // Use the higher of DB max or recovery baseline (from chat history scan) to prevent collisions on DB loss
-  const baseline = Math.max(dbMax, cache.recoveryBaseline);
-  return baseline + 1;
+  const baseline = Math.max(dbMax, cache.recoveryBaseline || 0);
+  const counterId = `${getCollectionName()}:ticketId`;
+
+  // Bring the counter up to at least the highest known ticket ID.
+  await TicketCounter.findOneAndUpdate(
+    { _id: counterId },
+    { $max: { seq: baseline } },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  );
+
+  // Atomic increment: concurrent ticket creation receives unique IDs.
+  const counter = await TicketCounter.findOneAndUpdate(
+    { _id: counterId },
+    { $inc: { seq: 1 } },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  );
+
+  if (!counter) throw new Error('Failed to allocate ticket ID');
+  return counter.seq;
 };
 
 export async function check(
@@ -163,10 +191,8 @@ export async function getTicketById(
   ticketId: string | number,
   category: string | null
 ): Promise<ISupportee | null> {
-  const query = {
-    $or: [{ ticketId: ticketId }],
-    ...(category ? { category } : { category: null }),
-  };
+  const query: Record<string, unknown> = { ticketId };
+  if (category) query.category = category;
   const result = await Supportee.findOne(query);
   return result as ISupportee | null;
 };
@@ -196,8 +222,7 @@ export async function getTicketByUserId (
 
 /**
  * Opens an additional ticket for a user without touching their existing ones
- * (ticket_per_message, #172). `add(..., 'open', ...)` replaces the user's document,
- * which would make every earlier ticket id unresolvable for staff replies.
+ * (ticket_per_message, #172).
  */
 export const addNewTicket = async (
   userid: string | number,
@@ -239,7 +264,10 @@ export async function checkBan(
 }
 
 export const closeAll = async () => {
-  await Supportee.updateMany({}, { $set: { status: 'closed' } });
+  await Supportee.updateMany(
+    { status: { $ne: 'banned' } },
+    { $set: { status: 'closed' } },
+  );
 };
 
 export const reopen = async (userid: any, category: string, messenger: string) => {
@@ -279,36 +307,39 @@ export const add = async (
   category: string | number | null,
   messenger: string
 ) => {
-  let result;
   if (status === 'closed') {
     const query = {
       messenger,
       $or: [{ userid: userid }, { ticketId: userid }],
       ...(category && { category }),
     };
-    result = await Supportee.updateMany(query, { $set: { status: 'closed' } });
-  } else if (status === 'open') {
-    let ticketId = await getNextTicketId();
-    result = await Supportee.findOneAndReplace(
-      { messenger, userid },
-      { userid, messenger, ticketId, status, category },
-      { upsert: true }
-    );
-  } else if (status === 'banned') {
-    result = await Supportee.findOneAndReplace(
+    const result = await Supportee.updateMany(query, { $set: { status: 'closed' } });
+    return result.modifiedCount ?? 0;
+  }
+
+  if (status === 'open') {
+    const ticketId = await getNextTicketId();
+    const result = await Supportee.findOneAndUpdate(
       { messenger, userid },
       {
-        userid,
-        messenger,
-        ticketId: await getNextTicketId(),
-        status: 'banned',
-        category: 'BANNED',
+        $setOnInsert: { userid, messenger, ticketId },
+        $set: { status: 'open', category: category ?? null },
       },
-      { upsert: true }
+      { upsert: true, new: true, setDefaultsOnInsert: true },
     );
+    return result ? 1 : 0;
   }
-  const writeResult = result as { modifiedCount?: number } | null | undefined;
-  return writeResult?.modifiedCount ?? 0;
+
+  if (status === 'banned') {
+    const result = await Supportee.findOneAndUpdate(
+      { messenger, userid },
+      { $set: { status: 'banned', category: 'BANNED' } },
+      { upsert: false, new: true },
+    );
+    return result ? 1 : 0;
+  }
+
+  return 0;
 };
 
 export async function open(
@@ -607,4 +638,4 @@ export async function recordCSAT(
 
 // --- Export models for use in other modules ---
 
-export { TicketMessage, AnalyticsEvent, InternalNote };
+export { TicketMessage, AnalyticsEvent, InternalNote, TicketCounter };
