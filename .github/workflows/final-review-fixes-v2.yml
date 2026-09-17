@@ -1,0 +1,146 @@
+name: Apply final review fixes v2
+
+on:
+  push:
+    branches:
+      - feat/immutable-history-events
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Apply fixes
+        run: |
+          cat > /tmp/fix.py <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              if old not in text:
+                  raise SystemExit(f'{path}: missing marker {old[:120]!r}')
+              p.write_text(text.replace(old, new, 1))
+
+          replace_once('src/db.ts', "const LEGACY_EVENT_BACKFILL_MARKER = 'legacyEventBackfillV2';", "const LEGACY_EVENT_BACKFILL_MARKER = 'legacyEventBackfillV3';")
+          replace_once('src/db.ts', "  internal_note: 'ticket.note_added',\n};", "  internal_note: 'ticket.note_added',\n  staff_file_reply: 'ticket.replied',\n};")
+
+          replace_once(
+              'src/db.ts',
+              "function recordAnalyticsEventBestEffort(\n  type: string,\n  ticketId: number,\n  agent_id: string | null = null,\n  metadata: Record<string, any> = {},\n): void {\n  void recordAnalyticsEvent(type, ticketId, agent_id, metadata).catch((err) => {\n    log.error(`Event append failed for ${type} #T${ticketId}:`, err);\n  });\n}",
+              "let eventTail: Promise<unknown> = Promise.resolve();\n\nfunction enqueueEventAppend<T>(fn: () => Promise<T>): Promise<T> {\n  const run = eventTail.then(fn, fn);\n  eventTail = run.catch(() => {});\n  return run;\n}\n\nexport function recordAnalyticsEventBestEffort(\n  type: string,\n  ticketId: number,\n  agent_id: string | null = null,\n  metadata: Record<string, any> = {},\n): void {\n  void recordAnalyticsEvent(type, ticketId, agent_id, metadata).catch((err) => {\n    log.error(`Event append failed for ${type} #T${ticketId}:`, err);\n  });\n}",
+          )
+
+          replace_once(
+              'src/db.ts',
+              "export async function addTicketMessage(\n  ticketId: number,\n  sender: 'user' | 'staff' | 'ai',\n  sender_id: string,\n  text: string,\n): Promise<void> {\n  const msg = new TicketMessage({ ticketId, sender, sender_id, text });\n  try {\n    await msg.save();\n  } catch (err) {\n    log.error('DB addTicketMessage error:', err);\n    throw err;\n  }\n\n  // History persistence is authoritative here; the mirrored event is best-effort.\n  recordAnalyticsEventBestEffort(`ticket.message.${sender}`, ticketId, sender_id || null);\n}",
+              "export async function persistTicketMessage(\n  ticketId: number,\n  sender: 'user' | 'staff' | 'ai',\n  sender_id: string,\n  text: string,\n): Promise<void> {\n  const msg = new TicketMessage({ ticketId, sender, sender_id, text });\n  try {\n    await msg.save();\n  } catch (err) {\n    log.error('DB persistTicketMessage error:', err);\n    throw err;\n  }\n}\n\nexport async function addTicketMessage(\n  ticketId: number,\n  sender: 'user' | 'staff' | 'ai',\n  sender_id: string,\n  text: string,\n): Promise<void> {\n  await persistTicketMessage(ticketId, sender, sender_id, text);\n  recordAnalyticsEventBestEffort(`ticket.message.${sender}`, ticketId, sender_id || null);\n}",
+          )
+
+          replace_once(
+              'src/db.ts',
+              "export async function recordAnalyticsEvent(\n  type: string,\n  ticketId: number,\n  agent_id: string | null = null,\n  metadata: Record<string, any> = {},\n): Promise<IAnalyticsEvent> {",
+              "async function appendAnalyticsEvent(\n  type: string,\n  ticketId: number,\n  agent_id: string | null = null,\n  metadata: Record<string, any> = {},\n): Promise<IAnalyticsEvent> {",
+          )
+          p = Path('src/db.ts')
+          text = p.read_text()
+          marker = "\nexport async function getEventsSince("
+          wrapper = "\nexport async function recordAnalyticsEvent(\n  type: string,\n  ticketId: number,\n  agent_id: string | null = null,\n  metadata: Record<string, any> = {},\n): Promise<IAnalyticsEvent> {\n  return enqueueEventAppend(() => appendAnalyticsEvent(type, ticketId, agent_id, metadata));\n}\n"
+          if marker not in text:
+              raise SystemExit('src/db.ts: getEventsSince marker missing')
+          p.write_text(text.replace(marker, wrapper + marker, 1))
+
+          replace_once('src/users.ts', "  // Legacy push webhooks remain for compatibility. The canonical persisted\n", "  await db.persistTicketMessage(ticket.ticketId, 'user', ctx.from.id.toString(), ctx.message.text);\n\n  // Legacy push webhooks remain for compatibility. The canonical persisted\n")
+          replace_once('src/users.ts', "  await db.addTicketMessage(ticket.ticketId, 'user', ctx.from.id.toString(), ctx.message.text);\n\n  // Category groups remain internal staff surfaces.", "  db.recordAnalyticsEventBestEffort('ticket.message.user', ticket.ticketId, ctx.from.id.toString());\n\n  // Category groups remain internal staff surfaces.")
+          replace_once('src/users.ts', "    const messageId = await sendMessage(\n      config.staffchat_id,", "    await db.persistTicketMessage(ticket.ticketId, 'user', ctx.from.id.toString(), ctx.message.text);\n\n    const messageId = await sendMessage(\n      config.staffchat_id,")
+          replace_once('src/users.ts', "    await db.addTicketMessage(ticket.ticketId, 'user', ctx.from.id.toString(), ctx.message.text);\n\n    if (ctx.session.group", "    db.recordAnalyticsEventBestEffort('ticket.message.user', ticket.ticketId, ctx.from.id.toString());\n\n    if (ctx.session.group")
+
+          replace_once('src/team.ts', "await db.recordAnalyticsEvent('internal_note', ticketId, ctx.from.id.toString());", "await db.recordAnalyticsEvent('ticket.note_added', ticketId, ctx.from.id.toString());")
+          replace_once('src/files.ts', "await db.recordAnalyticsEvent('staff_file_reply', ticket.ticketId, actorId, { type });", "await db.recordAnalyticsEvent('ticket.replied', ticket.ticketId, actorId, { kind: 'file', type });")
+
+          p = Path('test/db-history-events.test.ts')
+          text = p.read_text()
+          text = text.replace("'legacyEventBackfillV2'", "'legacyEventBackfillV3'")
+          lines = [
+              '',
+              "  it('persists authoritative history without emitting the replay mirror', async () => {",
+              "    await db.persistTicketMessage(8, 'user', '123', 'durable first');",
+              '    expect(mockMessageSave).toHaveBeenCalledTimes(1);',
+              '    expect(mockEventSave).not.toHaveBeenCalled();',
+              '  });',
+              '',
+              "  it('serializes best-effort and acknowledged appends in call order', async () => {",
+              '    let releaseFirst: (() => void) | undefined;',
+              '    mockEventSave',
+              '      .mockImplementationOnce(() => new Promise<void>((resolve) => { releaseFirst = resolve; }))',
+              '      .mockResolvedValueOnce(undefined);',
+              '',
+              "    db.recordAnalyticsEventBestEffort('ticket.message.staff', 7, 'agent-1');",
+              "    const replied = db.recordAnalyticsEvent('ticket.replied', 7, 'agent-1');",
+              '    await new Promise((resolve) => setImmediate(resolve));',
+              '',
+              '    expect(mockEventSave).toHaveBeenCalledTimes(1);',
+              "    expect(capturedEvents.map((event) => event.type)).toEqual(['ticket.message.staff']);",
+              '',
+              '    releaseFirst?.();',
+              '    await replied;',
+              '',
+              '    expect(mockEventSave).toHaveBeenCalledTimes(2);',
+              '    expect(capturedEvents.map((event) => event.type)).toEqual([',
+              "      'ticket.message.staff',",
+              "      'ticket.replied',",
+              '    ]);',
+              '  });',
+              '',
+          ]
+          anchor = "\n  it('keeps LLM context bounded at read time', async () => {"
+          if anchor not in text:
+              raise SystemExit('test/db-history-events.test.ts: insertion anchor missing')
+          p.write_text(text.replace(anchor, '\n'.join(lines) + anchor, 1))
+
+          replace_once('test/users.test.ts', "  addTicketMessage: jest.fn().mockResolvedValue(undefined),\n  recordAnalyticsEvent: jest.fn().mockResolvedValue(undefined),", "  addTicketMessage: jest.fn().mockResolvedValue(undefined),\n  persistTicketMessage: jest.fn().mockResolvedValue(undefined),\n  recordAnalyticsEvent: jest.fn().mockResolvedValue(undefined),\n  recordAnalyticsEventBestEffort: jest.fn(),")
+          replace_once('test/users-ai-draft-flow.test.ts', "  addTicketMessage: mockAddTicketMessage,\n  recordAnalyticsEvent: mockRecordAnalyticsEvent,", "  addTicketMessage: mockAddTicketMessage,\n  persistTicketMessage: jest.fn().mockResolvedValue(undefined),\n  recordAnalyticsEvent: mockRecordAnalyticsEvent,\n  recordAnalyticsEventBestEffort: jest.fn(),")
+
+          p = Path('test/files.test.ts')
+          text = p.read_text()
+          old = "      expect(mockAddIdAndName).not.toHaveBeenCalled();\n    });"
+          new = "      expect(mockAddIdAndName).not.toHaveBeenCalled();\n      expect(mockRecordAnalyticsEvent).toHaveBeenCalledWith(\n        'ticket.replied',\n        41,\n        'agent1',\n        { kind: 'file', type: 'document' },\n      );\n    });"
+          if old not in text:
+              raise SystemExit('test/files.test.ts: assertion anchor missing')
+          p.write_text(text.replace(old, new, 1))
+
+          p = Path('docs/EVENTS.md')
+          text = p.read_text()
+          if 'In-process event appends are serialized' not in text:
+              text += "\nIn-process event appends are serialized before sequence allocation, so callers observe replay order matching append call order within one bot instance. The unique sequence index and retry loop still arbitrate concurrent writers across instances.\n"
+          p.write_text(text)
+          PY
+          python /tmp/fix.py
+
+      - name: Verify build and tests
+        run: |
+          npm ci
+          npm run build
+          npm test -- --runInBand
+
+      - name: Commit fixes
+        run: |
+          rm .github/workflows/final-review-fixes-v2.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/db.ts src/users.ts src/team.ts src/files.ts test/db-history-events.test.ts test/users.test.ts test/users-ai-draft-flow.test.ts test/files.test.ts docs/EVENTS.md .github/workflows/final-review-fixes-v2.yml
+          git commit -m "fix: preserve audit history and event causality"
+          git push
