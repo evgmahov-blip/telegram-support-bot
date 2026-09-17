@@ -1,33 +1,15 @@
 import { Context } from './interfaces';
-import * as db from './db';
+import { ISupportee } from './db';
 import * as team from './team';
 import * as middleware from './middleware';
+import { resolveTicketFromReply } from './ticket-resolution';
 
-/**
- * Resolve the ticket represented by a replied staff-chat message.
- * Message-id correlation is authoritative; ticket text parsing is only a
- * compatibility fallback for messages that predate internalIds tracking.
- */
-async function resolveRepliedTicket(ctx: Context): Promise<db.ISupportee | null> {
-  const reply = ctx.message?.reply_to_message;
-  if (!reply) return null;
-
-  const internalId = (reply as typeof reply & { message_id?: number }).message_id;
-  if (typeof internalId === 'number') {
-    const correlated = await db.getTicketByInternalId(internalId);
-    if (correlated) return correlated;
-  }
-
-  const text = reply.text || reply.caption || '';
-  const match = text.match(/#T0*(\d+)\b/);
-  if (!match) return null;
-
-  const ticketId = parseInt(match[1], 10);
-  if (!Number.isSafeInteger(ticketId) || ticketId <= 0) return null;
-  return await db.getTicketById(ticketId, null);
+async function resolveRepliedTicket(ctx: Context): Promise<ISupportee | null> {
+  const resolved = await resolveTicketFromReply(ctx, null);
+  return resolved?.ticket ?? null;
 }
 
-async function requireRepliedTicket(ctx: Context): Promise<db.ISupportee | null> {
+async function requireRepliedTicket(ctx: Context): Promise<ISupportee | null> {
   const ticket = await resolveRepliedTicket(ctx);
   if (!ticket) {
     await middleware.reply(ctx, 'Reply to a ticket message.');
