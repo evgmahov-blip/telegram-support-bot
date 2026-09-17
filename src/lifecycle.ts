@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
 import type { Addon } from './interfaces';
 import * as eventsApi from './events-api';
+import * as webhooks from './webhooks';
 import * as log from './logger';
 
 export type ManagedTimer = ReturnType<typeof setTimeout> | ReturnType<typeof setInterval>;
@@ -35,6 +36,15 @@ export function createGracefulShutdown(
           errors.push(result.reason);
           log.error('Addon shutdown failed:', result.reason);
         }
+      }
+
+      // Compatibility push webhooks are intentionally off the request path,
+      // but accepted deliveries should still get a chance to finish on SIGTERM.
+      try {
+        await webhooks.drainWebhooks();
+      } catch (err) {
+        errors.push(err);
+        log.error('Webhook drain failed:', err);
       }
 
       try {
