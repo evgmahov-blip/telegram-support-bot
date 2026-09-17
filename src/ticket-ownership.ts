@@ -1,0 +1,51 @@
+import { ISupportee, Supportee } from './db';
+
+const ACTIVE_STATUSES = ['open', 'waiting_user'] as const;
+
+/**
+ * Atomically take an unowned active ticket. Taking a ticket already owned by
+ * the same agent is idempotent; a ticket owned by somebody else is untouched.
+ */
+export async function takeTicket(
+  ticketId: number,
+  agentId: string,
+): Promise<ISupportee | null> {
+  const ticket = await Supportee.findOneAndUpdate(
+    {
+      ticketId,
+      status: { $in: ACTIVE_STATUSES },
+      $or: [
+        { assigned_to: null },
+        { assigned_to: agentId },
+      ],
+    },
+    { $set: { assigned_to: agentId } },
+    { new: true },
+  );
+
+  return ticket as ISupportee | null;
+}
+
+/**
+ * Atomically transfer an active ticket. When expectedOwner is supplied the
+ * transfer succeeds only if ownership has not changed since it was checked.
+ */
+export async function transferTicket(
+  ticketId: number,
+  targetAgentId: string,
+  expectedOwner?: string,
+): Promise<ISupportee | null> {
+  const query: Record<string, unknown> = {
+    ticketId,
+    status: { $in: ACTIVE_STATUSES },
+  };
+  if (expectedOwner !== undefined) query.assigned_to = expectedOwner;
+
+  const ticket = await Supportee.findOneAndUpdate(
+    query,
+    { $set: { assigned_to: targetAgentId } },
+    { new: true },
+  );
+
+  return ticket as ISupportee | null;
+}
