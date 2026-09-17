@@ -15,7 +15,9 @@ jest.mock('../src/middleware', () => ({
 jest.mock('../src/db', () => ({
   getTicketByUserId: mockGetTicketByUserId,
   addTicketMessage: mockAddTicketMessage,
+  persistTicketMessage: jest.fn().mockResolvedValue(undefined),
   recordAnalyticsEvent: mockRecordAnalyticsEvent,
+  recordAnalyticsEventBestEffort: jest.fn(),
   addIdAndName: jest.fn().mockResolvedValue(undefined),
 }));
 

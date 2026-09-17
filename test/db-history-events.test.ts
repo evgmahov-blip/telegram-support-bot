@@ -85,6 +85,35 @@ describe('append-only ticket history and event log', () => {
     expect(mockEventSave).toHaveBeenCalledTimes(1);
   });
 
+  it('persists authoritative history without emitting the replay mirror', async () => {
+    await db.persistTicketMessage(8, 'user', '123', 'durable first');
+    expect(mockMessageSave).toHaveBeenCalledTimes(1);
+    expect(mockEventSave).not.toHaveBeenCalled();
+  });
+
+  it('serializes best-effort and acknowledged appends in call order', async () => {
+    let releaseFirst: (() => void) | undefined;
+    mockEventSave
+      .mockImplementationOnce(() => new Promise<void>((resolve) => { releaseFirst = resolve; }))
+      .mockResolvedValueOnce(undefined);
+
+    db.recordAnalyticsEventBestEffort('ticket.message.staff', 7, 'agent-1');
+    const replied = db.recordAnalyticsEvent('ticket.replied', 7, 'agent-1');
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(mockEventSave).toHaveBeenCalledTimes(1);
+    expect(capturedEvents.map((event) => event.type)).toEqual(['ticket.message.staff']);
+
+    releaseFirst?.();
+    await replied;
+
+    expect(mockEventSave).toHaveBeenCalledTimes(2);
+    expect(capturedEvents.map((event) => event.type)).toEqual([
+      'ticket.message.staff',
+      'ticket.replied',
+    ]);
+  });
+
   it('keeps LLM context bounded at read time', async () => {
     const q: any = {};
     q.sort = jest.fn(() => q);
@@ -169,7 +198,7 @@ describe('append-only ticket history and event log', () => {
       },
     ], { ordered: true });
     expect(mockCounterFindOneAndUpdate).toHaveBeenCalledWith(
-      expect.objectContaining({ _id: expect.stringContaining('legacyEventBackfillV2') }),
+      expect.objectContaining({ _id: expect.stringContaining('legacyEventBackfillV3') }),
       { $set: { seq: 1 } },
       { upsert: true, new: true, setDefaultsOnInsert: true },
     );

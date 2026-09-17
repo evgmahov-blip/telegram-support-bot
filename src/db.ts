@@ -211,7 +211,7 @@ export const getNextTicketId = async (): Promise<number> => {
 
 const MAX_EVENT_APPEND_RETRIES = 25;
 const LEGACY_EVENT_BATCH_SIZE = 1000;
-const LEGACY_EVENT_BACKFILL_MARKER = 'legacyEventBackfillV2';
+const LEGACY_EVENT_BACKFILL_MARKER = 'legacyEventBackfillV3';
 const LEGACY_EVENT_TYPES: Record<string, string> = {
   ticket_created: 'ticket.created',
   ticket_closed: 'ticket.closed',
@@ -219,6 +219,7 @@ const LEGACY_EVENT_TYPES: Record<string, string> = {
   staff_reply: 'ticket.replied',
   first_reply: 'ticket.replied',
   internal_note: 'ticket.note_added',
+  staff_file_reply: 'ticket.replied',
 };
 const LEGACY_EVENT_TYPE_NAMES = Object.keys(LEGACY_EVENT_TYPES);
 
@@ -314,7 +315,15 @@ export async function backfillLegacyEvents(): Promise<number> {
   return migrated;
 }
 
-function recordAnalyticsEventBestEffort(
+let eventTail: Promise<unknown> = Promise.resolve();
+
+function enqueueEventAppend<T>(fn: () => Promise<T>): Promise<T> {
+  const run = eventTail.then(fn, fn);
+  eventTail = run.catch(() => {});
+  return run;
+}
+
+export function recordAnalyticsEventBestEffort(
   type: string,
   ticketId: number,
   agent_id: string | null = null,
@@ -605,7 +614,7 @@ export async function getAllUsers(): Promise<Array<{ userid: string; messenger: 
 
 // --- Ticket Message methods (append-only audit history + bounded read window) ---
 
-export async function addTicketMessage(
+export async function persistTicketMessage(
   ticketId: number,
   sender: 'user' | 'staff' | 'ai',
   sender_id: string,
@@ -615,11 +624,18 @@ export async function addTicketMessage(
   try {
     await msg.save();
   } catch (err) {
-    log.error('DB addTicketMessage error:', err);
+    log.error('DB persistTicketMessage error:', err);
     throw err;
   }
+}
 
-  // History persistence is authoritative here; the mirrored event is best-effort.
+export async function addTicketMessage(
+  ticketId: number,
+  sender: 'user' | 'staff' | 'ai',
+  sender_id: string,
+  text: string,
+): Promise<void> {
+  await persistTicketMessage(ticketId, sender, sender_id, text);
   recordAnalyticsEventBestEffort(`ticket.message.${sender}`, ticketId, sender_id || null);
 }
 
@@ -660,7 +676,7 @@ export async function getTicketMessageHistory(
 
 // --- Analytics / event log methods ---
 
-export async function recordAnalyticsEvent(
+async function appendAnalyticsEvent(
   type: string,
   ticketId: number,
   agent_id: string | null = null,
@@ -699,6 +715,15 @@ export async function recordAnalyticsEvent(
     : new Error('Failed to append analytics event after sequence retries');
   log.error('DB recordAnalyticsEvent error:', error);
   throw error;
+}
+
+export async function recordAnalyticsEvent(
+  type: string,
+  ticketId: number,
+  agent_id: string | null = null,
+  metadata: Record<string, any> = {},
+): Promise<IAnalyticsEvent> {
+  return enqueueEventAppend(() => appendAnalyticsEvent(type, ticketId, agent_id, metadata));
 }
 
 export async function getEventsSince(
