@@ -35,124 +35,81 @@ jobs:
                   raise SystemExit(f'{path}: missing marker {old[:120]!r}')
               p.write_text(text.replace(old, new, 1))
 
-          # Canonical taxonomy for every writer. Bump marker so deployments that
-          # already completed V2 also normalize events written after that cutover.
-          replace_once(
-              'src/db.ts',
-              "const LEGACY_EVENT_BACKFILL_MARKER = 'legacyEventBackfillV2';",
-              "const LEGACY_EVENT_BACKFILL_MARKER = 'legacyEventBackfillV3';",
-          )
-          replace_once(
-              'src/db.ts',
-              "  internal_note: 'ticket.note_added',\n};",
-              "  internal_note: 'ticket.note_added',\n  staff_file_reply: 'ticket.replied',\n};",
-          )
+          replace_once('src/db.ts', "const LEGACY_EVENT_BACKFILL_MARKER = 'legacyEventBackfillV2';", "const LEGACY_EVENT_BACKFILL_MARKER = 'legacyEventBackfillV3';")
+          replace_once('src/db.ts', "  internal_note: 'ticket.note_added',\n};", "  internal_note: 'ticket.note_added',\n  staff_file_reply: 'ticket.replied',\n};")
 
-          # Serialize every in-process event append. Best-effort callers enqueue
-          # without awaiting; acknowledged callers queue behind prior events.
           replace_once(
               'src/db.ts',
               "function recordAnalyticsEventBestEffort(\n  type: string,\n  ticketId: number,\n  agent_id: string | null = null,\n  metadata: Record<string, any> = {},\n): void {\n  void recordAnalyticsEvent(type, ticketId, agent_id, metadata).catch((err) => {\n    log.error(`Event append failed for ${type} #T${ticketId}:`, err);\n  });\n}",
               "let eventTail: Promise<unknown> = Promise.resolve();\n\nfunction enqueueEventAppend<T>(fn: () => Promise<T>): Promise<T> {\n  const run = eventTail.then(fn, fn);\n  eventTail = run.catch(() => {});\n  return run;\n}\n\nexport function recordAnalyticsEventBestEffort(\n  type: string,\n  ticketId: number,\n  agent_id: string | null = null,\n  metadata: Record<string, any> = {},\n): void {\n  void recordAnalyticsEvent(type, ticketId, agent_id, metadata).catch((err) => {\n    log.error(`Event append failed for ${type} #T${ticketId}:`, err);\n  });\n}",
           )
 
-          # Split authoritative ticket-history persistence from its event mirror.
           replace_once(
               'src/db.ts',
               "export async function addTicketMessage(\n  ticketId: number,\n  sender: 'user' | 'staff' | 'ai',\n  sender_id: string,\n  text: string,\n): Promise<void> {\n  const msg = new TicketMessage({ ticketId, sender, sender_id, text });\n  try {\n    await msg.save();\n  } catch (err) {\n    log.error('DB addTicketMessage error:', err);\n    throw err;\n  }\n\n  // History persistence is authoritative here; the mirrored event is best-effort.\n  recordAnalyticsEventBestEffort(`ticket.message.${sender}`, ticketId, sender_id || null);\n}",
               "export async function persistTicketMessage(\n  ticketId: number,\n  sender: 'user' | 'staff' | 'ai',\n  sender_id: string,\n  text: string,\n): Promise<void> {\n  const msg = new TicketMessage({ ticketId, sender, sender_id, text });\n  try {\n    await msg.save();\n  } catch (err) {\n    log.error('DB persistTicketMessage error:', err);\n    throw err;\n  }\n}\n\nexport async function addTicketMessage(\n  ticketId: number,\n  sender: 'user' | 'staff' | 'ai',\n  sender_id: string,\n  text: string,\n): Promise<void> {\n  await persistTicketMessage(ticketId, sender, sender_id, text);\n  recordAnalyticsEventBestEffort(`ticket.message.${sender}`, ticketId, sender_id || null);\n}",
           )
 
-          # Keep the existing retrying append implementation private and queue the
-          # public acknowledged API around it.
           replace_once(
               'src/db.ts',
               "export async function recordAnalyticsEvent(\n  type: string,\n  ticketId: number,\n  agent_id: string | null = null,\n  metadata: Record<string, any> = {},\n): Promise<IAnalyticsEvent> {",
               "async function appendAnalyticsEvent(\n  type: string,\n  ticketId: number,\n  agent_id: string | null = null,\n  metadata: Record<string, any> = {},\n): Promise<IAnalyticsEvent> {",
           )
-          marker = "\nexport async function getEventsSince("
           p = Path('src/db.ts')
           text = p.read_text()
+          marker = "\nexport async function getEventsSince("
+          wrapper = "\nexport async function recordAnalyticsEvent(\n  type: string,\n  ticketId: number,\n  agent_id: string | null = null,\n  metadata: Record<string, any> = {},\n): Promise<IAnalyticsEvent> {\n  return enqueueEventAppend(() => appendAnalyticsEvent(type, ticketId, agent_id, metadata));\n}\n"
           if marker not in text:
               raise SystemExit('src/db.ts: getEventsSince marker missing')
-          wrapper = "\nexport async function recordAnalyticsEvent(\n  type: string,\n  ticketId: number,\n  agent_id: string | null = null,\n  metadata: Record<string, any> = {},\n): Promise<IAnalyticsEvent> {\n  return enqueueEventAppend(() => appendAnalyticsEvent(type, ticketId, agent_id, metadata));\n}\n"
           p.write_text(text.replace(marker, wrapper + marker, 1))
 
-          # User messages are durably persisted before attempting the staff-chat
-          # delivery. Only the replay-log mirror waits until successful delivery.
-          replace_once(
-              'src/users.ts',
-              "  // Legacy push webhooks remain for compatibility. The canonical persisted\n",
-              "  await db.persistTicketMessage(ticket.ticketId, 'user', ctx.from.id.toString(), ctx.message.text);\n\n  // Legacy push webhooks remain for compatibility. The canonical persisted\n",
-          )
-          replace_once(
-              'src/users.ts',
-              "  await db.addTicketMessage(ticket.ticketId, 'user', ctx.from.id.toString(), ctx.message.text);\n\n  // Category groups remain internal staff surfaces.",
-              "  db.recordAnalyticsEventBestEffort('ticket.message.user', ticket.ticketId, ctx.from.id.toString());\n\n  // Category groups remain internal staff surfaces.",
-          )
-          replace_once(
-              'src/users.ts',
-              "    const messageId = await sendMessage(\n      config.staffchat_id,",
-              "    await db.persistTicketMessage(ticket.ticketId, 'user', ctx.from.id.toString(), ctx.message.text);\n\n    const messageId = await sendMessage(\n      config.staffchat_id,",
-          )
-          replace_once(
-              'src/users.ts',
-              "    await db.addTicketMessage(ticket.ticketId, 'user', ctx.from.id.toString(), ctx.message.text);\n\n    if (ctx.session.group",
-              "    db.recordAnalyticsEventBestEffort('ticket.message.user', ticket.ticketId, ctx.from.id.toString());\n\n    if (ctx.session.group",
-          )
+          replace_once('src/users.ts', "  // Legacy push webhooks remain for compatibility. The canonical persisted\n", "  await db.persistTicketMessage(ticket.ticketId, 'user', ctx.from.id.toString(), ctx.message.text);\n\n  // Legacy push webhooks remain for compatibility. The canonical persisted\n")
+          replace_once('src/users.ts', "  await db.addTicketMessage(ticket.ticketId, 'user', ctx.from.id.toString(), ctx.message.text);\n\n  // Category groups remain internal staff surfaces.", "  db.recordAnalyticsEventBestEffort('ticket.message.user', ticket.ticketId, ctx.from.id.toString());\n\n  // Category groups remain internal staff surfaces.")
+          replace_once('src/users.ts', "    const messageId = await sendMessage(\n      config.staffchat_id,", "    await db.persistTicketMessage(ticket.ticketId, 'user', ctx.from.id.toString(), ctx.message.text);\n\n    const messageId = await sendMessage(\n      config.staffchat_id,")
+          replace_once('src/users.ts', "    await db.addTicketMessage(ticket.ticketId, 'user', ctx.from.id.toString(), ctx.message.text);\n\n    if (ctx.session.group", "    db.recordAnalyticsEventBestEffort('ticket.message.user', ticket.ticketId, ctx.from.id.toString());\n\n    if (ctx.session.group")
 
-          replace_once(
-              'src/team.ts',
-              "await db.recordAnalyticsEvent('internal_note', ticketId, ctx.from.id.toString());",
-              "await db.recordAnalyticsEvent('ticket.note_added', ticketId, ctx.from.id.toString());",
-          )
-          replace_once(
-              'src/files.ts',
-              "await db.recordAnalyticsEvent('staff_file_reply', ticket.ticketId, actorId, { type });",
-              "await db.recordAnalyticsEvent('ticket.replied', ticket.ticketId, actorId, { kind: 'file', type });",
-          )
+          replace_once('src/team.ts', "await db.recordAnalyticsEvent('internal_note', ticketId, ctx.from.id.toString());", "await db.recordAnalyticsEvent('ticket.note_added', ticketId, ctx.from.id.toString());")
+          replace_once('src/files.ts', "await db.recordAnalyticsEvent('staff_file_reply', ticket.ticketId, actorId, { type });", "await db.recordAnalyticsEvent('ticket.replied', ticket.ticketId, actorId, { kind: 'file', type });")
 
-          # Focused regression coverage: raw persistence has no event side-effect;
-          # best-effort followed by acknowledged append preserves call order.
           p = Path('test/db-history-events.test.ts')
           text = p.read_text()
-          insertion = """
-
-  it('persists authoritative history without emitting the replay mirror', async () => {
-    await db.persistTicketMessage(8, 'user', '123', 'durable first');
-    expect(mockMessageSave).toHaveBeenCalledTimes(1);
-    expect(mockEventSave).not.toHaveBeenCalled();
-  });
-
-  it('serializes best-effort and acknowledged appends in call order', async () => {
-    let releaseFirst: (() => void) | undefined;
-    mockEventSave
-      .mockImplementationOnce(() => new Promise<void>((resolve) => { releaseFirst = resolve; }))
-      .mockResolvedValueOnce(undefined);
-
-    db.recordAnalyticsEventBestEffort('ticket.message.staff', 7, 'agent-1');
-    const replied = db.recordAnalyticsEvent('ticket.replied', 7, 'agent-1');
-    await new Promise((resolve) => setImmediate(resolve));
-
-    expect(mockEventSave).toHaveBeenCalledTimes(1);
-    expect(capturedEvents.map((event) => event.type)).toEqual(['ticket.message.staff']);
-
-    releaseFirst?.();
-    await replied;
-
-    expect(mockEventSave).toHaveBeenCalledTimes(2);
-    expect(capturedEvents.map((event) => event.type)).toEqual([
-      'ticket.message.staff',
-      'ticket.replied',
-    ]);
-  });
-"""
+          lines = [
+              '',
+              "  it('persists authoritative history without emitting the replay mirror', async () => {",
+              "    await db.persistTicketMessage(8, 'user', '123', 'durable first');",
+              '    expect(mockMessageSave).toHaveBeenCalledTimes(1);',
+              '    expect(mockEventSave).not.toHaveBeenCalled();',
+              '  });',
+              '',
+              "  it('serializes best-effort and acknowledged appends in call order', async () => {",
+              '    let releaseFirst: (() => void) | undefined;',
+              '    mockEventSave',
+              '      .mockImplementationOnce(() => new Promise<void>((resolve) => { releaseFirst = resolve; }))',
+              '      .mockResolvedValueOnce(undefined);',
+              '',
+              "    db.recordAnalyticsEventBestEffort('ticket.message.staff', 7, 'agent-1');",
+              "    const replied = db.recordAnalyticsEvent('ticket.replied', 7, 'agent-1');",
+              '    await new Promise((resolve) => setImmediate(resolve));',
+              '',
+              '    expect(mockEventSave).toHaveBeenCalledTimes(1);',
+              "    expect(capturedEvents.map((event) => event.type)).toEqual(['ticket.message.staff']);",
+              '',
+              '    releaseFirst?.();',
+              '    await replied;',
+              '',
+              '    expect(mockEventSave).toHaveBeenCalledTimes(2);',
+              '    expect(capturedEvents.map((event) => event.type)).toEqual([',
+              "      'ticket.message.staff',",
+              "      'ticket.replied',",
+              '    ]);',
+              '  });',
+              '',
+          ]
           anchor = "\n  it('keeps LLM context bounded at read time', async () => {"
           if anchor not in text:
               raise SystemExit('test/db-history-events.test.ts: insertion anchor missing')
-          p.write_text(text.replace(anchor, insertion + anchor, 1))
+          p.write_text(text.replace(anchor, '\n'.join(lines) + anchor, 1))
 
-          # Assert the canonical file-reply event contract.
           p = Path('test/files.test.ts')
           text = p.read_text()
           old = "      expect(mockAddIdAndName).not.toHaveBeenCalled();\n    });"
@@ -161,7 +118,6 @@ jobs:
               raise SystemExit('test/files.test.ts: assertion anchor missing')
           p.write_text(text.replace(old, new, 1))
 
-          # Document the causal-order guarantee precisely.
           p = Path('docs/EVENTS.md')
           text = p.read_text()
           if 'In-process event appends are serialized' not in text:
