@@ -1,6 +1,8 @@
 const mockGetTicketByInternalId = jest.fn();
 const mockGetTicketById = jest.fn();
 const mockRecordAnalyticsEvent = jest.fn().mockResolvedValue(undefined);
+const mockAddInternalNote = jest.fn().mockResolvedValue(undefined);
+const mockGetInternalNotes = jest.fn().mockResolvedValue([]);
 const mockTakeTicketCommand = jest.fn();
 const mockTransferTicketCommand = jest.fn();
 const mockWaitingUserCommand = jest.fn();
@@ -12,12 +14,17 @@ const mockResolveQueueName = jest.fn((name: string) =>
   ['general', 'billing', 'infra'].find((q) => q === name.toLowerCase()) ?? null
 );
 const mockMoveTicketToQueue = jest.fn().mockResolvedValue(true);
+const mockSetPriority = jest.fn();
+const mockGetActiveManageableTicket = jest.fn();
+const mockStaffChat = jest.fn().mockResolvedValue(undefined);
 const mockReply = jest.fn().mockResolvedValue(undefined);
 
 jest.mock('../src/db', () => ({
   getTicketByInternalId: mockGetTicketByInternalId,
   getTicketById: mockGetTicketById,
   recordAnalyticsEvent: mockRecordAnalyticsEvent,
+  addInternalNote: mockAddInternalNote,
+  getInternalNotes: mockGetInternalNotes,
 }));
 
 jest.mock('../src/team', () => ({
@@ -35,15 +42,39 @@ jest.mock('../src/ticket-queue', () => ({
   moveTicketToQueue: mockMoveTicketToQueue,
 }));
 
-jest.mock('../src/middleware', () => ({
-  reply: mockReply,
+jest.mock('../src/ticket-metadata', () => ({
+  setPriority: mockSetPriority,
+  getActiveManageableTicket: mockGetActiveManageableTicket,
 }));
 
-import { Context } from '../src/interfaces';
+jest.mock('../src/staff', () => ({
+  chat: mockStaffChat,
+}));
+
+jest.mock('../src/cache', () => ({
+  __esModule: true,
+  default: {
+    config: {
+      parse_mode: 'MarkdownV2',
+      language: { ticketClosedError: 'Ticket is closed.' },
+    },
+    staffMembers: new Map([
+      ['agent-1', { telegram_id: 'agent-1', role: 'agent', name: 'Agent One' }],
+    ]),
+  },
+}));
+
+jest.mock('../src/middleware', () => ({
+  reply: mockReply,
+  strictEscape: jest.fn((value: string) => value),
+}));
+
+import { Context, TicketPriority } from '../src/interfaces';
 import * as commands from '../src/most-commands';
 
 const makeCtx = (reply: Record<string, unknown>, match?: string): Context => ({
   message: {
+    text: '',
     reply_to_message: reply,
   },
   session: { admin: true },
@@ -62,6 +93,9 @@ describe('MOST ticket commands', () => {
       ['general', 'billing', 'infra'].find((q) => q === name.toLowerCase()) ?? null
     );
     mockMoveTicketToQueue.mockResolvedValue(true);
+    mockSetPriority.mockResolvedValue({ ticketId: 19, priority: 'high' });
+    mockGetActiveManageableTicket.mockResolvedValue({ ticketId: 20, status: 'open' });
+    mockGetInternalNotes.mockResolvedValue([]);
   });
 
   it('resolves a replied ticket by Telegram message id before parsing text', async () => {
@@ -174,13 +208,78 @@ describe('MOST ticket commands', () => {
     );
   });
 
-  it('/queue rejects unknown queues', async () => {
-    mockGetTicketByInternalId.mockResolvedValue({ ticketId: 18, assigned_to: 'agent-1' });
-    const ctx = makeCtx({ message_id: 503, text: '', caption: '' }, 'unknown');
+  it('/priority uses owner/state CAS and records an audit event', async () => {
+    mockGetTicketByInternalId.mockResolvedValue({
+      ticketId: 19,
+      assigned_to: 'agent-1',
+      priority: TicketPriority.NORMAL,
+      status: 'open',
+    });
+    const ctx = makeCtx({ message_id: 504, text: '', caption: '' }, 'high');
 
-    await commands.queueCommand(ctx);
+    await commands.priorityCommand(ctx);
 
-    expect(mockMoveTicketToQueue).not.toHaveBeenCalled();
-    expect(mockReply).toHaveBeenCalledWith(ctx, 'Unknown queue. Available: general, billing, infra');
+    expect(mockSetPriority).toHaveBeenCalledWith(19, TicketPriority.HIGH, 'agent-1');
+    expect(mockRecordAnalyticsEvent).toHaveBeenCalledWith(
+      'ticket.priority_changed',
+      19,
+      'agent-1',
+      { from: TicketPriority.NORMAL, to: TicketPriority.HIGH },
+    );
+  });
+
+  it('/note writes only after the active owner guard and never echoes note text', async () => {
+    mockGetTicketByInternalId.mockResolvedValue({ ticketId: 20, assigned_to: 'agent-1', status: 'open' });
+    const ctx = makeCtx({ message_id: 505, text: '', caption: '' }, 'secret internal note');
+
+    await commands.noteCommand(ctx);
+
+    expect(mockGetActiveManageableTicket).toHaveBeenCalledWith(20, 'agent-1');
+    expect(mockAddInternalNote).toHaveBeenCalledWith(20, 'agent-1', 'secret internal note');
+    expect(mockReply).toHaveBeenCalledWith(ctx, 'Internal note added to #T000020.');
+    expect(mockReply.mock.calls.some((call) => String(call[1]).includes('secret internal note'))).toBe(false);
+  });
+
+  it('/notes is owner-scoped and stays inside the staff reply surface', async () => {
+    mockGetTicketByInternalId.mockResolvedValue({ ticketId: 20, assigned_to: 'agent-1', status: 'open' });
+    mockGetInternalNotes.mockResolvedValue([
+      { author_id: 'agent-1', text: 'internal only' },
+    ]);
+    const ctx = makeCtx({ message_id: 506, text: '', caption: '' });
+
+    await commands.notesCommand(ctx);
+
+    expect(mockGetInternalNotes).toHaveBeenCalledWith(20);
+    expect(mockReply).toHaveBeenCalledWith(
+      ctx,
+      'Internal notes #T000020:\n• Agent One: internal only',
+      { parse_mode: 'MarkdownV2' },
+    );
+  });
+
+  it('sends a canned response through the normal staff reply path', async () => {
+    mockGetTicketByInternalId.mockResolvedValue({ ticketId: 21, assigned_to: 'agent-1', status: 'open' });
+    const ctx = makeCtx({ message_id: 507, text: '', caption: '' });
+
+    await commands.cannedResponseCommand(ctx, 'hello', 'Hello from support');
+
+    expect(ctx.message.text).toBe('Hello from support');
+    expect(mockStaffChat).toHaveBeenCalledWith(ctx);
+    expect(mockRecordAnalyticsEvent).toHaveBeenCalledWith(
+      'ticket.canned_response',
+      21,
+      'agent-1',
+      { key: 'hello' },
+    );
+  });
+
+  it('never sends a canned response to a closed ticket', async () => {
+    mockGetTicketByInternalId.mockResolvedValue({ ticketId: 22, assigned_to: 'agent-1', status: 'closed' });
+    const ctx = makeCtx({ message_id: 508, text: '', caption: '' });
+
+    await commands.cannedResponseCommand(ctx, 'hello', 'Hello from support');
+
+    expect(mockStaffChat).not.toHaveBeenCalled();
+    expect(mockReply).toHaveBeenCalledWith(ctx, 'Ticket is closed.');
   });
 });
