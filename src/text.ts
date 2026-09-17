@@ -3,6 +3,7 @@ import cache from './cache';
 import * as staff from './staff';
 import * as users from './users';
 import * as middleware from './middleware';
+import * as ticketState from './ticket-state';
 import { Addon, Context } from './interfaces';
 import { ISupportee } from './db';
 
@@ -21,7 +22,7 @@ const isMessageInCategories = (message: string): boolean => {
 /**
  * Determines if a category keyboard should be shown.
  *
- * @param ctx - The message context.
+ * @param ctx - The bot context.
  * @returns True if the keyboard should be shown, false otherwise.
  */
 const shouldReplyWithCategoryKeyboard = (ctx: Context): boolean => {
@@ -84,11 +85,19 @@ export async function ticketHandler(bot: Addon, ctx: Context): Promise<ISupporte
       await db.addNewTicket(userId, session.groupCategory, messenger);
       ticket = await db.getTicketByUserId(userId, session.groupCategory);
     } else if (ticket.status === 'waiting_user') {
-      // User response resumes the same ticket atomically.
-      const resumed = await db.transitionTicketStatus(ticket.ticketId, 'open');
+      // User response resumes only WAITING_USER -> OPEN. A concurrent close wins.
+      const resumed = await ticketState.resumeWaitingTicket(ticket.ticketId);
       if (resumed) {
         ticket = resumed;
         await db.recordAnalyticsEvent('ticket.resumed', ticket.ticketId, null, { reason: 'user_reply' });
+      } else {
+        // State changed after the initial read (for example, staff closed it).
+        // Resolve the latest state without resurrecting a closed ticket.
+        ticket = await db.getTicketById(ticket.ticketId, session.groupCategory);
+        if (ticket?.status === 'closed') {
+          await db.addNewTicket(userId, session.groupCategory, messenger);
+          ticket = await db.getTicketByUserId(userId, session.groupCategory);
+        }
       }
     } else if (cache.config.ticket_per_message) {
       // ticket_per_message (#172): every message gets an additional ticket with a fresh id;
