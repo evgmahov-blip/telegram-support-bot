@@ -20,7 +20,6 @@ class TelegramAddon implements Addon {
     this.bot = new Bot<BotContext>(token);
     const throttler = apiThrottler();
     this.bot.api.config.use(throttler);
-    // Defer bot info init to avoid unhandled promise in constructor
     this.initBotInfo();
   }
 
@@ -45,7 +44,6 @@ class TelegramAddon implements Addon {
     return TelegramAddon.instance;
   }
 
-  // --- Session Initialization ---
   initSession() {
     const initial = (): SessionData => ({
       admin: null,
@@ -56,14 +54,11 @@ class TelegramAddon implements Addon {
       groupTag: '',
       group: '',
       groupAdmin: null,
-      // Kept for SessionData backward compatibility. grammY does not read this field.
       getSessionKey: () => null,
     });
 
     return session({
       initial,
-      // Staff members in the same Telegram group must never share mutable session state.
-      // Key by user + chat; private chats naturally become user + private-chat.
       getSessionKey: (ctx: BotContext) => {
         if (!ctx.from) return undefined;
         return `${ctx.from.id}:${ctx.chat?.id ?? ctx.from.id}`;
@@ -71,10 +66,6 @@ class TelegramAddon implements Addon {
     });
   }
 
-  /**
-   * Confines staff chat traffic to the configured forum topic (staffchat_thread_id, #183):
-   * every message sent to the staff chat carries message_thread_id unless the caller set one.
-   */
   private withThread(chatId: string | number, options: Record<string, unknown> = {}): Record<string, unknown> {
     const threadId = cache.config.staffchat_thread_id;
     if (
@@ -87,12 +78,10 @@ class TelegramAddon implements Addon {
     return options;
   }
 
-  // --- Methods required by the Addon interface ---
   async sendMessage(chatId: string | number, text: string, options: Record<string, unknown> = {}): Promise<string | null> {
     options.disable_web_page_preview = true as unknown as string;
     if (typeof chatId !== 'string' && typeof chatId !== 'number') return null;
     options = this.withThread(chatId, options);
-    // Telegram only supports HTML and MarkdownV2 — convert deprecated Markdown to HTML
     const validModes = ['HTML', 'MarkdownV2'];
     if (options?.parse_mode === 'Markdown') {
       options.parse_mode = 'HTML';
@@ -108,27 +97,38 @@ class TelegramAddon implements Addon {
     document: unknown,
     other?: Record<string, unknown>,
     signal?: AbortSignal,
-  ): Promise<void> {
+  ): Promise<string | null> {
     try {
-      await this.bot.api.sendDocument(chatId, document as never, this.withThread(chatId, other) as never, signal as any);
+      const response = await this.bot.api.sendDocument(
+        chatId,
+        document as never,
+        this.withThread(chatId, other) as never,
+        signal as any,
+      );
+      return response?.message_id?.toString() ?? null;
     } catch (err) {
       log.error('Failed to send document:', err);
+      return null;
     }
   }
 
-  async sendPhoto(chatId: string | number, photo: unknown, options?: Record<string, unknown>): Promise<void> {
+  async sendPhoto(chatId: string | number, photo: unknown, options?: Record<string, unknown>): Promise<string | null> {
     try {
-      await this.bot.api.sendPhoto(chatId, photo as never, this.withThread(chatId, options) as never);
+      const response = await this.bot.api.sendPhoto(chatId, photo as never, this.withThread(chatId, options) as never);
+      return response?.message_id?.toString() ?? null;
     } catch (err) {
       log.error('Failed to send photo:', err);
+      return null;
     }
   }
 
-  async sendVideo(chatId: string | number, video: unknown, options?: Record<string, unknown>): Promise<void> {
+  async sendVideo(chatId: string | number, video: unknown, options?: Record<string, unknown>): Promise<string | null> {
     try {
-      await this.bot.api.sendVideo(chatId, video as never, this.withThread(chatId, options) as never);
+      const response = await this.bot.api.sendVideo(chatId, video as never, this.withThread(chatId, options) as never);
+      return response?.message_id?.toString() ?? null;
     } catch (err) {
       log.error('Failed to send video:', err);
+      return null;
     }
   }
 
@@ -147,12 +147,10 @@ class TelegramAddon implements Addon {
   }
 
   on(filter: string | string[], ...callbacks: ((ctx: Context) => void)[]): void {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (this.bot.on as any)(filter, ...(callbacks.map(cb => (gCtx: never) => cb(gCtx as unknown as Context))));
   };
 
   catch(handler: (error: Error, ctx?: Context) => void): void {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (this.bot.catch as any)((err: Error, gCtx: BotContext | undefined) => handler(err, gCtx as unknown as Context | undefined));
   }
 
@@ -160,14 +158,11 @@ class TelegramAddon implements Addon {
     this.bot.hears(trigger, (gCtx) => callback(gCtx as unknown as Context));
   }
 
-  // --- Start and Configure the Bot ---
   start(): void {
     log.info('Starting Telegram Addon...');
 
-    // Setup session and middleware.
     this.bot.use(this.initSession());
     this.bot.use(async (ctx: BotContext, next) => {
-      // Set messenger type on context for downstream handlers
       const typedCtx = ctx as unknown as Context;
       typedCtx.messenger = Messenger.TELEGRAM;
 
@@ -183,7 +178,6 @@ class TelegramAddon implements Addon {
     const keys = inline.initInline(this);
     registerCommonHandlers(this, keys);
 
-    // Start the Bot.
     this.bot.start();
   }
 }
