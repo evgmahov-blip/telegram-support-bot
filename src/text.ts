@@ -67,18 +67,32 @@ export async function handleText(bot: Addon, ctx: Context, keys: string[][] = []
  */
 export async function ticketHandler(bot: Addon, ctx: Context): Promise<ISupportee | null> {
   const { chat, message, session, messenger } = ctx;
-  // For private chats, check for an existing ticket; otherwise, create one.
+
   if (chat.type === 'private') {
-    let ticket = await db.getTicketByUserId(message.from.id, session.groupCategory);
-    if (!ticket) {
-      await db.add(message.from.id, 'open', session.groupCategory, messenger);
-      ticket = await db.getTicketByUserId(message.from.id, session.groupCategory);
-    } else if (cache.config.ticket_per_message && ticket.status !== 'banned') {
+    const userId = message.from.id;
+
+    // Ban is user/account state, not a ticket lifecycle state.
+    if (await db.checkBan(userId, messenger)) {
+      await middleware.reply(ctx, cache.config.language.banned);
+      return null;
+    }
+
+    let ticket = await db.getTicketByUserId(userId, session.groupCategory);
+
+    // A new user or a message after CLOSED starts a fresh ticket.
+    if (!ticket || ticket.status === 'closed') {
+      await db.addNewTicket(userId, session.groupCategory, messenger);
+      ticket = await db.getTicketByUserId(userId, session.groupCategory);
+    } else if (ticket.status === 'waiting_user') {
+      // User response resumes the same ticket atomically.
+      ticket = await db.transitionTicketStatus(ticket.ticketId, 'open') ?? ticket;
+    } else if (cache.config.ticket_per_message) {
       // ticket_per_message (#172): every message gets an additional ticket with a fresh id;
       // earlier tickets are kept so staff can still reply to them.
-      await db.addNewTicket(message.from.id, session.groupCategory, messenger);
-      ticket = await db.getTicketByUserId(message.from.id, session.groupCategory);
+      await db.addNewTicket(userId, session.groupCategory, messenger);
+      ticket = await db.getTicketByUserId(userId, session.groupCategory);
     }
+
     await users.chat(ctx, message.chat);
     return ticket;
   }
