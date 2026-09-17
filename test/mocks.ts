@@ -22,6 +22,7 @@ jest.mock('../src/cache', () => ({
             prvChatOnly: 'Private chat only',
             back: 'Back',
             msg_sent: 'Message sent',
+            banned: 'Banned',
         },
         dev_mode: false,
         log_level: 'NONE',
@@ -52,12 +53,18 @@ jest.mock('../src/db', () => ({
     closeAll: jest.fn().mockResolvedValue(undefined),
     open: jest.fn((callback, groups) => callback([])),
     add: jest.fn().mockResolvedValue(0),
-    getTicketById: jest.fn().mockResolvedValue({ id: 1, userid: 456, category: 'test' }),
+    addNewTicket: jest.fn().mockResolvedValue(1),
+    getTicketById: jest.fn().mockResolvedValue({ ticketId: 1, id: 1, userid: 456, category: 'test', status: 'open', assigned_to: null }),
     getTicketByInternalId: jest.fn().mockResolvedValue(null),
+    getTicketByUserId: jest.fn().mockResolvedValue(null),
     getByTicketId: jest.fn((ticketId, callback) =>
         callback({ userid: 789, id: { toString: () => ticketId } })
     ),
     reopen: jest.fn(),
+    checkBan: jest.fn().mockResolvedValue(null),
+    banUser: jest.fn().mockResolvedValue(undefined),
+    unbanUser: jest.fn().mockResolvedValue(undefined),
+    transitionTicketStatus: jest.fn().mockResolvedValue({ ticketId: 1, status: 'open' }),
     // New team collaboration & analytics methods
     addTicketMessage: jest.fn().mockResolvedValue(undefined),
     getConversationHistory: jest.fn().mockResolvedValue([]),
@@ -75,6 +82,11 @@ jest.mock('../src/db', () => ({
     setClosedAt: jest.fn().mockResolvedValue(undefined),
     openByTag: jest.fn((callback, tag, category) => callback([])),
     recordCSAT: jest.fn().mockResolvedValue(undefined),
+}));
+
+jest.mock('../src/ticket-ownership', () => ({
+    takeTicket: jest.fn().mockResolvedValue(null),
+    transferTicket: jest.fn().mockResolvedValue(null),
 }));
 
 // --- Mocks for External Modules --- //
