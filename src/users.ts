@@ -88,9 +88,10 @@ async function processTicket(
 
   await db.addTicketMessage(ticket.ticketId, 'user', ctx.from.id.toString(), ctx.message.text);
 
+  // Legacy push webhooks remain for compatibility. The canonical persisted
+  // ticket.created event is emitted exactly once by db.addNewTicket().
   if (!autoReplyInfo) {
     await webhooks.webhooks.ticketCreated(ticket.ticketId, ctx.from.id.toString(), ctx.message.text.substring(0, 200));
-    await db.recordAnalyticsEvent('ticket_created', ticket.ticketId, null);
   }
 
   if (
@@ -145,10 +146,11 @@ async function processTicket(
 async function chat(ctx: Context, chat: { id: string }) {
   const { config } = cache;
 
+  // After-hours is a notification policy, never a data-loss gate. The message
+  // is still persisted and forwarded to the staff queue.
   if (!workflows.isWithinBusinessHours()) {
     const offlineMsg = config.language.businessHoursClosed || 'Our support team is currently offline. We will respond during business hours.';
-    reply(ctx, offlineMsg);
-    return;
+    await reply(ctx, offlineMsg);
   }
 
   cache.userId = ctx.message.from.id;
@@ -168,8 +170,9 @@ async function chat(ctx: Context, chat: { id: string }) {
       await processTicket(ticket, ctx, chat.id, autoReplyInfo);
     }
 
+    const spamUserId = cache.userId;
     setTimeout(() => {
-      delete cache.ticketSent[cache.userId];
+      delete cache.ticketSent[spamUserId];
     }, config.spam_time);
     cache.ticketSent[cache.userId] = 0;
   } else if (sentCount < config.spam_cant_msg) {
