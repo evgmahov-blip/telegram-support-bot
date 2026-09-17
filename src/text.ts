@@ -7,24 +7,12 @@ import * as ticketState from './ticket-state';
 import { Addon, Context } from './interfaces';
 import { ISupportee } from './db';
 
-/**
- * Checks if the given message text exists in the configured categories.
- *
- * @param message - The text of the incoming message.
- * @returns True if the message is one of the categories, false otherwise.
- */
 const isMessageInCategories = (message: string): boolean => {
   const { categories } = cache.config;
   return Array.isArray(categories) && categories.length > 0 &&
     categories.some(category => category.msg.includes(message));
 };
 
-/**
- * Determines if a category keyboard should be shown.
- *
- * @param ctx - The bot context.
- * @returns True if the keyboard should be shown, false otherwise.
- */
 const shouldReplyWithCategoryKeyboard = (ctx: Context): boolean => {
   const { categories } = cache.config;
   return Array.isArray(categories) &&
@@ -34,21 +22,7 @@ const shouldReplyWithCategoryKeyboard = (ctx: Context): boolean => {
     !ctx.session.group;
 };
 
-/**
- * Handles incoming text messages.
- *
- * @param bot - Instance of the Telegram addon.
- * @param ctx - The context of the message.
- * @param keys - Keyboard keys to use for replies.
- */
 export async function handleText(bot: Addon, ctx: Context, keys: string[][] = []): Promise<void> {
-  // Handle private replies via staff
-  if (ctx.session.mode === 'private_reply') {
-    await staff.privateReply(ctx);
-    return;
-  }
-
-  // If conditions met, reply with the category keyboard
   if (shouldReplyWithCategoryKeyboard(ctx)) {
     await middleware.reply(ctx, cache.config.language.services, {
       reply_markup: { keyboard: keys },
@@ -56,23 +30,15 @@ export async function handleText(bot: Addon, ctx: Context, keys: string[][] = []
     return;
   }
 
-  // In all other cases, process the ticket
   await ticketHandler(bot, ctx);
 }
 
-/**
- * Determines whether to forward the message or to handle it as a ticket.
- *
- * @param bot - Instance of the Telegram addon.
- * @param ctx - The context of the message.
- */
 export async function ticketHandler(bot: Addon, ctx: Context): Promise<ISupportee | null> {
   const { chat, message, session, messenger } = ctx;
 
   if (chat.type === 'private') {
     const userId = message.from.id;
 
-    // Ban is user/account state, not a ticket lifecycle state.
     if (await db.checkBan(userId, messenger)) {
       await middleware.reply(ctx, cache.config.language.banned);
       return null;
@@ -80,19 +46,15 @@ export async function ticketHandler(bot: Addon, ctx: Context): Promise<ISupporte
 
     let ticket = await db.getTicketByUserId(userId, session.groupCategory);
 
-    // A new user or a message after CLOSED starts a fresh ticket.
     if (!ticket || ticket.status === 'closed') {
       await db.addNewTicket(userId, session.groupCategory, messenger);
       ticket = await db.getTicketByUserId(userId, session.groupCategory);
     } else if (ticket.status === 'waiting_user') {
-      // User response resumes only WAITING_USER -> OPEN. A concurrent close wins.
       const resumed = await ticketState.resumeWaitingTicket(ticket.ticketId);
       if (resumed) {
         ticket = resumed;
         await db.recordAnalyticsEvent('ticket.resumed', ticket.ticketId, null, { reason: 'user_reply' });
       } else {
-        // State changed after the initial read (for example, staff closed it).
-        // Resolve the latest state without resurrecting a closed ticket.
         ticket = await db.getTicketById(ticket.ticketId, session.groupCategory);
         if (ticket?.status === 'closed') {
           await db.addNewTicket(userId, session.groupCategory, messenger);
@@ -100,8 +62,6 @@ export async function ticketHandler(bot: Addon, ctx: Context): Promise<ISupporte
         }
       }
     } else if (cache.config.ticket_per_message) {
-      // ticket_per_message (#172): every message gets an additional ticket with a fresh id;
-      // earlier tickets are kept so staff can still reply to them.
       await db.addNewTicket(userId, session.groupCategory, messenger);
       ticket = await db.getTicketByUserId(userId, session.groupCategory);
     }
@@ -110,7 +70,6 @@ export async function ticketHandler(bot: Addon, ctx: Context): Promise<ISupporte
     return ticket;
   }
 
-  // For non-private chats, use the staff chat handler.
   await staff.chat(ctx);
   return null;
 }
