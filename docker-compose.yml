@@ -3,11 +3,11 @@ services:
     build: .
     restart: unless-stopped
     volumes:
-      - ./config:/bot/config
+      - ./config:/bot/config:ro
     ports:
       - "127.0.0.1:8080:8080"
     environment:
-      - MONGO_URI=mongodb://mongodb:27017/support
+      - MONGO_URI=${MONGO_URI:?set authenticated MONGO_URI in .env}
       - MONGO_COLLECTION=most_support_tickets
     depends_on:
       mongodb:
@@ -16,13 +16,26 @@ services:
   mongodb:
     image: mongo:8.0
     restart: unless-stopped
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=${MONGO_USERNAME:?set MONGO_USERNAME in .env}
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_PASSWORD:?set MONGO_PASSWORD in .env}
     volumes:
       - ./.tmp/mongodb_data:/data/db
     healthcheck:
-      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      test:
+        - CMD-SHELL
+        - >-
+          mongosh --quiet
+          --username "$$MONGO_INITDB_ROOT_USERNAME"
+          --password "$$MONGO_INITDB_ROOT_PASSWORD"
+          --authenticationDatabase admin
+          --eval "db.adminCommand('ping').ok" | grep 1
       interval: 10s
       timeout: 5s
       retries: 10
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
 
 volumes:
   mongodb_data:
