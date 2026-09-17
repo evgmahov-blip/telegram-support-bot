@@ -6,6 +6,9 @@ const mockFindOne = jest.fn();
 const mockUpdateMany = jest.fn();
 const mockSupporteeFindOneAndUpdate = jest.fn();
 const mockCounterFindOneAndUpdate = jest.fn();
+const mockBanFindOne = jest.fn();
+const mockBanFindOneAndUpdate = jest.fn();
+const mockBanDeleteOne = jest.fn();
 const mockCreate = jest.fn();
 
 /** Minimal chainable, awaitable query like mongoose returns from findOne(). */
@@ -33,12 +36,22 @@ jest.mock('mongoose', () => {
     findOneAndUpdate: mockCounterFindOneAndUpdate,
   };
 
+  const userBanModel = {
+    findOne: mockBanFindOne,
+    findOneAndUpdate: mockBanFindOneAndUpdate,
+    deleteOne: mockBanDeleteOne,
+  };
+
   return {
     __esModule: true,
     default: undefined as unknown, // set below
     connect: jest.fn().mockResolvedValue({}),
     Schema,
-    model: jest.fn((name: string) => name === 'TicketCounter' ? counterModel : supporteeModel),
+    model: jest.fn((name: string) => {
+      if (name === 'TicketCounter') return counterModel;
+      if (name === 'UserBan') return userBanModel;
+      return supporteeModel;
+    }),
     connection: {
       on: jest.fn(),
     },
@@ -89,6 +102,81 @@ describe('Database Module', () => {
     });
   });
 
+  describe('ticket lifecycle', () => {
+    it('moves OPEN to WAITING_USER with an atomic guarded update', async () => {
+      mockSupporteeFindOneAndUpdate.mockResolvedValue({ ticketId: 5, status: 'waiting_user' });
+
+      const result = await db.transitionTicketStatus(5, 'waiting_user');
+
+      expect(result).toEqual({ ticketId: 5, status: 'waiting_user' });
+      expect(mockSupporteeFindOneAndUpdate).toHaveBeenCalledWith(
+        { ticketId: 5, status: { $in: ['open', 'waiting_user'] } },
+        { $set: { status: 'waiting_user', closed_at: null } },
+        { new: true },
+      );
+    });
+
+    it('does not allow CLOSED as a source for WAITING_USER', async () => {
+      mockSupporteeFindOneAndUpdate.mockResolvedValue(null);
+
+      await db.transitionTicketStatus(8, 'waiting_user');
+
+      const filter = mockSupporteeFindOneAndUpdate.mock.calls[0][0];
+      expect(filter.status.$in).not.toContain('closed');
+    });
+
+    it('sets closed_at when closing a ticket', async () => {
+      mockSupporteeFindOneAndUpdate.mockResolvedValue({ ticketId: 9, status: 'closed' });
+
+      await db.transitionTicketStatus(9, 'closed');
+
+      expect(mockSupporteeFindOneAndUpdate).toHaveBeenCalledWith(
+        { ticketId: 9, status: { $in: ['open', 'waiting_user', 'closed'] } },
+        { $set: { status: 'closed', closed_at: expect.any(Date) } },
+        { new: true },
+      );
+    });
+  });
+
+  describe('user bans', () => {
+    it('stores bans outside the ticket collection', async () => {
+      mockBanFindOneAndUpdate.mockResolvedValue({ userid: 'user1', messenger: 'telegram' });
+
+      await db.banUser('user1', 'telegram');
+
+      expect(mockBanFindOneAndUpdate).toHaveBeenCalledWith(
+        { messenger: 'telegram', userid: 'user1' },
+        { $setOnInsert: { messenger: 'telegram', userid: 'user1' } },
+        { upsert: true, new: true, setDefaultsOnInsert: true },
+      );
+      expect(mockSupporteeFindOneAndUpdate).not.toHaveBeenCalled();
+    });
+
+    it('checks the dedicated ban collection first', async () => {
+      const ban = { userid: 'user1', messenger: 'telegram' };
+      mockBanFindOne.mockResolvedValue(ban);
+
+      const result = await db.checkBan('user1', 'telegram');
+
+      expect(result).toBe(ban);
+      expect(mockBanFindOne).toHaveBeenCalledWith({ messenger: 'telegram', userid: 'user1' });
+      expect(mockFindOne).not.toHaveBeenCalled();
+    });
+
+    it('unbans without reopening a ticket', async () => {
+      mockBanDeleteOne.mockResolvedValue({ deletedCount: 1 });
+      mockUpdateMany.mockResolvedValue({ modifiedCount: 0 });
+
+      await db.unbanUser('user1', 'telegram');
+
+      expect(mockBanDeleteOne).toHaveBeenCalledWith({ messenger: 'telegram', userid: 'user1' });
+      expect(mockUpdateMany).toHaveBeenCalledWith(
+        { messenger: 'telegram', userid: 'user1', status: 'banned' },
+        { $set: { status: 'closed', category: null, closed_at: expect.any(Date) } },
+      );
+    });
+  });
+
   describe('getTicketByUserId', () => {
     it('should find ticket by user ID and category', async () => {
       const mockTicket = { id: 1, userid: 'user1', category: 'support' };
@@ -116,25 +204,26 @@ describe('Database Module', () => {
   });
 
   describe('closeAll', () => {
-    it('does not turn banned records into closed tickets', async () => {
+    it('closes only active lifecycle states', async () => {
       await db.closeAll();
       expect(mockUpdateMany).toHaveBeenCalledWith(
-        { status: { $ne: 'banned' } },
-        { $set: { status: 'closed' } },
+        { status: { $in: ['open', 'waiting_user'] } },
+        { $set: { status: 'closed', closed_at: expect.any(Date) } },
       );
     });
   });
 
   describe('reopen', () => {
-    it('reopens matching tickets', async () => {
+    it('reopens only closed matching tickets', async () => {
       await db.reopen('user1', 'support', 'telegram');
       expect(mockUpdateMany).toHaveBeenCalledWith(
         {
           messenger: 'telegram',
           $or: [{ userid: 'user1' }, { ticketId: 'user1' }],
+          status: 'closed',
           category: 'support',
         },
-        { $set: { status: 'open' } },
+        { $set: { status: 'open', closed_at: null } },
       );
     });
   });
@@ -154,16 +243,35 @@ describe('Database Module', () => {
         { messenger: 'telegram', userid: 'user1' },
         {
           $setOnInsert: { userid: 'user1', messenger: 'telegram', ticketId: 1 },
-          $set: { status: 'open', category: 'support' },
+          $set: { status: 'open', category: 'support', closed_at: null },
         },
         { upsert: true, new: true, setDefaultsOnInsert: true },
       );
     });
 
-    it('closes matching tickets', async () => {
+    it('closes only OPEN or WAITING_USER matches', async () => {
       mockUpdateMany.mockResolvedValue({ modifiedCount: 2 });
       const result = await db.add('user1', 'closed', 'support', 'telegram');
       expect(result).toBe(2);
+      expect(mockUpdateMany).toHaveBeenCalledWith(
+        {
+          messenger: 'telegram',
+          $or: [{ userid: 'user1' }, { ticketId: 'user1' }],
+          status: { $in: ['open', 'waiting_user'] },
+          category: 'support',
+        },
+        { $set: { status: 'closed', closed_at: expect.any(Date) } },
+      );
+    });
+
+    it('keeps the legacy banned API but stores it in UserBan', async () => {
+      mockBanFindOneAndUpdate.mockResolvedValue({ userid: 'user1', messenger: 'telegram' });
+
+      const result = await db.add('user1', 'banned', null, 'telegram');
+
+      expect(result).toBe(1);
+      expect(mockBanFindOneAndUpdate).toHaveBeenCalled();
+      expect(mockSupporteeFindOneAndUpdate).not.toHaveBeenCalled();
     });
   });
 
