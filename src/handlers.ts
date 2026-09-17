@@ -1,4 +1,5 @@
 import * as commands from './commands';
+import * as mostCommands from './most-commands';
 import * as middleware from './middleware';
 import * as inline from './inline';
 import * as files from './files';
@@ -43,6 +44,11 @@ export function registerCommonHandlers(addon: Addon, keys?: string[][]) {
   addon.command('reopen', (ctx: Context) => commands.reopenCommand(ctx));
   addon.command('unban', (ctx: Context) => commands.unbanCommand(ctx));
   addon.command('clear', (ctx: Context) => commands.clearCommand(ctx));
+
+  // MOST ticket ownership/lifecycle commands
+  addon.command('take', (ctx: Context) => mostCommands.takeCommand(ctx));
+  addon.command('transfer', (ctx: Context) => mostCommands.transferCommand(ctx));
+  addon.command('waiting', (ctx: Context) => mostCommands.waitingCommand(ctx));
 
   // Team collaboration commands
   addon.command('assign', (ctx: Context) => commands.assignCommand(ctx));
