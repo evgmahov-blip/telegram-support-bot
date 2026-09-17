@@ -4,6 +4,7 @@ import cache from './cache';
 import { Addon } from './interfaces';
 import * as db from './db';
 import * as error from './error';
+import * as eventsApi from './events-api';
 import TelegramAddon from './addons/telegram';
 import SignalAddon from './addons/signal';
 import SlackAddon from './addons/slack';
@@ -84,6 +85,7 @@ function createAddons(): Addon[] {
 async function main(logs = true) {
   await db.connect();
   await checkAndMigrateDatabase();
+  eventsApi.startEventsApi();
 
   // Run startup recovery: scan chat history to discover highest ticket ID
   try {
