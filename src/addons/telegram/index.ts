@@ -56,18 +56,19 @@ class TelegramAddon implements Addon {
       groupTag: '',
       group: '',
       groupAdmin: null,
-      getSessionKey: (ctx: Context) => {
-        if (ctx.callbackQuery && ctx.callbackQuery.id) {
-          return `${ctx.from.id}:${ctx.from.id}`;
-        } else if (ctx.from && ctx.inlineQuery) {
-          return `${ctx.from.id}:${ctx.from.id}`;
-        } else if (ctx.from && ctx.chat) {
-          return `${ctx.from.id}:${ctx.chat.id}`;
-        }
-        return null;
+      // Kept for SessionData backward compatibility. grammY does not read this field.
+      getSessionKey: () => null,
+    });
+
+    return session({
+      initial,
+      // Staff members in the same Telegram group must never share mutable session state.
+      // Key by user + chat; private chats naturally become user + private-chat.
+      getSessionKey: (ctx: BotContext) => {
+        if (!ctx.from) return undefined;
+        return `${ctx.from.id}:${ctx.chat?.id ?? ctx.from.id}`;
       },
     });
-    return session({ initial });
   }
 
   /**
