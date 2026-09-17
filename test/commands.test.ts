@@ -2,22 +2,35 @@
 const mockReply = jest.fn().mockResolvedValue(undefined);
 const mockSendMessage = jest.fn().mockResolvedValue(undefined);
 const mockCloseAll = jest.fn().mockResolvedValue(undefined);
+const mockTransitionTicketStatus = jest.fn().mockResolvedValue({ ticketId: 1001, status: 'open' });
+const mockBanUser = jest.fn().mockResolvedValue(undefined);
+const mockUnbanUser = jest.fn().mockResolvedValue(undefined);
 
 jest.mock('../src/middleware', () => ({
   reply: mockReply,
   sendMessage: mockSendMessage,
+  strictEscape: jest.fn((value: string) => value),
 }));
 
-// Mock the entire db module with all needed functions
 jest.mock('../src/db', () => ({
   closeAll: mockCloseAll,
-  open: jest.fn().mockResolvedValue([]), // Mock the open function (async)
+  open: jest.fn().mockResolvedValue([]),
   getByTicketId: jest.fn().mockResolvedValue({ userid: 'user123', id: { toString: () => 'ticket1' } }),
-  getTicketById: jest.fn().mockResolvedValue({ userid: 'user123', id: { toString: () => 'ticket1' }, category: null }),
-  reopen: jest.fn().mockResolvedValue(undefined), // Add reopen mock (async)
-  add: jest.fn().mockResolvedValue(undefined),    // Add add mock (async)
+  getTicketById: jest.fn().mockResolvedValue({
+    ticketId: 1001,
+    userid: 'user123',
+    messenger: 'telegram',
+    status: 'closed',
+    category: null,
+  }),
+  getTicketByUserId: jest.fn().mockResolvedValue(null),
+  transitionTicketStatus: mockTransitionTicketStatus,
+  banUser: mockBanUser,
+  unbanUser: mockUnbanUser,
   addTicketMessage: jest.fn().mockResolvedValue(undefined),
   recordAnalyticsEvent: jest.fn().mockResolvedValue(undefined),
+  getInternalNotes: jest.fn().mockResolvedValue([]),
+  getConversationHistory: jest.fn().mockResolvedValue([]),
 }));
 
 jest.mock('../src/cache', () => ({
@@ -30,14 +43,39 @@ jest.mock('../src/cache', () => ({
       ticket: 'Ticket',
       closed: 'closed',
       ticketClosed: 'Your ticket has been closed.',
+      ticketClosedError: 'Ticket closed error',
       banned: 'banned',
       usr_with_ticket: 'User with ticket',
     },
     parse_mode: 'MarkdownV2',
+    categories: [],
+    user_commands: [],
+    allow_broadcast: false,
   },
   ticketIDs: {},
   ticketStatus: {},
   ticketSent: {},
+  staffMembers: new Map(),
+}));
+
+jest.mock('../src/team', () => ({
+  canPerformAction: jest.fn().mockReturnValue(true),
+}));
+
+jest.mock('../src/workflows', () => ({
+  listCannedResponses: jest.fn().mockReturnValue(''),
+  getCannedResponse: jest.fn().mockReturnValue(null),
+}));
+
+jest.mock('../src/analytics', () => ({
+  sendCSATSurvey: jest.fn().mockResolvedValue(undefined),
+  showStatsCommand: jest.fn().mockResolvedValue(undefined),
+}));
+
+jest.mock('../src/webhooks', () => ({
+  webhooks: {
+    ticketClosed: jest.fn().mockResolvedValue(undefined),
+  },
 }));
 
 import * as commands from '../src/commands';
@@ -47,7 +85,7 @@ import cache from '../src/cache';
 describe('Commands Module', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    // Reset cache objects
+    mockTransitionTicketStatus.mockResolvedValue({ ticketId: 1001, status: 'open' });
     Object.keys(cache.ticketIDs).forEach(k => delete cache.ticketIDs[k]);
     Object.keys(cache.ticketStatus).forEach(k => delete cache.ticketStatus[k]);
     Object.keys(cache.ticketSent).forEach(k => delete cache.ticketSent[k]);
@@ -73,7 +111,7 @@ describe('Commands Module', () => {
       date: 1640995200,
       web_msg: false,
       reply_to_message: {
-        from: { is_bot: false },
+        from: { is_bot: true },
         text: '#T001001 From: John Doe',
         caption: '',
       },
@@ -117,7 +155,7 @@ describe('Commands Module', () => {
   describe('helpCommand', () => {
     it('should show help text for regular users', () => {
       const ctx = createMockContext(false);
-      
+
       commands.helpCommand(ctx);
 
       expect(mockReply).toHaveBeenCalledWith(
@@ -167,7 +205,6 @@ describe('Commands Module', () => {
 
       await commands.openCommand(ctx);
 
-      // The function should call db.open and then reply
       expect(mockReply).toHaveBeenCalled();
     });
 
@@ -176,45 +213,49 @@ describe('Commands Module', () => {
 
       await commands.openCommand(ctx);
 
-      // Function should return early for non-admin users
+      expect(mockReply).not.toHaveBeenCalled();
     });
   });
 
   describe('closeCommand', () => {
-    it('should handle ticket closing for admin users', async () => {
+    it('closes the resolved ticket through the lifecycle API', async () => {
       const ctx = createMockContext(true);
-      await commands.closeCommand(ctx);
-      expect(true).toBe(true); // Test passes if no errors thrown
-    });
+      mockTransitionTicketStatus.mockResolvedValue({ ticketId: 1001, status: 'closed' });
 
-    it('should not fail when called', async () => {
-      const ctx = createMockContext(true);
       await commands.closeCommand(ctx);
-      expect(true).toBe(true);
+
+      expect(mockTransitionTicketStatus).toHaveBeenCalledWith(1001, 'closed');
     });
   });
 
   describe('reopenCommand', () => {
-    it('should handle ticket reopening for admin users', async () => {
+    it('reopens the resolved ticket through the lifecycle API', async () => {
       const ctx = createMockContext(true);
+
       await commands.reopenCommand(ctx);
-      expect(true).toBe(true);
+
+      expect(mockTransitionTicketStatus).toHaveBeenCalledWith(1001, 'open');
     });
   });
 
   describe('banCommand', () => {
-    it('should handle user banning for admin users', async () => {
+    it('stores a user ban separately from ticket state', async () => {
       const ctx = createMockContext(true);
+
       await commands.banCommand(ctx);
-      expect(true).toBe(true);
+
+      expect(mockBanUser).toHaveBeenCalledWith('user123', 'telegram');
     });
   });
 
   describe('unbanCommand', () => {
-    it('should handle user unbanning for admin users', async () => {
+    it('removes the user ban without reopening the ticket', async () => {
       const ctx = createMockContext(true);
+
       await commands.unbanCommand(ctx);
-      expect(true).toBe(true);
+
+      expect(mockUnbanUser).toHaveBeenCalledWith('user123', 'telegram');
+      expect(mockTransitionTicketStatus).not.toHaveBeenCalled();
     });
   });
 
