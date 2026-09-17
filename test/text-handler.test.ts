@@ -5,7 +5,8 @@ const mockAdd = jest.fn();
 const mockAddNewTicket = jest.fn().mockResolvedValue(1);
 const mockCheckBan = jest.fn().mockResolvedValue(null);
 const mockGetTicketByUserId = jest.fn();
-const mockTransitionTicketStatus = jest.fn();
+const mockGetTicketById = jest.fn();
+const mockResumeWaitingTicket = jest.fn();
 const mockRecordAnalyticsEvent = jest.fn().mockResolvedValue(undefined);
 const mockUserChat = jest.fn();
 const mockPrivateReply = jest.fn();
@@ -21,9 +22,13 @@ jest.mock('../src/db', () => ({
   addNewTicket: mockAddNewTicket,
   checkBan: mockCheckBan,
   getTicketByUserId: mockGetTicketByUserId,
-  transitionTicketStatus: mockTransitionTicketStatus,
+  getTicketById: mockGetTicketById,
   addTicketMessage: jest.fn().mockResolvedValue(undefined),
   recordAnalyticsEvent: mockRecordAnalyticsEvent,
+}));
+
+jest.mock('../src/ticket-state', () => ({
+  resumeWaitingTicket: mockResumeWaitingTicket,
 }));
 
 jest.mock('../src/users', () => ({
@@ -204,11 +209,11 @@ describe('Text Handler Module', () => {
       const waitingTicket = { ticketId: 77, userid: 'user123', status: 'waiting_user', category: null };
       const resumedTicket = { ...waitingTicket, status: 'open' };
       mockGetTicketByUserId.mockResolvedValue(waitingTicket);
-      mockTransitionTicketStatus.mockResolvedValue(resumedTicket);
+      mockResumeWaitingTicket.mockResolvedValue(resumedTicket);
 
       const result = await text.ticketHandler(mockAddon as any, ctx);
 
-      expect(mockTransitionTicketStatus).toHaveBeenCalledWith(77, 'open');
+      expect(mockResumeWaitingTicket).toHaveBeenCalledWith(77);
       expect(mockRecordAnalyticsEvent).toHaveBeenCalledWith(
         'ticket.resumed',
         77,
@@ -216,6 +221,32 @@ describe('Text Handler Module', () => {
         { reason: 'user_reply' },
       );
       expect(result).toEqual(resumedTicket);
+    });
+
+    it('does not resurrect a ticket closed concurrently with the user reply', async () => {
+      const ctx = createMockContext('User response during close');
+      const waitingTicket = { ticketId: 78, userid: 'user123', status: 'waiting_user', category: null };
+      const closedTicket = { ...waitingTicket, status: 'closed' };
+      const newTicket = { ticketId: 79, userid: 'user123', status: 'open', category: null };
+
+      mockGetTicketByUserId
+        .mockResolvedValueOnce(waitingTicket)
+        .mockResolvedValueOnce(newTicket);
+      mockResumeWaitingTicket.mockResolvedValue(null);
+      mockGetTicketById.mockResolvedValue(closedTicket);
+
+      const result = await text.ticketHandler(mockAddon as any, ctx);
+
+      expect(mockResumeWaitingTicket).toHaveBeenCalledWith(78);
+      expect(mockGetTicketById).toHaveBeenCalledWith(78, null);
+      expect(mockAddNewTicket).toHaveBeenCalledWith('user123', null, 'telegram');
+      expect(mockRecordAnalyticsEvent).not.toHaveBeenCalledWith(
+        'ticket.resumed',
+        78,
+        null,
+        expect.anything(),
+      );
+      expect(result).toEqual(newTicket);
     });
 
     it('blocks banned users before touching tickets', async () => {
