@@ -1,7 +1,9 @@
+const mockFindOne = jest.fn();
 const mockFindOneAndUpdate = jest.fn();
 
 jest.mock('../src/db', () => ({
   Supportee: {
+    findOne: mockFindOne,
     findOneAndUpdate: mockFindOneAndUpdate,
   },
 }));
@@ -34,13 +36,14 @@ describe('ticket ownership', () => {
     );
   });
 
-  it('uses expected owner as a compare-and-set guard during transfer', async () => {
+  it('uses expected owner as a compare-and-set guard during agent transfer', async () => {
     const ticket = { ticketId: 11, assigned_to: 'agent-2', status: 'open' };
     mockFindOneAndUpdate.mockResolvedValue(ticket);
 
     const result = await ownership.transferTicket(11, 'agent-2', 'agent-1');
 
     expect(result).toBe(ticket);
+    expect(mockFindOne).not.toHaveBeenCalled();
     expect(mockFindOneAndUpdate).toHaveBeenCalledWith(
       {
         ticketId: 11,
@@ -52,15 +55,40 @@ describe('ticket ownership', () => {
     );
   });
 
-  it('allows supervisor/admin transfer without an expected owner guard', async () => {
-    mockFindOneAndUpdate.mockResolvedValue({ ticketId: 12, assigned_to: 'agent-2' });
+  it('snapshots current owner for supervisor/admin transfer and then uses CAS', async () => {
+    mockFindOne.mockResolvedValue({ ticketId: 12, assigned_to: 'agent-1', status: 'open' });
+    mockFindOneAndUpdate.mockResolvedValue({ ticketId: 12, assigned_to: 'agent-2', status: 'open' });
 
-    await ownership.transferTicket(12, 'agent-2');
+    const result = await ownership.transferTicket(12, 'agent-2');
 
+    expect(result).toEqual({ ticketId: 12, assigned_to: 'agent-2', status: 'open' });
+    expect(mockFindOne).toHaveBeenCalledWith({
+      ticketId: 12,
+      status: { $in: ['open', 'waiting_user'] },
+    });
     expect(mockFindOneAndUpdate).toHaveBeenCalledWith(
       {
         ticketId: 12,
         status: { $in: ['open', 'waiting_user'] },
+        assigned_to: 'agent-1',
+      },
+      { $set: { assigned_to: 'agent-2' } },
+      { new: true },
+    );
+  });
+
+  it('guards unowned supervisor/admin transfer with assigned_to null', async () => {
+    mockFindOne.mockResolvedValue({ ticketId: 13, assigned_to: null, status: 'waiting_user' });
+    mockFindOneAndUpdate.mockResolvedValue(null);
+
+    const result = await ownership.transferTicket(13, 'agent-2');
+
+    expect(result).toBeNull();
+    expect(mockFindOneAndUpdate).toHaveBeenCalledWith(
+      {
+        ticketId: 13,
+        status: { $in: ['open', 'waiting_user'] },
+        assigned_to: null,
       },
       { $set: { assigned_to: 'agent-2' } },
       { new: true },
