@@ -4,7 +4,8 @@ jest.unmock('../src/db');
 // Mock Mongoose first
 const mockFindOne = jest.fn();
 const mockUpdateMany = jest.fn();
-const mockFindOneAndReplace = jest.fn();
+const mockSupporteeFindOneAndUpdate = jest.fn();
+const mockCounterFindOneAndUpdate = jest.fn();
 const mockCreate = jest.fn();
 
 /** Minimal chainable, awaitable query like mongoose returns from findOne(). */
@@ -20,20 +21,27 @@ const query = (result: unknown, reject = false) => {
 jest.mock('mongoose', () => {
   const Schema = jest.fn().mockImplementation(() => ({ plugin: jest.fn(), index: jest.fn() }));
   (Schema as unknown as { Types: unknown }).Types = { Mixed: {}, ObjectId: {} };
-  return {
-  __esModule: true,
-  default: undefined as unknown, // set below
-  connect: jest.fn().mockResolvedValue({}),
-  Schema,
-  model: jest.fn().mockReturnValue({
+
+  const supporteeModel = {
     findOne: mockFindOne,
     updateMany: mockUpdateMany,
-    findOneAndReplace: mockFindOneAndReplace,
+    findOneAndUpdate: mockSupporteeFindOneAndUpdate,
     create: mockCreate,
-  }),
-  connection: {
-    on: jest.fn(),
-  },
+  };
+
+  const counterModel = {
+    findOneAndUpdate: mockCounterFindOneAndUpdate,
+  };
+
+  return {
+    __esModule: true,
+    default: undefined as unknown, // set below
+    connect: jest.fn().mockResolvedValue({}),
+    Schema,
+    model: jest.fn((name: string) => name === 'TicketCounter' ? counterModel : supporteeModel),
+    connection: {
+      on: jest.fn(),
+    },
   };
 });
 // db.ts uses the default import: make it the same object as the namespace
@@ -56,91 +64,115 @@ describe('Database Module', () => {
     jest.clearAllMocks();
   });
 
+  describe('getNextTicketId', () => {
+    it('raises the counter to the DB baseline and increments it atomically', async () => {
+      mockFindOne.mockReturnValue(query({ ticketId: 7 }));
+      mockCounterFindOneAndUpdate
+        .mockResolvedValueOnce({ seq: 7 })
+        .mockResolvedValueOnce({ seq: 8 });
+
+      const ticketId = await db.getNextTicketId();
+
+      expect(ticketId).toBe(8);
+      expect(mockCounterFindOneAndUpdate).toHaveBeenNthCalledWith(
+        1,
+        { _id: 'bot_support:ticketId' },
+        { $max: { seq: 7 } },
+        { upsert: true, new: true, setDefaultsOnInsert: true },
+      );
+      expect(mockCounterFindOneAndUpdate).toHaveBeenNthCalledWith(
+        2,
+        { _id: 'bot_support:ticketId' },
+        { $inc: { seq: 1 } },
+        { upsert: true, new: true, setDefaultsOnInsert: true },
+      );
+    });
+  });
+
   describe('getTicketByUserId', () => {
     it('should find ticket by user ID and category', async () => {
       const mockTicket = { id: 1, userid: 'user1', category: 'support' };
       mockFindOne.mockReturnValue(query(mockTicket));
 
-      if (db.getTicketByUserId) {
-        const result = await db.getTicketByUserId('user1', 'support');
-        expect(result).toEqual(mockTicket);
-        expect(mockFindOne).toHaveBeenCalledWith({
-          $or: [{ userid: 'user1' }],
-          category: 'support',
-        });
-      } else {
-        // Function doesn't exist, mark as skipped
-        expect(true).toBe(true);
-      }
+      const result = await db.getTicketByUserId('user1', 'support');
+      expect(result).toEqual(mockTicket);
+      expect(mockFindOne).toHaveBeenCalledWith({
+        $or: [{ userid: 'user1' }],
+        category: 'support',
+      });
     });
 
     it('should match uncategorised tickets when category is null', async () => {
       const mockTicket = { id: 1, userid: 'user1' };
       mockFindOne.mockReturnValue(query(mockTicket));
 
-      if (db.getTicketByUserId) {
-        const result = await db.getTicketByUserId('user1', null);
-        expect(result).toEqual(mockTicket);
-        expect(mockFindOne).toHaveBeenCalledWith({
-          $or: [{ userid: 'user1' }],
-          category: null,
-        });
-      } else {
-        expect(true).toBe(true);
-      }
+      const result = await db.getTicketByUserId('user1', null);
+      expect(result).toEqual(mockTicket);
+      expect(mockFindOne).toHaveBeenCalledWith({
+        $or: [{ userid: 'user1' }],
+        category: null,
+      });
     });
   });
 
   describe('closeAll', () => {
-    it('should call closeAll function', async () => {
-      if (db.closeAll) {
-        await db.closeAll();
-        // Function exists and was called successfully
-        expect(true).toBe(true);
-      } else {
-        expect(true).toBe(true);
-      }
+    it('does not turn banned records into closed tickets', async () => {
+      await db.closeAll();
+      expect(mockUpdateMany).toHaveBeenCalledWith(
+        { status: { $ne: 'banned' } },
+        { $set: { status: 'closed' } },
+      );
     });
   });
 
   describe('reopen', () => {
-    it('should call reopen function', async () => {
-      if (db.reopen) {
-        await db.reopen('user1', 'support', 'telegram');
-        // Function exists and was called successfully
-        expect(true).toBe(true);
-      } else {
-        expect(true).toBe(true);
-      }
+    it('reopens matching tickets', async () => {
+      await db.reopen('user1', 'support', 'telegram');
+      expect(mockUpdateMany).toHaveBeenCalledWith(
+        {
+          messenger: 'telegram',
+          $or: [{ userid: 'user1' }, { ticketId: 'user1' }],
+          category: 'support',
+        },
+        { $set: { status: 'open' } },
+      );
     });
   });
 
   describe('add', () => {
-    it('should call add function when status is open', async () => {
-      if (db.add) {
-        const result = await db.add('user1', 'open', 'support', 'telegram');
-        // Function exists and was called successfully
-        expect(true).toBe(true);
-      } else {
-        expect(true).toBe(true);
-      }
+    it('opens without replacing an existing ticket document', async () => {
+      mockFindOne.mockReturnValue(query(null));
+      mockCounterFindOneAndUpdate
+        .mockResolvedValueOnce({ seq: 0 })
+        .mockResolvedValueOnce({ seq: 1 });
+      mockSupporteeFindOneAndUpdate.mockResolvedValue({ ticketId: 1 });
+
+      const result = await db.add('user1', 'open', 'support', 'telegram');
+
+      expect(result).toBe(1);
+      expect(mockSupporteeFindOneAndUpdate).toHaveBeenCalledWith(
+        { messenger: 'telegram', userid: 'user1' },
+        {
+          $setOnInsert: { userid: 'user1', messenger: 'telegram', ticketId: 1 },
+          $set: { status: 'open', category: 'support' },
+        },
+        { upsert: true, new: true, setDefaultsOnInsert: true },
+      );
     });
 
-    it('should call add function when status is closed', async () => {
-      if (db.add) {
-        await db.add('user1', 'closed', 'support', 'telegram');
-        // Function exists and was called successfully
-        expect(true).toBe(true);
-      } else {
-        expect(true).toBe(true);
-      }
+    it('closes matching tickets', async () => {
+      mockUpdateMany.mockResolvedValue({ modifiedCount: 2 });
+      const result = await db.add('user1', 'closed', 'support', 'telegram');
+      expect(result).toBe(2);
     });
   });
 
   describe('addNewTicket (ticket_per_message)', () => {
-    it('inserts a new document instead of replacing the existing one', async () => {
-      // getNextTicketId reads the highest ticketId
+    it('inserts a new document instead of updating the existing one', async () => {
       mockFindOne.mockReturnValue(query({ ticketId: 7 }));
+      mockCounterFindOneAndUpdate
+        .mockResolvedValueOnce({ seq: 7 })
+        .mockResolvedValueOnce({ seq: 8 });
       mockCreate.mockResolvedValue({});
 
       const ticketId = await db.addNewTicket('user1', 'support', 'telegram');
@@ -153,13 +185,18 @@ describe('Database Module', () => {
         status: 'open',
         category: 'support',
       });
-      expect(mockFindOneAndReplace).not.toHaveBeenCalled();
+      expect(mockSupporteeFindOneAndUpdate).not.toHaveBeenCalled();
     });
 
     it('stores a null category when none is given', async () => {
       mockFindOne.mockReturnValue(query(null));
+      mockCounterFindOneAndUpdate
+        .mockResolvedValueOnce({ seq: 0 })
+        .mockResolvedValueOnce({ seq: 1 });
       mockCreate.mockResolvedValue({});
+
       await db.addNewTicket('user1', undefined as unknown as null, 'telegram');
+
       expect(mockCreate).toHaveBeenCalledWith(expect.objectContaining({ ticketId: 1, category: null }));
     });
   });
@@ -176,23 +213,13 @@ describe('Database Module', () => {
   describe('Error handling', () => {
     it('should handle database connection errors gracefully', async () => {
       mockFindOne.mockReturnValue(query(new Error('Database connection failed'), true));
-
-      if (db.getTicketByUserId) {
-        await expect(db.getTicketByUserId('user1', 'support')).rejects.toThrow('Database connection failed');
-      } else {
-        expect(true).toBe(true);
-      }
+      await expect(db.getTicketByUserId('user1', 'support')).rejects.toThrow('Database connection failed');
     });
 
     it('should handle null results gracefully', async () => {
       mockFindOne.mockReturnValue(query(null));
-
-      if (db.getTicketByUserId) {
-        const result = await db.getTicketByUserId('nonexistent', 'support');
-        expect(result).toBeNull();
-      } else {
-        expect(true).toBe(true);
-      }
+      const result = await db.getTicketByUserId('nonexistent', 'support');
+      expect(result).toBeNull();
     });
   });
 });
