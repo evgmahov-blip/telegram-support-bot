@@ -18,12 +18,24 @@ function getLogLevel(): string {
   return cachedLogLevel;
 }
 
-/** Returns a formatted ISO timestamp string. */
 function ts(): string {
   return new Date().toISOString();
 }
 
-/** Appends a timestamped message to the debug log file if the current level permits it. */
+function redact(value: string): string {
+  return value
+    .replace(/\b\d{6,12}:[A-Za-z0-9_-]{20,}\b/g, '<REDACTED_TELEGRAM_TOKEN>')
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{8,}\b/gi, 'Bearer <REDACTED>')
+    .replace(/\bsk-[A-Za-z0-9_-]{12,}\b/gi, '<REDACTED_API_KEY>');
+}
+
+function formatArg(arg: unknown): string {
+  if (typeof arg === 'string') return redact(arg);
+  if (arg instanceof Error) return redact(`${arg.name}: ${arg.message}`);
+  if (arg === null || arg === undefined) return String(arg);
+  return '[object]';
+}
+
 function appendToFile(msg: string, level: 'info' | 'error'): void {
   const lvl = getLogLevel();
   if (lvl === 'NONE') return;
@@ -32,22 +44,22 @@ function appendToFile(msg: string, level: 'info' | 'error'): void {
   try {
     fs.appendFileSync(debugFile, `[${ts()}] ${msg}\n`, 'utf8');
   } catch (_e) {
-    // Silently ignore file write errors.
+    // Ignore file write errors; logging must never crash the bot.
   }
 }
 
-/** Wraps fancy-log.info: always logs to stdout, writes to debug.log if level allows. */
 function info(...args: unknown[]): void {
-  const msg = args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ');
-  appendToFile(msg, 'info');
-  fancyLog.info.apply(null, args as [any]);
+  if (getLogLevel() !== 'INFO') return;
+  const safeArgs = args.map(formatArg);
+  appendToFile(safeArgs.join(' '), 'info');
+  fancyLog.info(...safeArgs);
 }
 
-/** Wraps fancy-log.error: always logs to stdout, writes to debug.log if level allows. */
 function error(...args: unknown[]): void {
-  const msg = args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ');
-  appendToFile(msg, 'error');
-  fancyLog.error.apply(null, args as [any]);
+  if (getLogLevel() === 'NONE') return;
+  const safeArgs = args.map(formatArg);
+  appendToFile(safeArgs.join(' '), 'error');
+  fancyLog.error(...safeArgs);
 }
 
 export { info, error };
