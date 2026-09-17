@@ -275,7 +275,7 @@ export async function historyCommand(ctx: Context): Promise<void> {
 
 /**
  * Sends a configured canned response through the normal staff reply path.
- * Without a replied ticket it only previews the template inside the staff chat.
+ * Without a resolved ticket it only previews the template inside the staff chat.
  */
 export async function cannedResponseCommand(
   ctx: Context,
@@ -284,15 +284,14 @@ export async function cannedResponseCommand(
 ): Promise<void> {
   if (!ctx.session.admin) return;
 
-  if (!ctx.message?.reply_to_message) {
+  const ticket = await resolveRepliedTicket(ctx);
+  if (!ticket) {
     await middleware.reply(ctx, `Template "${key}":\n\n${cannedText}`, {
       parse_mode: cache.config.parse_mode,
     });
     return;
   }
 
-  const ticket = await requireRepliedTicket(ctx);
-  if (!ticket) return;
   const access = await requireManageableTicket(ctx, ticket, 'send canned responses');
   if (!access) return;
   if (ticket.status === 'closed') {

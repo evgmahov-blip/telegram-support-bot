@@ -237,6 +237,8 @@ discord_channel_id: '' # Discord channel/voice channel ID
 
 api_enabled: false # Enable REST API for programmatic access
 api_token: '' # Bearer token for API authentication
+api_port: 8081 # Dedicated event API port; avoids the legacy web addon on 8080
+api_host: '127.0.0.1' # Safe default for bare-metal; Compose overrides internally
 
 # --- Web Chat Widget ---
 web_chat:

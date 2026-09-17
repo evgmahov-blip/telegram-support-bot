@@ -290,7 +290,7 @@ describe('user /close (#112)', () => {
     await commands.closeCommand(makeCtx(false));
 
     expect(mockTransitionTicketStatus).toHaveBeenCalledWith(7, 'closed');
-    expect(mockRecordAnalyticsEvent).toHaveBeenCalledWith('ticket_closed', 7, null, { closed_by: 'user' });
+    expect(mockRecordAnalyticsEvent).toHaveBeenCalledWith('ticket.closed', 7, null, { closed_by: 'user' });
     expect(mockTicketClosedWebhook).toHaveBeenCalledWith(7, 'user123');
     expect(mockReply).toHaveBeenCalledWith(expect.anything(), 'Ticket #T000007 closed');
     expect(mockSendMessage).toHaveBeenCalledWith('-100123', 'telegram', 'Ticket #T000007 closed by the user');

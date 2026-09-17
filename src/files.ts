@@ -116,7 +116,8 @@ async function fileHandler(type: string, bot: Addon, ctx: Context) {
       break;
     case 'sticker': {
       if (!bot.sendSticker) return;
-      messageId = await bot.sendSticker(receiverId, fileId);
+      const stickerMessageId = await bot.sendSticker(receiverId, fileId);
+      messageId = typeof stickerMessageId === 'string' ? stickerMessageId : null;
       const headerMessenger = session.admin ? ticket.messenger : config.staffchat_type;
       if (captionText.trim()) {
         sendMessage(receiverId, headerMessenger, captionText).catch(log.error);
@@ -139,7 +140,7 @@ async function fileHandler(type: string, bot: Addon, ctx: Context) {
   if (session.admin) {
     const actorId = ctx.from.id.toString();
     if (!ticket.first_response_at) await db.setFirstResponseAt(ticket.ticketId);
-    await db.recordAnalyticsEvent('staff_file_reply', ticket.ticketId, actorId, { type });
+    await db.recordAnalyticsEvent('ticket.replied', ticket.ticketId, actorId, { kind: 'file', type });
   }
 
   if (!config.autoreply_confirmation) return;

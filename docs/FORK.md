@@ -32,7 +32,8 @@ Baseline: `5c4bb7386da42647bc4e55e3660238a1ab037b19`
 - safe logging/redaction; normal INFO logs do not contain full ticket bodies;
 - Telegram message-id correlation as the authoritative reply lookup;
 - private/direct engineer reply paths removed, including historical callback handling;
-- media messages return Telegram message IDs for correlation.
+- media messages return Telegram message IDs for correlation;
+- ticket messages are append-only; `llm_memory_depth` limits reads, never stored history.
 
 ## MOST lifecycle
 
@@ -75,6 +76,37 @@ default_queue: general
 ```
 
 If omitted, MOST uses a single `general` queue. Queue changes are allowed only for `OPEN`/`WAITING_USER` tickets and are recorded in the event history.
+
+## Ticket history
+
+`TicketMessage` is an append-only conversation log. The bot never deletes old ticket messages to enforce LLM context size.
+
+- `getConversationHistory()` returns only the newest configured window for AI context.
+- `getTicketMessageHistory()` reads chronological history for audit/export/future KB workflows.
+- Event records do not include message bodies; message content stays in the ticket message collection.
+
+## Events contract
+
+Operational/audit events are persisted before external consumers read them. New events contain:
+
+- `event_id` — UUID;
+- `seq` — globally monotonic sequence number;
+- `type`;
+- `ticket_id`;
+- `actor_id` (stored internally as the existing `agent_id` field for compatibility);
+- `timestamp`;
+- `metadata`.
+
+Every ticket message append emits `ticket.message.user`, `ticket.message.staff`, or `ticket.message.ai`. Existing ticket mutations continue to use the same append-only event collection.
+
+Read-only replay is available when the API is explicitly enabled:
+
+```yaml
+api_enabled: true
+api_token: "use-a-long-random-secret"
+```
+
+`GET /events?since=<seq>&limit=<n>` requires `Authorization: Bearer <api_token>` and returns events in ascending sequence order plus `next_since`. The default port is `8080`; Docker publishes it on host `127.0.0.1` only. Existing historical analytics rows created before event sequencing do not have `seq` and therefore are not part of replay.
 
 ## AI contract
 

@@ -280,7 +280,7 @@ export async function addInternalNoteCommand(ctx: Context, ticketId: number, tex
         { parse_mode: cache.config.parse_mode },
     ).catch(log.error);
 
-    await db.recordAnalyticsEvent('internal_note', ticketId, ctx.from.id.toString());
+    await db.recordAnalyticsEvent('ticket.note_added', ticketId, ctx.from.id.toString());
 }
 
 /**

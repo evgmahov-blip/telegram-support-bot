@@ -5,8 +5,8 @@ const mockAdd = jest.fn();
 const mockAddNewTicket = jest.fn().mockResolvedValue(1);
 const mockCheckBan = jest.fn().mockResolvedValue(null);
 const mockGetTicketByUserId = jest.fn();
-const mockTransitionTicketStatus = jest.fn();
 const mockRecordAnalyticsEvent = jest.fn().mockResolvedValue(undefined);
+const mockResumeWaitingTicket = jest.fn();
 const mockChat = jest.fn();
 const mockPrivateReply = jest.fn();
 const mockStaffChat = jest.fn();
@@ -21,9 +21,13 @@ jest.mock('../src/db', () => ({
   addNewTicket: mockAddNewTicket,
   checkBan: mockCheckBan,
   getTicketByUserId: mockGetTicketByUserId,
-  transitionTicketStatus: mockTransitionTicketStatus,
+  getTicketById: jest.fn().mockResolvedValue(null),
   addTicketMessage: jest.fn().mockResolvedValue(undefined),
   recordAnalyticsEvent: mockRecordAnalyticsEvent,
+}));
+
+jest.mock('../src/ticket-state', () => ({
+  resumeWaitingTicket: mockResumeWaitingTicket,
 }));
 
 jest.mock('../src/users', () => ({
@@ -139,14 +143,18 @@ describe('Text Module', () => {
   });
 
   describe('handleText', () => {
-    it('should handle private reply mode', () => {
+    it('does not revive removed private engineer reply mode', async () => {
       const ctx = createMockContext('Response message', 'private', 'private_reply');
       const mockAddon = { platform: 'telegram' };
 
-      text.handleText(mockAddon as any, ctx, []);
+      await text.handleText(mockAddon as any, ctx, []);
 
-      expect(mockPrivateReply).toHaveBeenCalledWith(ctx);
-      expect(mockReply).not.toHaveBeenCalled();
+      expect(mockPrivateReply).not.toHaveBeenCalled();
+      expect(mockReply).toHaveBeenCalledWith(
+        ctx,
+        'Please select a service:',
+        expect.objectContaining({ reply_markup: { keyboard: [] } }),
+      );
     });
 
     it('should show category keyboard for regular messages when conditions are met', () => {
@@ -251,11 +259,11 @@ describe('Text Module', () => {
       };
       const resumedTicket = { ...waitingTicket, status: 'open' };
       mockGetTicketByUserId.mockResolvedValue(waitingTicket);
-      mockTransitionTicketStatus.mockResolvedValue(resumedTicket);
+      mockResumeWaitingTicket.mockResolvedValue(resumedTicket);
 
       const result = await text.ticketHandler(mockAddon as any, ctx);
 
-      expect(mockTransitionTicketStatus).toHaveBeenCalledWith(1002, 'open');
+      expect(mockResumeWaitingTicket).toHaveBeenCalledWith(1002);
       expect(mockRecordAnalyticsEvent).toHaveBeenCalledWith(
         'ticket.resumed',
         1002,

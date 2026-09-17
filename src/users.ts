@@ -86,11 +86,12 @@ async function processTicket(
     tags: ticket.tags || [],
   };
 
-  await db.addTicketMessage(ticket.ticketId, 'user', ctx.from.id.toString(), ctx.message.text);
+  await db.persistTicketMessage(ticket.ticketId, 'user', ctx.from.id.toString(), ctx.message.text);
 
+  // Legacy push webhooks remain for compatibility. The canonical persisted
+  // ticket.created event is emitted exactly once by db.addNewTicket().
   if (!autoReplyInfo) {
     await webhooks.webhooks.ticketCreated(ticket.ticketId, ctx.from.id.toString(), ctx.message.text.substring(0, 200));
-    await db.recordAnalyticsEvent('ticket_created', ticket.ticketId, null);
   }
 
   if (
@@ -122,6 +123,8 @@ async function processTicket(
     db.addIdAndName(ticket.ticketId, messageId, ctx.message.from.first_name);
   }
 
+  db.recordAnalyticsEventBestEffort('ticket.message.user', ticket.ticketId, ctx.from.id.toString());
+
   // Category groups remain internal staff surfaces. MOST never adds a private
   // engineer-reply button; replies must happen in the staff group/thread.
   if (ctx.session.group && ctx.session.group !== config.staffchat_id) {
@@ -145,11 +148,19 @@ async function processTicket(
 async function chat(ctx: Context, chat: { id: string }) {
   const { config } = cache;
 
+  // After-hours is a notification policy, never a data-loss gate. The message
+  // is still persisted and forwarded to the staff queue.
   if (!workflows.isWithinBusinessHours()) {
+  const now = Date.now();
+  if (
+    ctx.session.lastOfflineNoticeDate === undefined ||
+    ctx.session.lastOfflineNoticeDate < now - TIME_BETWEEN_CONFIRMATION_MESSAGES
+  ) {
+    ctx.session.lastOfflineNoticeDate = now;
     const offlineMsg = config.language.businessHoursClosed || 'Our support team is currently offline. We will respond during business hours.';
-    reply(ctx, offlineMsg);
-    return;
+    await reply(ctx, offlineMsg);
   }
+}
 
   cache.userId = ctx.message.from.id;
   const isAutoReply = await autoReply(ctx);
@@ -168,8 +179,9 @@ async function chat(ctx: Context, chat: { id: string }) {
       await processTicket(ticket, ctx, chat.id, autoReplyInfo);
     }
 
+    const spamUserId = cache.userId;
     setTimeout(() => {
-      delete cache.ticketSent[cache.userId];
+      delete cache.ticketSent[spamUserId];
     }, config.spam_time);
     cache.ticketSent[cache.userId] = 0;
   } else if (sentCount < config.spam_cant_msg) {
@@ -177,9 +189,9 @@ async function chat(ctx: Context, chat: { id: string }) {
     const ticket = await db.getTicketByUserId(cache.userId, ctx.session.groupCategory);
     if (!ticket) return;
 
-    await db.addTicketMessage(ticket.ticketId, 'user', ctx.from.id.toString(), ctx.message.text);
+    await db.persistTicketMessage(ticket.ticketId, 'user', ctx.from.id.toString(), ctx.message.text);
 
-    sendMessage(
+    const messageId = await sendMessage(
       config.staffchat_id,
       config.staffchat_type,
       formatMessageAsTicket(
@@ -187,7 +199,13 @@ async function chat(ctx: Context, chat: { id: string }) {
         ctx,
         autoReplyInfo,
       ),
-    ).catch(log.error);
+    );
+    if (messageId) {
+      db.addIdAndName(ticket.ticketId, messageId, ctx.message.from.first_name);
+    }
+
+    db.recordAnalyticsEventBestEffort('ticket.message.user', ticket.ticketId, ctx.from.id.toString());
+
     if (ctx.session.group && ctx.session.group !== config.staffchat_id) {
       sendMessage(
         ctx.session.group,

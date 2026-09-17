@@ -17,7 +17,9 @@ jest.mock('../src/db', () => ({
   getTicketByUserId: mockGetTicketByUserId,
   addIdAndName: mockAddIdAndName,
   addTicketMessage: jest.fn().mockResolvedValue(undefined),
+  persistTicketMessage: jest.fn().mockResolvedValue(undefined),
   recordAnalyticsEvent: jest.fn().mockResolvedValue(undefined),
+  recordAnalyticsEventBestEffort: jest.fn(),
 }));
 
 jest.mock('../src/cache', () => ({

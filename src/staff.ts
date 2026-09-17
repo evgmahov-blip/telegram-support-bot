@@ -142,12 +142,6 @@ async function chat(ctx: Context) {
 
   cache.ticketStatus[ticketId] = false;
 
-  if (!ticket.first_response_at) {
-    await db.setFirstResponseAt(ticketId);
-  }
-
-  await db.addTicketMessage(ticketId, 'staff', senderId, staffMessage);
-
   if (ticket.userid.includes('WEB')) {
     try {
       const socketId = ticket.userid.split('WEB')[1];
@@ -159,6 +153,7 @@ async function chat(ctx: Context) {
         'Web chat already closed.',
       ).catch(log.error);
       log.error('Web reply delivery failed', e);
+      return;
     }
   } else {
     let replyContent = ticketMsg(name, ctx.message);
@@ -168,8 +163,13 @@ async function chat(ctx: Context) {
         replyContent = ticketMsg(name, { text: translated, from: ctx.message.from });
       }
     }
-    middleware.sendMessage(ticket.userid, ticket.messenger, replyContent).catch(log.error);
+    await middleware.sendMessage(ticket.userid, ticket.messenger, replyContent);
   }
+
+  if (!ticket.first_response_at) {
+    await db.setFirstResponseAt(ticketId);
+  }
+  await db.addTicketMessage(ticketId, 'staff', senderId, staffMessage);
 
   middleware.sendMessage(
     ctx.chat.id,
@@ -181,13 +181,13 @@ async function chat(ctx: Context) {
   delete cache.ticketSent[ticketId];
 
   await forwardReplyToParent(ctx, ticket, staffMessage);
-  await db.recordAnalyticsEvent('staff_reply', ticketId, senderId);
+  await db.recordAnalyticsEvent('ticket.replied', ticketId, senderId);
   await webhooks.webhooks.ticketReplied(ticketId, senderId, staffMessage.substring(0, 200));
 
   if (cache.config.auto_close_tickets) {
     const closed = await db.transitionTicketStatus(ticketId, 'closed');
     if (closed) {
-      await db.recordAnalyticsEvent('ticket_closed', ticketId, senderId);
+      await db.recordAnalyticsEvent('ticket.closed', ticketId, senderId);
       await webhooks.webhooks.ticketClosed(ticketId, senderId);
       await analytics.sendCSATSurvey(ticket.userid, ticket.messenger, ticketId);
     }

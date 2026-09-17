@@ -51,6 +51,7 @@ class TelegramAddon implements Addon {
       modeData: { ticketid: '', userid: '', name: null, category: '' } as ModeData,
       mode: null,
       lastContactDate: 0,
+      lastOfflineNoticeDate: 0,
       groupCategory: null,
       groupTag: '',
       group: '',
@@ -60,7 +61,7 @@ class TelegramAddon implements Addon {
 
     return session({
       initial,
-      getSessionKey: (ctx: BotContext) => {
+      getSessionKey: (ctx) => {
         if (!ctx.from) return undefined;
         return `${ctx.from.id}:${ctx.chat?.id ?? ctx.from.id}`;
       },

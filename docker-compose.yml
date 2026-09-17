@@ -6,8 +6,10 @@ services:
       - ./config:/bot/config:ro
     ports:
       - "127.0.0.1:8080:8080"
+      - "127.0.0.1:8081:8081"
     environment:
       - MONGO_URI=${MONGO_URI:?set authenticated app MONGO_URI in .env}
+      - API_HOST=0.0.0.0
       - MONGO_COLLECTION=most_support_tickets
     depends_on:
       mongodb:

@@ -242,6 +242,12 @@ describe('Files Module', () => {
       expect(mockGetTicketByUserId).not.toHaveBeenCalled();
       expect(bot.sendDocument).toHaveBeenCalledWith('user123', 'file-1', { caption: '' });
       expect(mockAddIdAndName).not.toHaveBeenCalled();
+      expect(mockRecordAnalyticsEvent).toHaveBeenCalledWith(
+        'ticket.replied',
+        41,
+        'agent1',
+        { kind: 'file', type: 'document' },
+      );
     });
 
     it('enforces ownership before sending a staff file', async () => {

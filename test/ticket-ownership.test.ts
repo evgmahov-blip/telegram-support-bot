@@ -1,3 +1,5 @@
+jest.unmock('../src/ticket-ownership');
+
 const mockFindOne = jest.fn();
 const mockFindOneAndUpdate = jest.fn();
 

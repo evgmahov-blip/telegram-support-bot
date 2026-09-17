@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { randomUUID } from 'crypto';
 import cache from './cache';
 import { Messenger, TicketPriority } from './interfaces';
 import * as log from './logger'
@@ -58,6 +59,10 @@ export const SupporteeSchema = new mongoose.Schema<ISupportee>({
   timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' },
 });
 
+SupporteeSchema.index({ userid: 1, messenger: 1, ticketId: -1 });
+SupporteeSchema.index({ internalIds: 1 });
+SupporteeSchema.index({ status: 1, category: 1, assigned_to: 1 });
+
 const Supportee = mongoose.model(getCollectionName(), SupporteeSchema);
 
 export { Supportee };
@@ -79,10 +84,13 @@ const TicketMessageSchema = new mongoose.Schema<ITicketMessage>({
   text: { type: String, required: true },
   timestamp: { type: Date, default: Date.now },
 });
+TicketMessageSchema.index({ ticketId: 1, timestamp: -1 });
 
 const TicketMessage = mongoose.model('TicketMessage', TicketMessageSchema);
 
 export interface IAnalyticsEvent extends mongoose.Document {
+  event_id?: string;
+  seq?: number;
   type: string;
   ticketId: number;
   timestamp: Date;
@@ -91,12 +99,17 @@ export interface IAnalyticsEvent extends mongoose.Document {
 }
 
 const AnalyticsEventSchema = new mongoose.Schema<IAnalyticsEvent>({
+  event_id: { type: String, required: false },
+  seq: { type: Number, required: false },
   type: { type: String, required: true },
   ticketId: { type: Number, required: true },
   timestamp: { type: Date, default: Date.now },
   agent_id: { type: String, default: null },
   metadata: { type: mongoose.Schema.Types.Mixed, default: {} },
 });
+AnalyticsEventSchema.index({ event_id: 1 }, { unique: true, sparse: true });
+AnalyticsEventSchema.index({ seq: 1 }, { unique: true, sparse: true });
+AnalyticsEventSchema.index({ ticketId: 1, timestamp: -1 });
 
 const AnalyticsEvent = mongoose.model('AnalyticsEvent', AnalyticsEventSchema);
 
@@ -113,10 +126,11 @@ const InternalNoteSchema = new mongoose.Schema<IInternalNote>({
   text: { type: String, required: true },
   timestamp: { type: Date, default: Date.now },
 });
+InternalNoteSchema.index({ ticketId: 1, timestamp: -1 });
 
 const InternalNote = mongoose.model('InternalNote', InternalNoteSchema);
 
-interface ITicketCounter extends mongoose.Document {
+interface ITicketCounter {
   _id: string;
   seq: number;
 }
@@ -159,6 +173,11 @@ export async function connect() {
     serverSelectionTimeoutMS: 5000,
   });
 
+  try {
+    await backfillLegacyEvents();
+  } catch (err) {
+    log.error('Legacy event backfill failed; replay may have gaps:', err);
+  }
   return connection;
 }
 
@@ -189,6 +208,131 @@ export const getNextTicketId = async (): Promise<number> => {
   if (!counter) throw new Error('Failed to allocate ticket ID');
   return counter.seq;
 };
+
+const MAX_EVENT_APPEND_RETRIES = 25;
+const LEGACY_EVENT_BATCH_SIZE = 1000;
+const LEGACY_EVENT_BACKFILL_MARKER = 'legacyEventBackfillV3';
+const LEGACY_EVENT_TYPES: Record<string, string> = {
+  ticket_created: 'ticket.created',
+  ticket_closed: 'ticket.closed',
+  ticket_escalated: 'ticket.escalated',
+  staff_reply: 'ticket.replied',
+  first_reply: 'ticket.replied',
+  internal_note: 'ticket.note_added',
+  staff_file_reply: 'ticket.replied',
+};
+const LEGACY_EVENT_TYPE_NAMES = Object.keys(LEGACY_EVENT_TYPES);
+
+function isDuplicateSequenceError(err: unknown): boolean {
+  const mongoError = err as { code?: number; keyPattern?: Record<string, number> };
+  return mongoError?.code === 11000 && Boolean(mongoError.keyPattern?.seq);
+}
+
+async function waitForEventRetry(attempt: number): Promise<void> {
+  const delayMs = Math.min(50, 2 + attempt * 2) + Math.floor(Math.random() * 5);
+  await new Promise((resolve) => setTimeout(resolve, delayMs));
+}
+
+async function nextEventSequenceCandidate(): Promise<number> {
+  const latest = await AnalyticsEvent.findOne({ seq: { $exists: true } })
+    .sort({ seq: -1 })
+    .select('seq');
+  return (latest?.seq ?? 0) + 1;
+}
+
+/**
+ * One-shot migration for analytics rows created before the replay log.
+ * A completion marker keeps normal startup O(1); rows are processed in
+ * bounded batches and canonicalized to the dotted event taxonomy.
+ */
+export async function backfillLegacyEvents(): Promise<number> {
+  const markerId = `${getCollectionName()}:${LEGACY_EVENT_BACKFILL_MARKER}`;
+  const marker = await TicketCounter.findOne({ _id: markerId }).select('seq');
+  if (marker?.seq === 1) return 0;
+
+  let migrated = 0;
+  let collisionAttempt = 0;
+
+  while (true) {
+    const legacyEvents = await AnalyticsEvent.find({
+      $or: [
+        { seq: { $exists: false } },
+        { seq: null },
+        { event_id: { $exists: false } },
+        { event_id: null },
+        { type: { $in: LEGACY_EVENT_TYPE_NAMES } },
+      ],
+    })
+      .sort({ timestamp: 1, _id: 1 })
+      .limit(LEGACY_EVENT_BATCH_SIZE);
+
+    if (legacyEvents.length === 0) break;
+
+    const latest = await AnalyticsEvent.findOne({ seq: { $exists: true } })
+      .sort({ seq: -1 })
+      .select('seq');
+    let nextSeq = latest?.seq ?? 0;
+
+    const operations = legacyEvents.map((event) => {
+      const updates: Record<string, unknown> = {};
+      if (!event.event_id) updates.event_id = randomUUID();
+      if (!Number.isSafeInteger(event.seq)) {
+        nextSeq += 1;
+        updates.seq = nextSeq;
+      }
+      const renamedType = LEGACY_EVENT_TYPES[event.type];
+      if (renamedType) updates.type = renamedType;
+
+      return {
+        updateOne: {
+          filter: { _id: event._id },
+          update: { $set: updates },
+        },
+      };
+    });
+
+    try {
+      const result = await AnalyticsEvent.bulkWrite(operations, { ordered: true });
+      migrated += result.modifiedCount ?? operations.length;
+      collisionAttempt = 0;
+    } catch (err) {
+      if ((err as { code?: number })?.code === 11000 && collisionAttempt < MAX_EVENT_APPEND_RETRIES) {
+        await waitForEventRetry(collisionAttempt);
+        collisionAttempt += 1;
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  await TicketCounter.findOneAndUpdate(
+    { _id: markerId },
+    { $set: { seq: 1 } },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  );
+
+  if (migrated > 0) log.info(`Backfilled ${migrated} legacy analytics events.`);
+  return migrated;
+}
+
+let eventTail: Promise<unknown> = Promise.resolve();
+
+function enqueueEventAppend<T>(fn: () => Promise<T>): Promise<T> {
+  const run = eventTail.then(fn, fn);
+  eventTail = run.catch(() => {});
+  return run;
+}
+
+export function recordAnalyticsEventBestEffort(
+  type: string,
+  ticketId: number,
+  agent_id: string | null = null,
+  metadata: Record<string, any> = {},
+): void {
+  void recordAnalyticsEvent(type, ticketId, agent_id, metadata).catch((err) => {
+    log.error(`Event append failed for ${type} #T${ticketId}:`, err);
+  });
+}
 
 const allowedStatusSources: Record<TicketStatus, TicketStatus[]> = {
   open: ['open', 'waiting_user', 'closed'],
@@ -260,14 +404,13 @@ export async function getTicketByInternalId (
 export async function getTicketByUserId (
   userId: string | number,
   category: string | null
-) {
-  const query = {
+): Promise<ISupportee | null> {
+  const query: Record<string, unknown> = {
     $or: [{ userid: userId }],
-    ...(category ? { category } : { category: null }),
+    category: category ?? null,
   };
-  // Newest ticket first: with ticket_per_message a user has several documents
   const result = await Supportee.findOne(query).sort({ ticketId: -1 });
-  return result;
+  return result as ISupportee | null;
 };
 
 /**
@@ -281,6 +424,7 @@ export const addNewTicket = async (
 ): Promise<number> => {
   const ticketId = await getNextTicketId();
   await Supportee.create({ userid, messenger, ticketId, status: 'open', category: category ?? null });
+  recordAnalyticsEventBestEffort('ticket.created', ticketId, null, { user_id: String(userid) });
   return ticketId;
 };
 
@@ -468,7 +612,22 @@ export async function getAllUsers(): Promise<Array<{ userid: string; messenger: 
   }
 }
 
-// --- Ticket Message methods (conversation memory) ---
+// --- Ticket Message methods (append-only audit history + bounded read window) ---
+
+export async function persistTicketMessage(
+  ticketId: number,
+  sender: 'user' | 'staff' | 'ai',
+  sender_id: string,
+  text: string,
+): Promise<void> {
+  const msg = new TicketMessage({ ticketId, sender, sender_id, text });
+  try {
+    await msg.save();
+  } catch (err) {
+    log.error('DB persistTicketMessage error:', err);
+    throw err;
+  }
+}
 
 export async function addTicketMessage(
   ticketId: number,
@@ -476,29 +635,18 @@ export async function addTicketMessage(
   sender_id: string,
   text: string,
 ): Promise<void> {
-  try {
-    const msg = new TicketMessage({ ticketId, sender, sender_id, text });
-    await msg.save();
-    // Keep only last N messages per ticket (configurable)
-    const depth = cache.config.llm_memory_depth || 10;
-    const excess = await TicketMessage.find({ ticketId })
-      .sort({ timestamp: -1 })
-      .skip(depth);
-    if (excess.length > 0) {
-      const ids = excess.map((m) => m._id);
-      await TicketMessage.deleteMany({ _id: { $in: ids } });
-    }
-  } catch (err) {
-    log.error('DB addTicketMessage error:', err);
-  }
+  await persistTicketMessage(ticketId, sender, sender_id, text);
+  recordAnalyticsEventBestEffort(`ticket.message.${sender}`, ticketId, sender_id || null);
 }
 
+/** LLM context is a bounded read; stored ticket history is never pruned. */
 export async function getConversationHistory(
   ticketId: number,
   depth?: number,
 ): Promise<ITicketMessage[]> {
   try {
-    const limit = depth || (cache.config.llm_memory_depth ?? 10);
+    const configured = depth ?? cache.config.llm_memory_depth ?? 10;
+    const limit = Math.max(1, Math.min(configured, 100));
     return await TicketMessage.find({ ticketId })
       .sort({ timestamp: -1 })
       .limit(limit)
@@ -509,19 +657,98 @@ export async function getConversationHistory(
   }
 }
 
-// --- Analytics Event methods ---
+/** Full chronological ticket history for audit/export/KB workflows. */
+export async function getTicketMessageHistory(
+  ticketId: number,
+  limit: number = 1000,
+): Promise<ITicketMessage[]> {
+  try {
+    const safeLimit = Math.max(1, Math.min(limit, 5000));
+    return await TicketMessage.find({ ticketId })
+      .sort({ timestamp: 1 })
+      .limit(safeLimit)
+      .lean<ITicketMessage[]>();
+  } catch (err) {
+    log.error('DB getTicketMessageHistory error:', err);
+    return [];
+  }
+}
+
+// --- Analytics / event log methods ---
+
+async function appendAnalyticsEvent(
+  type: string,
+  ticketId: number,
+  agent_id: string | null = null,
+  metadata: Record<string, any> = {},
+): Promise<IAnalyticsEvent> {
+  const eventId = randomUUID();
+  let lastError: unknown = null;
+
+  for (let attempt = 0; attempt < MAX_EVENT_APPEND_RETRIES; attempt += 1) {
+    const seq = await nextEventSequenceCandidate();
+    const event = new AnalyticsEvent({
+      event_id: eventId,
+      seq,
+      type,
+      ticketId,
+      agent_id,
+      metadata,
+    });
+
+    try {
+      await event.save();
+      return event as IAnalyticsEvent;
+    } catch (err) {
+      lastError = err;
+      if (isDuplicateSequenceError(err)) {
+        await waitForEventRetry(attempt);
+        continue;
+      }
+      log.error('DB recordAnalyticsEvent error:', err);
+      throw err;
+    }
+  }
+
+  const error = lastError instanceof Error
+    ? lastError
+    : new Error('Failed to append analytics event after sequence retries');
+  log.error('DB recordAnalyticsEvent error:', error);
+  throw error;
+}
 
 export async function recordAnalyticsEvent(
   type: string,
   ticketId: number,
   agent_id: string | null = null,
   metadata: Record<string, any> = {},
-): Promise<void> {
+): Promise<IAnalyticsEvent> {
+  return enqueueEventAppend(() => appendAnalyticsEvent(type, ticketId, agent_id, metadata));
+}
+
+export async function getEventsSince(
+  since: number = 0,
+  limit: number = 100,
+): Promise<IAnalyticsEvent[]> {
   try {
-    const event = new AnalyticsEvent({ type, ticketId, agent_id, metadata });
-    await event.save();
+    const safeSince = Number.isSafeInteger(since) && since >= 0 ? since : 0;
+    const safeLimit = Math.max(1, Math.min(limit, 501));
+    const events = await AnalyticsEvent.find({ seq: { $gt: safeSince } })
+      .sort({ seq: 1 })
+      .limit(safeLimit)
+      .lean<IAnalyticsEvent[]>();
+
+    const contiguous: IAnalyticsEvent[] = [];
+    let expected = safeSince + 1;
+    for (const event of events) {
+      if (event.seq !== expected) break;
+      contiguous.push(event);
+      expected += 1;
+    }
+    return contiguous;
   } catch (err) {
-    log.error('DB recordAnalyticsEvent error:', err);
+    log.error('DB getEventsSince error:', err);
+    return [];
   }
 }
 
