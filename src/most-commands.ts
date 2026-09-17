@@ -1,8 +1,11 @@
-import { Context } from './interfaces';
+import cache from './cache';
+import { Context, TicketPriority } from './interfaces';
 import { ISupportee } from './db';
 import * as db from './db';
 import * as team from './team';
 import * as ticketQueue from './ticket-queue';
+import * as ticketMetadata from './ticket-metadata';
+import * as staff from './staff';
 import * as middleware from './middleware';
 import { resolveTicketFromReply } from './ticket-resolution';
 
@@ -18,6 +21,30 @@ async function requireRepliedTicket(ctx: Context): Promise<ISupportee | null> {
     return null;
   }
   return ticket;
+}
+
+async function requireManageableTicket(
+  ctx: Context,
+  ticket: ISupportee,
+  action: string,
+): Promise<{ actorId: string; role: 'admin' | 'supervisor' | 'agent'; expectedOwner?: string } | null> {
+  const actorId = ctx.from.id.toString();
+  const role = team.getStaffRole(actorId);
+  if (!role) {
+    await middleware.reply(ctx, `You do not have permission to ${action}.`);
+    return null;
+  }
+  if (!team.canManageTicket(actorId, ticket.assigned_to)) {
+    await middleware.reply(ctx, ticket.assigned_to
+      ? 'This ticket is owned by another engineer.'
+      : 'Take the ticket first with /take.');
+    return null;
+  }
+  return {
+    actorId,
+    role,
+    expectedOwner: role === 'agent' ? actorId : undefined,
+  };
 }
 
 export async function takeCommand(ctx: Context): Promise<void> {
@@ -109,6 +136,138 @@ export async function queueCommand(ctx: Context): Promise<void> {
     from: currentQueue,
     to: targetQueue,
   });
+}
+
+/** Set priority on an active ticket using owner/state CAS. */
+export async function priorityCommand(ctx: Context): Promise<void> {
+  if (!ctx.session.admin) return;
+
+  const raw = ctx.match?.trim().toLowerCase() || '';
+  const priorities = Object.values(TicketPriority);
+  if (!priorities.includes(raw as TicketPriority)) {
+    await middleware.reply(ctx, 'Usage: /priority <low|normal|high|urgent>');
+    return;
+  }
+
+  const ticket = await requireRepliedTicket(ctx);
+  if (!ticket) return;
+  const access = await requireManageableTicket(ctx, ticket, 'change ticket priority');
+  if (!access) return;
+
+  const priority = raw as TicketPriority;
+  const updated = await ticketMetadata.setPriority(
+    ticket.ticketId,
+    priority,
+    access.expectedOwner,
+  );
+  if (!updated) {
+    await middleware.reply(ctx, 'Ticket owner or state changed before the priority update completed.');
+    return;
+  }
+
+  const icons: Record<TicketPriority, string> = {
+    [TicketPriority.URGENT]: '🔴',
+    [TicketPriority.HIGH]: '🟠',
+    [TicketPriority.NORMAL]: '🟡',
+    [TicketPriority.LOW]: '⚪',
+  };
+  await middleware.reply(ctx, `${icons[priority]} Priority → ${priority.toUpperCase()}.`);
+  await db.recordAnalyticsEvent('ticket.priority_changed', ticket.ticketId, access.actorId, {
+    from: ticket.priority || TicketPriority.NORMAL,
+    to: priority,
+  });
+}
+
+/** Add an internal-only note to an active manageable ticket. */
+export async function noteCommand(ctx: Context): Promise<void> {
+  if (!ctx.session.admin) return;
+  const text = ctx.match?.trim() || '';
+  if (!text) {
+    await middleware.reply(ctx, 'Usage: /note <internal note text>');
+    return;
+  }
+
+  const ticket = await requireRepliedTicket(ctx);
+  if (!ticket) return;
+  const access = await requireManageableTicket(ctx, ticket, 'add internal notes');
+  if (!access) return;
+
+  const guarded = await ticketMetadata.getActiveManageableTicket(
+    ticket.ticketId,
+    access.expectedOwner,
+  );
+  if (!guarded) {
+    await middleware.reply(ctx, 'Ticket owner or state changed before the note was added.');
+    return;
+  }
+
+  await db.addInternalNote(ticket.ticketId, access.actorId, text);
+  await db.recordAnalyticsEvent('ticket.note_added', ticket.ticketId, access.actorId);
+  await middleware.reply(
+    ctx,
+    `Internal note added to #T${ticket.ticketId.toString().padStart(6, '0')}.`,
+  );
+}
+
+/** Show internal notes only to staff who may manage the ticket. */
+export async function notesCommand(ctx: Context): Promise<void> {
+  if (!ctx.session.admin) return;
+  const ticket = await requireRepliedTicket(ctx);
+  if (!ticket) return;
+  const access = await requireManageableTicket(ctx, ticket, 'view internal notes');
+  if (!access) return;
+
+  const notes = await db.getInternalNotes(ticket.ticketId);
+  if (notes.length === 0) {
+    await middleware.reply(
+      ctx,
+      `No internal notes for #T${ticket.ticketId.toString().padStart(6, '0')}.`,
+    );
+    return;
+  }
+
+  const esc = middleware.strictEscape;
+  const lines = notes.map((note) => {
+    const author = cache.staffMembers.get(note.author_id);
+    return `• ${esc(author?.name || note.author_id)}: ${esc(note.text)}`;
+  });
+  await middleware.reply(
+    ctx,
+    `Internal notes #T${ticket.ticketId.toString().padStart(6, '0')}:\n${lines.join('\n')}`,
+    { parse_mode: cache.config.parse_mode },
+  );
+}
+
+/**
+ * Sends a configured canned response through the normal staff reply path.
+ * Without a replied ticket it only previews the template inside the staff chat.
+ */
+export async function cannedResponseCommand(
+  ctx: Context,
+  key: string,
+  cannedText: string,
+): Promise<void> {
+  if (!ctx.session.admin) return;
+
+  if (!ctx.message?.reply_to_message) {
+    await middleware.reply(ctx, `Template "${key}":\n\n${cannedText}`, {
+      parse_mode: cache.config.parse_mode,
+    });
+    return;
+  }
+
+  const ticket = await requireRepliedTicket(ctx);
+  if (!ticket) return;
+  const access = await requireManageableTicket(ctx, ticket, 'send canned responses');
+  if (!access) return;
+  if (ticket.status === 'closed') {
+    await middleware.reply(ctx, cache.config.language.ticketClosedError);
+    return;
+  }
+
+  ctx.message.text = cannedText;
+  await staff.chat(ctx);
+  await db.recordAnalyticsEvent('ticket.canned_response', ticket.ticketId, access.actorId, { key });
 }
 
 export { resolveRepliedTicket };
