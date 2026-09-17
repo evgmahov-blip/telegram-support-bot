@@ -130,7 +130,7 @@ InternalNoteSchema.index({ ticketId: 1, timestamp: -1 });
 
 const InternalNote = mongoose.model('InternalNote', InternalNoteSchema);
 
-interface ITicketCounter extends mongoose.Document {
+interface ITicketCounter {
   _id: string;
   seq: number;
 }
@@ -286,15 +286,13 @@ export async function getTicketByInternalId (
 export async function getTicketByUserId (
   userId: string | number,
   category: string | null
-) {
+): Promise<ISupportee | null> {
   const query: Record<string, unknown> = {
     $or: [{ userid: userId }],
+    category: category ?? null,
   };
-  if (category) query.category = category;
-  // Newest ticket first: with ticket_per_message a user has several documents.
-  // A null category means "any queue/category", used by internal correlation paths.
   const result = await Supportee.findOne(query).sort({ ticketId: -1 });
-  return result;
+  return result as ISupportee | null;
 };
 
 /**
