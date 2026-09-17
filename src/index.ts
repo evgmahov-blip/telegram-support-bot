@@ -13,6 +13,7 @@ import * as team from './team';
 import * as analytics from './analytics';
 import * as workflows from './workflows';
 import * as recovery from './recovery';
+import { createGracefulShutdown, installSignalHandlers, ManagedTimer } from './lifecycle';
 import * as log from './logger'
 
 /**
@@ -100,9 +101,6 @@ async function main(logs = true) {
   // Create and store all enabled addons.
   const addons = createAddons();
 
-  // Initialize the webserver if enabled and if there's a Telegram addon.
-  const telegramAddon = addons.find((addon) => (addon as any).platform === 'telegram');
-
   // Initialize global error handling.
   error.init(logs);
 
@@ -111,18 +109,36 @@ async function main(logs = true) {
     addon.start();
   });
 
+  const timers = new Set<ManagedTimer>();
+  let shuttingDown = false;
+  const performShutdown = createGracefulShutdown(addons, timers);
+  const shutdown = async (reason?: string) => {
+    shuttingDown = true;
+    await performShutdown(reason);
+  };
+  installSignalHandlers(shutdown);
+
   // Set up daily summary cron job
   const summaryTime = cache.config.daily_summary_time || '09:00';
   if (summaryTime) {
     const [hours, minutes] = summaryTime.split(':').map(Number);
-    const runDailySummary = () => {
-      analytics.sendDailySummary().then(() => {
-        // Schedule for next day at the same time
+
+    const scheduleDailySummary = (delay: number) => {
+      const timer = setTimeout(async () => {
+        timers.delete(timer);
+        try {
+          await analytics.sendDailySummary();
+        } catch (err) {
+          log.error('Daily summary failed:', err);
+        }
+
+        if (shuttingDown) return;
         const now = new Date();
         const target = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, hours, minutes);
-        const delay = target.getTime() - now.getTime();
-        setTimeout(runDailySummary, delay);
-      });
+        scheduleDailySummary(target.getTime() - now.getTime());
+      }, Math.max(delay, 0));
+      timer.unref();
+      timers.add(timer);
     };
 
     // Calculate initial delay to first run time
@@ -133,16 +149,21 @@ async function main(logs = true) {
       // If the time has already passed today, schedule for tomorrow
       delay += 86400000;
     }
-    setTimeout(runDailySummary, Math.max(delay, 0));
+    scheduleDailySummary(delay);
     log.info(`Daily summary scheduled at ${summaryTime} UTC (first run in ${Math.round(delay / 60000)} min)`);
   }
 
   // Set up periodic workflow checks (every 30 minutes)
   const workflowInterval = setInterval(() => {
-    workflows.runWorkflowChecks();
+    void workflows.runWorkflowChecks().catch((err) => {
+      log.error('Periodic workflow check failed:', err);
+    });
   }, 30 * 60 * 1000);
   workflowInterval.unref(); // Don't keep process alive
+  timers.add(workflowInterval);
   log.info('Workflow periodic checks started (every 30 min)');
+
+  return { shutdown };
 }
 
 main();

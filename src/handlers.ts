@@ -158,7 +158,7 @@ export function registerCommonHandlers(addon: Addon, keys?: string[][]) {
       await ctx.answerCbQuery(cache.config.language.csatThankYou || 'Thank you!');
       return;
     }
-    inline.callbackQuery(ctx);
+    await inline.callbackQuery(ctx);
   });
   addon.on([':photo'], (ctx: Context) => files.fileHandler('photo', addon, ctx));
   addon.on([':video'], (ctx: Context) => files.fileHandler('video', addon, ctx));

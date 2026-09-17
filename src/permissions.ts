@@ -83,7 +83,9 @@ async function checkPermissions(ctx: Context, next: () => any, config: Config) {
     if (ban) {
       return;
     }
-    next();
+    // Preserve grammY middleware completion semantics: callers such as the
+    // Telegram dedupe guard must not finish before downstream handlers finish.
+    return await next();
   }
 }
 

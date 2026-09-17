@@ -1,4 +1,4 @@
-// Tests for the Telegram addon: staffchat_thread_id injection, media correlation ids and stickers.
+// Tests for the Telegram addon: ingress dedupe, graceful stop, thread injection and media ids.
 const mockApi = {
   sendMessage: jest.fn().mockResolvedValue({ message_id: 5 }),
   sendPhoto: jest.fn().mockResolvedValue({ message_id: 6 }),
@@ -7,27 +7,41 @@ const mockApi = {
   sendSticker: jest.fn().mockResolvedValue({ message_id: 9 }),
   config: { use: jest.fn() },
 };
+const mockBotUse = jest.fn();
+const mockBotStart = jest.fn().mockResolvedValue(undefined);
+const mockBotStop = jest.fn().mockResolvedValue(undefined);
+const mockClaimTelegramUpdate = jest.fn().mockResolvedValue('claim-default');
+const mockCompleteTelegramUpdate = jest.fn().mockResolvedValue(undefined);
+const mockReleaseTelegramUpdate = jest.fn().mockResolvedValue(undefined);
 
 jest.mock('grammy', () => ({
   Bot: jest.fn().mockImplementation(() => ({
     init: jest.fn().mockResolvedValue({}),
     api: mockApi,
     botInfo: { username: 'dummy_bot' },
-    use: jest.fn(),
+    use: mockBotUse,
     command: jest.fn(),
     on: jest.fn(),
     hears: jest.fn(),
     catch: jest.fn(),
-    start: jest.fn(),
+    start: mockBotStart,
+    stop: mockBotStop,
   })),
   session: jest.fn(() => (_ctx: unknown, next: () => unknown) => next()),
 }));
 jest.mock('@grammyjs/transformer-throttler', () => ({ apiThrottler: () => jest.fn() }));
 jest.mock('../src/middleware', () => ({ reply: jest.fn() }));
-jest.mock('../src/permissions', () => ({ checkPermissions: jest.fn() }));
+jest.mock('../src/permissions', () => ({
+  checkPermissions: jest.fn(async (_ctx: unknown, next: () => unknown) => await next()),
+}));
 jest.mock('../src/inline', () => ({ initInline: jest.fn().mockReturnValue([]) }));
 jest.mock('../src/handlers', () => ({ registerCommonHandlers: jest.fn() }));
 jest.mock('../src/most-commands', () => ({ queueCommand: jest.fn() }));
+jest.mock('../src/telegram-update-dedup', () => ({
+  claimTelegramUpdate: mockClaimTelegramUpdate,
+  completeTelegramUpdate: mockCompleteTelegramUpdate,
+  releaseTelegramUpdate: mockReleaseTelegramUpdate,
+}));
 jest.mock('../src/cache', () => ({
   __esModule: true,
   default: {
@@ -44,6 +58,9 @@ describe('TelegramAddon', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     cache.config.staffchat_thread_id = null;
+    mockClaimTelegramUpdate.mockResolvedValue('claim-default');
+    mockCompleteTelegramUpdate.mockResolvedValue(undefined);
+    mockReleaseTelegramUpdate.mockResolvedValue(undefined);
   });
 
   it('sends plain messages without a thread id by default', async () => {
@@ -98,5 +115,52 @@ describe('TelegramAddon', () => {
     await expect(addon.sendDocument('555', 'file-1')).resolves.toBeNull();
     await expect(addon.sendVideo('555', 'file-1')).resolves.toBeNull();
     await expect(addon.sendSticker('555', 'file-1')).resolves.toBeNull();
+  });
+
+  it('deduplicates updates around the full downstream chain and stops polling', async () => {
+    addon.start();
+    expect(mockBotUse).toHaveBeenCalledTimes(3);
+    const guard = mockBotUse.mock.calls[0][0] as (ctx: any, next: () => Promise<void>) => Promise<void>;
+
+    const order: string[] = [];
+    mockClaimTelegramUpdate.mockImplementationOnce(async () => {
+      order.push('claim');
+      return 'claim-101';
+    });
+    mockCompleteTelegramUpdate.mockImplementationOnce(async () => {
+      order.push('complete');
+    });
+    const downstream = jest.fn(async () => {
+      order.push('downstream');
+    });
+
+    await guard({ update: { update_id: 101 } }, downstream);
+    expect(order).toEqual(['claim', 'downstream', 'complete']);
+    expect(mockCompleteTelegramUpdate).toHaveBeenCalledWith(101, 'claim-101');
+
+    mockClaimTelegramUpdate.mockResolvedValueOnce(null);
+    const duplicateDownstream = jest.fn().mockResolvedValue(undefined);
+    await guard({ update: { update_id: 101 } }, duplicateDownstream);
+    expect(duplicateDownstream).not.toHaveBeenCalled();
+
+    const handlerError = new Error('handler failed');
+    mockClaimTelegramUpdate.mockResolvedValueOnce('claim-102');
+    await expect(guard(
+      { update: { update_id: 102 } },
+      jest.fn().mockRejectedValue(handlerError),
+    )).rejects.toBe(handlerError);
+    expect(mockReleaseTelegramUpdate).toHaveBeenCalledWith(102, 'claim-102');
+
+    mockClaimTelegramUpdate.mockResolvedValueOnce('claim-103');
+    mockCompleteTelegramUpdate.mockRejectedValueOnce(new Error('completion failed'));
+    mockReleaseTelegramUpdate.mockClear();
+    await expect(guard(
+      { update: { update_id: 103 } },
+      jest.fn().mockResolvedValue(undefined),
+    )).rejects.toThrow('completion failed');
+    expect(mockReleaseTelegramUpdate).not.toHaveBeenCalled();
+
+    await addon.stop();
+    expect(mockBotStop).toHaveBeenCalledTimes(1);
   });
 });
