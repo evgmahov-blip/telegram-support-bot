@@ -35,7 +35,6 @@ jobs:
           npm run build 2>&1 | tee build.log
 
       - name: Unit tests
-        if: always()
         run: |
           set -o pipefail
           npm test 2>&1 | tee test.log
