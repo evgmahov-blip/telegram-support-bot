@@ -60,6 +60,7 @@ export function registerCommonHandlers(addon: Addon, keys?: string[][]) {
   addon.command('unmute', (ctx: Context) => commands.unmuteCommand(ctx));
   addon.command('note', (ctx: Context) => mostCommands.noteCommand(ctx));
   addon.command('notes', (ctx: Context) => mostCommands.notesCommand(ctx));
+  addon.command('history', (ctx: Context) => mostCommands.historyCommand(ctx));
   addon.command('staff', (ctx: Context) => commands.listStaffCommand(ctx));
 
   // Analytics commands
