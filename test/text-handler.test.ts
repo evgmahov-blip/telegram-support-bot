@@ -9,7 +9,6 @@ const mockGetTicketById = jest.fn();
 const mockResumeWaitingTicket = jest.fn();
 const mockRecordAnalyticsEvent = jest.fn().mockResolvedValue(undefined);
 const mockUserChat = jest.fn();
-const mockPrivateReply = jest.fn();
 const mockStaffChat = jest.fn();
 
 jest.mock('../src/middleware', () => ({
@@ -36,7 +35,6 @@ jest.mock('../src/users', () => ({
 }));
 
 jest.mock('../src/staff', () => ({
-  privateReply: mockPrivateReply,
   chat: mockStaffChat,
 }));
 
@@ -144,22 +142,21 @@ describe('Text Handler Module', () => {
   });
 
   describe('handleText', () => {
-    it('should handle private reply mode', () => {
-      const ctx = createMockContext('Response message', 'private', 'private_reply');
+    it('never enters legacy private_reply mode; staff group messages stay in staff.chat', async () => {
+      const ctx = createMockContext('Response message', 'group', 'private_reply', true);
       const mockAddon = { platform: 'telegram' };
 
-      text.handleText(mockAddon as any, ctx, []);
+      await text.handleText(mockAddon as any, ctx, []);
 
-      expect(mockPrivateReply).toHaveBeenCalledWith(ctx);
-      expect(mockReply).not.toHaveBeenCalled();
+      expect(mockStaffChat).toHaveBeenCalledWith(ctx);
     });
 
-    it('should show category keyboard for regular messages when conditions are met', () => {
+    it('should show category keyboard for regular messages when conditions are met', async () => {
       const ctx = createMockContext('I need help with something');
       const mockAddon = { platform: 'telegram' };
       const keys = [['Support'], ['Sales']];
 
-      text.handleText(mockAddon as any, ctx, keys);
+      await text.handleText(mockAddon as any, ctx, keys);
 
       expect(mockReply).toHaveBeenCalledWith(
         ctx,
