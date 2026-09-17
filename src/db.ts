@@ -13,13 +13,15 @@ function getCollectionName(): string {
   return process.env.MONGO_COLLECTION || `bot_${cache.config?.owner_id || 'support'}`;
 }
 
+export type TicketStatus = 'open' | 'waiting_user' | 'closed';
+
 export interface ISupportee extends mongoose.Document {
   ticketId: number;
   userid: string;
   internalIds: Array<number> | null;
   name: string | null;
   messenger: Messenger;
-  status: string;
+  status: TicketStatus;
   category: string | null;
   // Team collaboration fields
   assigned_to: string | null;
@@ -42,7 +44,7 @@ export const SupporteeSchema = new mongoose.Schema<ISupportee>({
   internalIds: { type: [Number], required: false },
   name: { type: String, required: false },
   messenger: { type: String, required: true },
-  status: { type: String, default: 'open' },
+  status: { type: String, enum: ['open', 'waiting_user', 'closed'], default: 'open' },
   category: { type: String, default: null },
   assigned_to: { type: String, default: null },
   tags: { type: [String], default: [] },
@@ -126,6 +128,23 @@ const TicketCounterSchema = new mongoose.Schema<ITicketCounter>({
 
 const TicketCounter = mongoose.model('TicketCounter', TicketCounterSchema);
 
+export interface IUserBan extends mongoose.Document {
+  userid: string;
+  messenger: string;
+  created_at: Date;
+  updated_at: Date;
+}
+
+const UserBanSchema = new mongoose.Schema<IUserBan>({
+  userid: { type: String, required: true },
+  messenger: { type: String, required: true },
+}, {
+  timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' },
+});
+UserBanSchema.index({ messenger: 1, userid: 1 }, { unique: true });
+
+const UserBan = mongoose.model('UserBan', UserBanSchema);
+
 export async function connect() {
   mongoose.connection.on('open', () => {
     log.info('Connected to mongo server.');
@@ -170,6 +189,37 @@ export const getNextTicketId = async (): Promise<number> => {
   if (!counter) throw new Error('Failed to allocate ticket ID');
   return counter.seq;
 };
+
+const allowedStatusSources: Record<TicketStatus, TicketStatus[]> = {
+  open: ['open', 'waiting_user', 'closed'],
+  waiting_user: ['open', 'waiting_user'],
+  closed: ['open', 'waiting_user', 'closed'],
+};
+
+/**
+ * Atomically move one ticket to a new lifecycle state.
+ * Invalid transitions (notably closed -> waiting_user) do not match the query.
+ */
+export async function transitionTicketStatus(
+  ticketId: number,
+  target: TicketStatus,
+): Promise<ISupportee | null> {
+  const update: Record<string, unknown> = {
+    status: target,
+    closed_at: target === 'closed' ? new Date() : null,
+  };
+
+  const result = await Supportee.findOneAndUpdate(
+    {
+      ticketId,
+      status: { $in: allowedStatusSources[target] },
+    },
+    { $set: update },
+    { new: true },
+  );
+
+  return result as ISupportee | null;
+}
 
 export async function check(
   userid: string | number,
@@ -246,17 +296,43 @@ export async function getByTicketId(
   }
 }
 
+/** User bans are account-level state and are not ticket lifecycle states. */
+export async function banUser(
+  userid: string | number,
+  messenger: string,
+): Promise<void> {
+  await UserBan.findOneAndUpdate(
+    { messenger, userid: String(userid) },
+    { $setOnInsert: { messenger, userid: String(userid) } },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  );
+}
+
+export async function unbanUser(
+  userid: string | number,
+  messenger: string,
+): Promise<void> {
+  await UserBan.deleteOne({ messenger, userid: String(userid) });
+
+  // One-time compatibility cleanup for databases created by upstream versions
+  // that encoded a ban as ticket status/category.
+  await Supportee.updateMany(
+    { messenger, userid: String(userid), status: 'banned' },
+    { $set: { status: 'closed', category: null, closed_at: new Date() } },
+  );
+}
+
 export async function checkBan(
   userid: string | number,
   messenger: string,
-): Promise<ISupportee | null> {
+): Promise<IUserBan | ISupportee | null> {
   try {
-    const query = {
-      messenger,
-      $or: [{ userid: String(userid) }],
-      status: 'banned',
-    };
-    return await Supportee.findOne(query) as ISupportee | null;
+    const query = { messenger, userid: String(userid) };
+    const ban = await UserBan.findOne(query);
+    if (ban) return ban as IUserBan;
+
+    // Read-only compatibility with old databases. New bans never use ticket status.
+    return await Supportee.findOne({ ...query, status: 'banned' }) as ISupportee | null;
   } catch (err) {
     log.error('DB checkBan error:', err);
     return null;
@@ -265,8 +341,8 @@ export async function checkBan(
 
 export const closeAll = async () => {
   await Supportee.updateMany(
-    { status: { $ne: 'banned' } },
-    { $set: { status: 'closed' } },
+    { status: { $in: ['open', 'waiting_user'] } },
+    { $set: { status: 'closed', closed_at: new Date() } },
   );
 };
 
@@ -274,9 +350,10 @@ export const reopen = async (userid: any, category: string, messenger: string) =
   const query = {
     messenger,
     $or: [{ userid: userid }, { ticketId: userid }],
+    status: 'closed',
     ...(category && { category }),
   };
-  await Supportee.updateMany(query, { $set: { status: 'open' } });
+  await Supportee.updateMany(query, { $set: { status: 'open', closed_at: null } });
 };
 
 export const addIdAndName = async (
@@ -311,9 +388,13 @@ export const add = async (
     const query = {
       messenger,
       $or: [{ userid: userid }, { ticketId: userid }],
+      status: { $in: ['open', 'waiting_user'] },
       ...(category && { category }),
     };
-    const result = await Supportee.updateMany(query, { $set: { status: 'closed' } });
+    const result = await Supportee.updateMany(
+      query,
+      { $set: { status: 'closed', closed_at: new Date() } },
+    );
     return result.modifiedCount ?? 0;
   }
 
@@ -323,20 +404,18 @@ export const add = async (
       { messenger, userid },
       {
         $setOnInsert: { userid, messenger, ticketId },
-        $set: { status: 'open', category: category ?? null },
+        $set: { status: 'open', category: category ?? null, closed_at: null },
       },
       { upsert: true, new: true, setDefaultsOnInsert: true },
     );
     return result ? 1 : 0;
   }
 
+  // Backward-compatible API surface for old command code. The ban itself is
+  // stored separately and never written into Supportee.status.
   if (status === 'banned') {
-    const result = await Supportee.findOneAndUpdate(
-      { messenger, userid },
-      { $set: { status: 'banned', category: 'BANNED' } },
-      { upsert: false, new: true },
-    );
-    return result ? 1 : 0;
+    await banUser(userid, messenger);
+    return 1;
   }
 
   return 0;
@@ -367,7 +446,7 @@ export async function open(
  */
 export async function getAllUsers(): Promise<Array<{ userid: string; messenger: string }>> {
   try {
-    const docs = await Supportee.find({ status: { $ne: 'banned' } })
+    const docs = await Supportee.find({})
       .select('userid messenger')
       .lean();
     const seen = new Set<string>();
@@ -375,10 +454,12 @@ export async function getAllUsers(): Promise<Array<{ userid: string; messenger: 
     for (const doc of docs) {
       const userid = String(doc.userid ?? '');
       if (!userid || userid.startsWith('WEB')) continue;
-      const key = `${doc.messenger}:${userid}`;
+      const messenger = String(doc.messenger);
+      const key = `${messenger}:${userid}`;
       if (seen.has(key)) continue;
+      if (await checkBan(userid, messenger)) continue;
       seen.add(key);
-      users.push({ userid, messenger: String(doc.messenger) });
+      users.push({ userid, messenger });
     }
     return users;
   } catch (err) {
@@ -638,4 +719,4 @@ export async function recordCSAT(
 
 // --- Export models for use in other modules ---
 
-export { TicketMessage, AnalyticsEvent, InternalNote, TicketCounter };
+export { TicketMessage, AnalyticsEvent, InternalNote, TicketCounter, UserBan };
