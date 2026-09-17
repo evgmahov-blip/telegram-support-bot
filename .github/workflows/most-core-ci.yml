@@ -30,11 +30,15 @@ jobs:
         run: npm ci
 
       - name: TypeScript build
-        run: npm run build 2>&1 | tee build.log
+        run: |
+          set -o pipefail
+          npm run build 2>&1 | tee build.log
 
       - name: Unit tests
         if: always()
-        run: npm test 2>&1 | tee test.log
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee test.log
 
       - name: Upload CI diagnostics
         if: always()
