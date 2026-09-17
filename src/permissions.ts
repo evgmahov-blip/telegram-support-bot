@@ -61,8 +61,9 @@ async function checkRights(
 }
 
 /**
- * Defines user permissions by checking group/admin rights and ban status.
- * Also initializes staff role cache.
+ * Defines user permissions by checking group/admin rights and account ban state.
+ * Ban state is stored separately from ticket lifecycle, so any checkBan hit blocks
+ * the update regardless of the shape of the returned compatibility record.
  */
 async function checkPermissions(ctx: Context, next: () => any, config: Config) {
   ctx.session.admin = false;
@@ -78,8 +79,8 @@ async function checkPermissions(ctx: Context, next: () => any, config: Config) {
   } catch (error) {
     log.error('Error checking rights:', error);
   } finally {
-    const ticket = await db.checkBan(ctx.chat.id, ctx.messenger);
-    if (ticket && ticket.status === 'banned') {
+    const ban = await db.checkBan(ctx.chat.id, ctx.messenger);
+    if (ban) {
       return;
     }
     next();
