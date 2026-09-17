@@ -4,32 +4,6 @@ import { Context, Messenger } from './interfaces';
 import TelegramAddon from './addons/telegram';
 
 /**
- * Builds an inline keyboard with a "Reply Private" button.
- *
- * @param userId - The user's ID.
- * @param firstName - The user's first name.
- * @param category - The ticket category.
- * @param ticketId - The ticket identifier.
- * @returns The reply markup object.
- */
-const buildInlineKeyboard = (
-  userId: string | number,
-  firstName: string,
-  category: string | null,
-  ticketId: string | number,
-): object => ({
-  html: '',
-  inline_keyboard: [
-    [
-      {
-        text: cache.config.language.replyPrivate,
-        callback_data: `${userId}---${firstName}---${category}---${ticketId}`,
-      },
-    ],
-  ],
-});
-
-/**
  * Escapes special characters for MarkdownV2, HTML, or Markdown formats.
  *
  * @param str - The string to escape.
@@ -49,7 +23,6 @@ const strictEscape = (str: string): string => {
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#39;'); // Escape single quotes
     case 'Markdown':
-      // Escape special Markdown characters (square brackets separately for safety)
       return str
         .replace(/([[\]_*`])/g, '\$1')
         .replace(/(\[|\])/g, '\$1');
@@ -60,11 +33,6 @@ const strictEscape = (str: string): string => {
 
 /**
  * Sends a message through the appropriate messenger addon.
- *
- * @param id - The target identifier.
- * @param messenger - The messenger type.
- * @param msg - The message text.
- * @param extra - Extra options (default includes the configured parse mode).
  */
 async function sendMessage (
   id: string | number,
@@ -73,10 +41,9 @@ async function sendMessage (
   extra: any = { parse_mode: cache.config.parse_mode }
 ): Promise<string | null> {
   const messengerType = messenger as Messenger;
-  // Remove extra spaces
   const cleanedMsg = msg.replace(/ {2,}/g, ' ');
-  
-  switch (messengerType) {  
+
+  switch (messengerType) {
     case Messenger.TELEGRAM:
       return await TelegramAddon.getInstance().sendMessage(id, cleanedMsg, extra);
     case Messenger.SIGNAL:
@@ -93,10 +60,6 @@ async function sendMessage (
 
 /**
  * Replies to a message within the given context.
- *
- * @param ctx - The message context.
- * @param msgText - The reply text.
- * @param extra - Extra options (default includes the configured parse mode).
  */
 const reply = async (
   ctx: Context,
@@ -108,4 +71,4 @@ const reply = async (
   await sendMessage(chatId, ctx.messenger, msgText, extra);
 };
 
-export { buildInlineKeyboard, strictEscape, sendMessage, reply };
+export { strictEscape, sendMessage, reply };
