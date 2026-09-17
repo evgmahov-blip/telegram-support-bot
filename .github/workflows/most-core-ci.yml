@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - most-core
+  pull_request:
+    branches:
+      - most-core
   workflow_dispatch:
 
 permissions:
