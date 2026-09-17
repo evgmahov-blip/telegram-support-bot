@@ -173,7 +173,11 @@ export async function connect() {
     serverSelectionTimeoutMS: 5000,
   });
 
-  await backfillLegacyEvents();
+  try {
+    await backfillLegacyEvents();
+  } catch (err) {
+    log.error('Legacy event backfill failed; replay may have gaps:', err);
+  }
   return connection;
 }
 
@@ -205,11 +209,27 @@ export const getNextTicketId = async (): Promise<number> => {
   return counter.seq;
 };
 
-const MAX_EVENT_APPEND_RETRIES = 8;
+const MAX_EVENT_APPEND_RETRIES = 25;
+const LEGACY_EVENT_BATCH_SIZE = 1000;
+const LEGACY_EVENT_BACKFILL_MARKER = 'legacyEventBackfillV2';
+const LEGACY_EVENT_TYPES: Record<string, string> = {
+  ticket_created: 'ticket.created',
+  ticket_closed: 'ticket.closed',
+  ticket_escalated: 'ticket.escalated',
+  staff_reply: 'ticket.replied',
+  first_reply: 'ticket.replied',
+  internal_note: 'ticket.note_added',
+};
+const LEGACY_EVENT_TYPE_NAMES = Object.keys(LEGACY_EVENT_TYPES);
 
 function isDuplicateSequenceError(err: unknown): boolean {
   const mongoError = err as { code?: number; keyPattern?: Record<string, number> };
   return mongoError?.code === 11000 && Boolean(mongoError.keyPattern?.seq);
+}
+
+async function waitForEventRetry(attempt: number): Promise<void> {
+  const delayMs = Math.min(50, 2 + attempt * 2) + Math.floor(Math.random() * 5);
+  await new Promise((resolve) => setTimeout(resolve, delayMs));
 }
 
 async function nextEventSequenceCandidate(): Promise<number> {
@@ -219,40 +239,90 @@ async function nextEventSequenceCandidate(): Promise<number> {
   return (latest?.seq ?? 0) + 1;
 }
 
-/** Backfill pre-event-log rows without rewinding any existing cursor. */
+/**
+ * One-shot migration for analytics rows created before the replay log.
+ * A completion marker keeps normal startup O(1); rows are processed in
+ * bounded batches and canonicalized to the dotted event taxonomy.
+ */
 export async function backfillLegacyEvents(): Promise<number> {
-  const latest = await AnalyticsEvent.findOne({ seq: { $exists: true } })
-    .sort({ seq: -1 })
-    .select('seq');
-  let nextSeq = latest?.seq ?? 0;
+  const markerId = `${getCollectionName()}:${LEGACY_EVENT_BACKFILL_MARKER}`;
+  const marker = await TicketCounter.findOne({ _id: markerId }).select('seq');
+  if (marker?.seq === 1) return 0;
+
   let migrated = 0;
+  let collisionAttempt = 0;
 
-  const legacyEvents = await AnalyticsEvent.find({
-    $or: [
-      { seq: { $exists: false } },
-      { seq: null },
-      { event_id: { $exists: false } },
-      { event_id: null },
-    ],
-  }).sort({ timestamp: 1, _id: 1 });
+  while (true) {
+    const legacyEvents = await AnalyticsEvent.find({
+      $or: [
+        { seq: { $exists: false } },
+        { seq: null },
+        { event_id: { $exists: false } },
+        { event_id: null },
+        { type: { $in: LEGACY_EVENT_TYPE_NAMES } },
+      ],
+    })
+      .sort({ timestamp: 1, _id: 1 })
+      .limit(LEGACY_EVENT_BATCH_SIZE);
 
-  for (const event of legacyEvents) {
-    const updates: Record<string, unknown> = {};
-    if (!event.event_id) updates.event_id = randomUUID();
-    if (!Number.isSafeInteger(event.seq)) {
-      nextSeq += 1;
-      updates.seq = nextSeq;
-    } else {
-      nextSeq = Math.max(nextSeq, event.seq as number);
-    }
-    if (Object.keys(updates).length > 0) {
-      await AnalyticsEvent.updateOne({ _id: event._id }, { $set: updates });
-      migrated += 1;
+    if (legacyEvents.length === 0) break;
+
+    const latest = await AnalyticsEvent.findOne({ seq: { $exists: true } })
+      .sort({ seq: -1 })
+      .select('seq');
+    let nextSeq = latest?.seq ?? 0;
+
+    const operations = legacyEvents.map((event) => {
+      const updates: Record<string, unknown> = {};
+      if (!event.event_id) updates.event_id = randomUUID();
+      if (!Number.isSafeInteger(event.seq)) {
+        nextSeq += 1;
+        updates.seq = nextSeq;
+      }
+      const renamedType = LEGACY_EVENT_TYPES[event.type];
+      if (renamedType) updates.type = renamedType;
+
+      return {
+        updateOne: {
+          filter: { _id: event._id },
+          update: { $set: updates },
+        },
+      };
+    });
+
+    try {
+      const result = await AnalyticsEvent.bulkWrite(operations, { ordered: true });
+      migrated += result.modifiedCount ?? operations.length;
+      collisionAttempt = 0;
+    } catch (err) {
+      if ((err as { code?: number })?.code === 11000 && collisionAttempt < MAX_EVENT_APPEND_RETRIES) {
+        await waitForEventRetry(collisionAttempt);
+        collisionAttempt += 1;
+        continue;
+      }
+      throw err;
     }
   }
 
+  await TicketCounter.findOneAndUpdate(
+    { _id: markerId },
+    { $set: { seq: 1 } },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  );
+
   if (migrated > 0) log.info(`Backfilled ${migrated} legacy analytics events.`);
   return migrated;
+}
+
+function recordAnalyticsEventBestEffort(
+  type: string,
+  ticketId: number,
+  agent_id: string | null = null,
+  metadata: Record<string, any> = {},
+): void {
+  void recordAnalyticsEvent(type, ticketId, agent_id, metadata).catch((err) => {
+    log.error(`Event append failed for ${type} #T${ticketId}:`, err);
+  });
 }
 
 const allowedStatusSources: Record<TicketStatus, TicketStatus[]> = {
@@ -345,7 +415,7 @@ export const addNewTicket = async (
 ): Promise<number> => {
   const ticketId = await getNextTicketId();
   await Supportee.create({ userid, messenger, ticketId, status: 'open', category: category ?? null });
-  await recordAnalyticsEvent('ticket.created', ticketId, null, { user_id: String(userid) });
+  recordAnalyticsEventBestEffort('ticket.created', ticketId, null, { user_id: String(userid) });
   return ticketId;
 };
 
@@ -549,9 +619,8 @@ export async function addTicketMessage(
     throw err;
   }
 
-  // The message and event are separate documents, but event loss must be
-  // observable instead of silently hidden after history was persisted.
-  await recordAnalyticsEvent(`ticket.message.${sender}`, ticketId, sender_id || null);
+  // History persistence is authoritative here; the mirrored event is best-effort.
+  recordAnalyticsEventBestEffort(`ticket.message.${sender}`, ticketId, sender_id || null);
 }
 
 /** LLM context is a bounded read; stored ticket history is never pruned. */
@@ -616,7 +685,10 @@ export async function recordAnalyticsEvent(
       return event as IAnalyticsEvent;
     } catch (err) {
       lastError = err;
-      if (isDuplicateSequenceError(err)) continue;
+      if (isDuplicateSequenceError(err)) {
+        await waitForEventRetry(attempt);
+        continue;
+      }
       log.error('DB recordAnalyticsEvent error:', err);
       throw err;
     }

@@ -142,12 +142,6 @@ async function chat(ctx: Context) {
 
   cache.ticketStatus[ticketId] = false;
 
-  if (!ticket.first_response_at) {
-    await db.setFirstResponseAt(ticketId);
-  }
-
-  await db.addTicketMessage(ticketId, 'staff', senderId, staffMessage);
-
   if (ticket.userid.includes('WEB')) {
     try {
       const socketId = ticket.userid.split('WEB')[1];
@@ -159,6 +153,7 @@ async function chat(ctx: Context) {
         'Web chat already closed.',
       ).catch(log.error);
       log.error('Web reply delivery failed', e);
+      return;
     }
   } else {
     let replyContent = ticketMsg(name, ctx.message);
@@ -168,8 +163,13 @@ async function chat(ctx: Context) {
         replyContent = ticketMsg(name, { text: translated, from: ctx.message.from });
       }
     }
-    middleware.sendMessage(ticket.userid, ticket.messenger, replyContent).catch(log.error);
+    await middleware.sendMessage(ticket.userid, ticket.messenger, replyContent);
   }
+
+  if (!ticket.first_response_at) {
+    await db.setFirstResponseAt(ticketId);
+  }
+  await db.addTicketMessage(ticketId, 'staff', senderId, staffMessage);
 
   middleware.sendMessage(
     ctx.chat.id,

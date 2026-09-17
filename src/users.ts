@@ -86,8 +86,6 @@ async function processTicket(
     tags: ticket.tags || [],
   };
 
-  await db.addTicketMessage(ticket.ticketId, 'user', ctx.from.id.toString(), ctx.message.text);
-
   // Legacy push webhooks remain for compatibility. The canonical persisted
   // ticket.created event is emitted exactly once by db.addNewTicket().
   if (!autoReplyInfo) {
@@ -122,6 +120,8 @@ async function processTicket(
   if (messageId) {
     db.addIdAndName(ticket.ticketId, messageId, ctx.message.from.first_name);
   }
+
+  await db.addTicketMessage(ticket.ticketId, 'user', ctx.from.id.toString(), ctx.message.text);
 
   // Category groups remain internal staff surfaces. MOST never adds a private
   // engineer-reply button; replies must happen in the staff group/thread.
@@ -187,9 +187,7 @@ async function chat(ctx: Context, chat: { id: string }) {
     const ticket = await db.getTicketByUserId(cache.userId, ctx.session.groupCategory);
     if (!ticket) return;
 
-    await db.addTicketMessage(ticket.ticketId, 'user', ctx.from.id.toString(), ctx.message.text);
-
-    sendMessage(
+    const messageId = await sendMessage(
       config.staffchat_id,
       config.staffchat_type,
       formatMessageAsTicket(
@@ -197,7 +195,13 @@ async function chat(ctx: Context, chat: { id: string }) {
         ctx,
         autoReplyInfo,
       ),
-    ).catch(log.error);
+    );
+    if (messageId) {
+      db.addIdAndName(ticket.ticketId, messageId, ctx.message.from.first_name);
+    }
+
+    await db.addTicketMessage(ticket.ticketId, 'user', ctx.from.id.toString(), ctx.message.text);
+
     if (ctx.session.group && ctx.session.group !== config.staffchat_id) {
       sendMessage(
         ctx.session.group,

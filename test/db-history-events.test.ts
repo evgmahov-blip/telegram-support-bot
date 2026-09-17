@@ -3,10 +3,12 @@ jest.unmock('../src/db');
 const mockMessageSave = jest.fn().mockResolvedValue(undefined);
 const mockEventSave = jest.fn().mockResolvedValue(undefined);
 const mockCounterFindOneAndUpdate = jest.fn();
+const mockCounterFindOne = jest.fn();
 const mockMessageFind = jest.fn();
 const mockEventFind = jest.fn();
 const mockEventFindOne = jest.fn();
 const mockEventUpdateOne = jest.fn().mockResolvedValue({ modifiedCount: 1 });
+const mockEventBulkWrite = jest.fn().mockResolvedValue({ modifiedCount: 1 });
 const capturedEvents: any[] = [];
 
 const TicketMessageModel: any = jest.fn(function (this: any, data: any) {
@@ -23,6 +25,7 @@ const AnalyticsEventModel: any = jest.fn(function (this: any, data: any) {
 AnalyticsEventModel.find = mockEventFind;
 AnalyticsEventModel.findOne = mockEventFindOne;
 AnalyticsEventModel.updateOne = mockEventUpdateOne;
+AnalyticsEventModel.bulkWrite = mockEventBulkWrite;
 
 const SupporteeModel: any = {
   findOne: jest.fn(),
@@ -42,7 +45,7 @@ jest.mock('mongoose', () => {
     model: jest.fn((name: string) => {
       if (name === 'TicketMessage') return TicketMessageModel;
       if (name === 'AnalyticsEvent') return AnalyticsEventModel;
-      if (name === 'TicketCounter') return { findOneAndUpdate: mockCounterFindOneAndUpdate };
+      if (name === 'TicketCounter') return { findOne: mockCounterFindOne, findOneAndUpdate: mockCounterFindOneAndUpdate };
       if (name === 'InternalNote') return jest.fn();
       if (name === 'UserBan') return { findOne: jest.fn(), findOneAndUpdate: jest.fn(), deleteOne: jest.fn() };
       return SupporteeModel;
@@ -75,6 +78,7 @@ describe('append-only ticket history and event log', () => {
 
   it('appends a ticket message without pruning older messages', async () => {
     await db.addTicketMessage(7, 'user', '123', 'hello');
+    await new Promise((resolve) => setImmediate(resolve));
     expect(TicketMessageModel).toHaveBeenCalledWith({ ticketId: 7, sender: 'user', sender_id: '123', text: 'hello' });
     expect(mockMessageSave).toHaveBeenCalledTimes(1);
     expect(mockMessageFind).not.toHaveBeenCalled();
@@ -120,6 +124,55 @@ describe('append-only ticket history and event log', () => {
     mockEventFindOne.mockImplementation(() => latestSeq(4));
     mockEventSave.mockRejectedValueOnce(new Error('mongo write failed'));
     await expect(db.recordAnalyticsEvent('ticket.closed', 7)).rejects.toThrow('mongo write failed');
+  });
+
+
+  it('does not reject persisted history when the mirrored event append fails', async () => {
+    mockEventSave.mockRejectedValueOnce(new Error('event unavailable'));
+    await expect(db.addTicketMessage(7, 'user', '123', 'hello')).resolves.toBeUndefined();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(mockMessageSave).toHaveBeenCalledTimes(1);
+  });
+
+  it('backfills legacy ids, sequences, and event names in bounded batches', async () => {
+    const markerQuery: any = {};
+    markerQuery.select = jest.fn().mockResolvedValue(null);
+    mockCounterFindOne.mockReturnValue(markerQuery);
+    mockEventFindOne.mockImplementation(() => latestSeq(7));
+
+    const firstBatch: any = {};
+    firstBatch.sort = jest.fn(() => firstBatch);
+    firstBatch.limit = jest.fn().mockResolvedValue([
+      { _id: 'legacy-1', event_id: undefined, seq: undefined, type: 'ticket_created' },
+    ]);
+    const emptyBatch: any = {};
+    emptyBatch.sort = jest.fn(() => emptyBatch);
+    emptyBatch.limit = jest.fn().mockResolvedValue([]);
+    mockEventFind.mockReturnValueOnce(firstBatch).mockReturnValueOnce(emptyBatch);
+
+    const migrated = await db.backfillLegacyEvents();
+
+    expect(migrated).toBe(1);
+    expect(firstBatch.limit).toHaveBeenCalledWith(1000);
+    expect(mockEventBulkWrite).toHaveBeenCalledWith([
+      {
+        updateOne: {
+          filter: { _id: 'legacy-1' },
+          update: {
+            $set: expect.objectContaining({
+              event_id: expect.stringMatching(/^[0-9a-f-]{36}$/i),
+              seq: 8,
+              type: 'ticket.created',
+            }),
+          },
+        },
+      },
+    ], { ordered: true });
+    expect(mockCounterFindOneAndUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ _id: expect.stringContaining('legacyEventBackfillV2') }),
+      { $set: { seq: 1 } },
+      { upsert: true, new: true, setDefaultsOnInsert: true },
+    );
   });
 
   it('stops replay at the first sequence hole', async () => {

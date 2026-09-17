@@ -20,7 +20,7 @@ Authorization: Bearer <api_token>
 
 Response events are contiguous and ordered by ascending `seq`. Each event includes `event_id`, `seq`, `type`, `ticket_id`, `actor_id`, `timestamp`, and `metadata`. The response also contains `next_since` and `has_more`. Persist `next_since` only after successfully processing the returned page.
 
-Existing analytics rows from deployments before the sequenced event log are backfilled on startup. They receive UUID event IDs and sequence numbers; if a deployment already contains sequenced rows, older unsequenced rows are appended after the current maximum so an existing cursor is never rewound.
+Existing analytics rows from deployments before the sequenced event log are backfilled on startup in bounded batches. They receive UUID event IDs and sequence numbers, and legacy underscore event names are normalized to the canonical dotted taxonomy. If a deployment already contains sequenced rows, older unsequenced rows are appended after the current maximum so an existing cursor is never rewound. A completion marker makes subsequent startups skip the collection scan; migration failure is logged and does not prevent the bot from starting.
 
 Message event types are `ticket.message.user`, `ticket.message.staff`, and `ticket.message.ai`. Domain events use dotted names such as `ticket.created`, `ticket.replied`, `ticket.closed`, `ticket.escalated`, `ticket.priority_changed`, `ticket.queue_changed`, `ticket.note_added`, and `csat.rated`.
 
