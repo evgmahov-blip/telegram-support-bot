@@ -10,7 +10,7 @@ const mockApi = {
 const mockBotUse = jest.fn();
 const mockBotStart = jest.fn().mockResolvedValue(undefined);
 const mockBotStop = jest.fn().mockResolvedValue(undefined);
-const mockClaimTelegramUpdate = jest.fn().mockResolvedValue(true);
+const mockClaimTelegramUpdate = jest.fn().mockResolvedValue('claim-default');
 const mockCompleteTelegramUpdate = jest.fn().mockResolvedValue(undefined);
 const mockReleaseTelegramUpdate = jest.fn().mockResolvedValue(undefined);
 
@@ -58,7 +58,7 @@ describe('TelegramAddon', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     cache.config.staffchat_thread_id = null;
-    mockClaimTelegramUpdate.mockResolvedValue(true);
+    mockClaimTelegramUpdate.mockResolvedValue('claim-default');
     mockCompleteTelegramUpdate.mockResolvedValue(undefined);
     mockReleaseTelegramUpdate.mockResolvedValue(undefined);
   });
@@ -125,7 +125,7 @@ describe('TelegramAddon', () => {
     const order: string[] = [];
     mockClaimTelegramUpdate.mockImplementationOnce(async () => {
       order.push('claim');
-      return true;
+      return 'claim-101';
     });
     mockCompleteTelegramUpdate.mockImplementationOnce(async () => {
       order.push('complete');
@@ -136,22 +136,22 @@ describe('TelegramAddon', () => {
 
     await guard({ update: { update_id: 101 } }, downstream);
     expect(order).toEqual(['claim', 'downstream', 'complete']);
-    expect(mockCompleteTelegramUpdate).toHaveBeenCalledWith(101);
+    expect(mockCompleteTelegramUpdate).toHaveBeenCalledWith(101, 'claim-101');
 
-    mockClaimTelegramUpdate.mockResolvedValueOnce(false);
+    mockClaimTelegramUpdate.mockResolvedValueOnce(null);
     const duplicateDownstream = jest.fn().mockResolvedValue(undefined);
     await guard({ update: { update_id: 101 } }, duplicateDownstream);
     expect(duplicateDownstream).not.toHaveBeenCalled();
 
     const handlerError = new Error('handler failed');
-    mockClaimTelegramUpdate.mockResolvedValueOnce(true);
+    mockClaimTelegramUpdate.mockResolvedValueOnce('claim-102');
     await expect(guard(
       { update: { update_id: 102 } },
       jest.fn().mockRejectedValue(handlerError),
     )).rejects.toBe(handlerError);
-    expect(mockReleaseTelegramUpdate).toHaveBeenCalledWith(102);
+    expect(mockReleaseTelegramUpdate).toHaveBeenCalledWith(102, 'claim-102');
 
-    mockClaimTelegramUpdate.mockResolvedValueOnce(true);
+    mockClaimTelegramUpdate.mockResolvedValueOnce('claim-103');
     mockCompleteTelegramUpdate.mockRejectedValueOnce(new Error('completion failed'));
     mockReleaseTelegramUpdate.mockClear();
     await expect(guard(
