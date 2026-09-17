@@ -114,6 +114,31 @@ describe('append-only ticket history and event log', () => {
     ]);
   });
 
+  it('drains work appended while shutdown is already waiting on the event tail', async () => {
+    let releaseFirst: (() => void) | undefined;
+    let releaseSecond: (() => void) | undefined;
+    mockEventSave
+      .mockImplementationOnce(() => new Promise<void>((resolve) => { releaseFirst = resolve; }))
+      .mockImplementationOnce(() => new Promise<void>((resolve) => { releaseSecond = resolve; }));
+
+    db.recordAnalyticsEventBestEffort('ticket.message.user', 7, '123');
+    let drained = false;
+    const draining = db.drainAnalyticsEvents().then(() => { drained = true; });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(drained).toBe(false);
+    expect(mockEventSave).toHaveBeenCalledTimes(1);
+
+    db.recordAnalyticsEventBestEffort('ticket.replied', 7, 'agent-1');
+    releaseFirst?.();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(drained).toBe(false);
+    expect(mockEventSave).toHaveBeenCalledTimes(2);
+
+    releaseSecond?.();
+    await draining;
+    expect(drained).toBe(true);
+  });
+
   it('keeps LLM context bounded at read time', async () => {
     const q: any = {};
     q.sort = jest.fn(() => q);
@@ -154,7 +179,6 @@ describe('append-only ticket history and event log', () => {
     mockEventSave.mockRejectedValueOnce(new Error('mongo write failed'));
     await expect(db.recordAnalyticsEvent('ticket.closed', 7)).rejects.toThrow('mongo write failed');
   });
-
 
   it('does not reject persisted history when the mirrored event append fails', async () => {
     mockEventSave.mockRejectedValueOnce(new Error('event unavailable'));

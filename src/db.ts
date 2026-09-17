@@ -323,6 +323,15 @@ function enqueueEventAppend<T>(fn: () => Promise<T>): Promise<T> {
   return run;
 }
 
+/** Wait until the serialized analytics event queue is fully settled. */
+export async function drainAnalyticsEvents(): Promise<void> {
+  while (true) {
+    const tail = eventTail;
+    await tail;
+    if (tail === eventTail) return;
+  }
+}
+
 export function recordAnalyticsEventBestEffort(
   type: string,
   ticketId: number,

@@ -1,6 +1,8 @@
 import mongoose from 'mongoose';
 import type { Addon } from './interfaces';
+import * as db from './db';
 import * as eventsApi from './events-api';
+import * as webhooks from './webhooks';
 import * as log from './logger';
 
 export type ManagedTimer = ReturnType<typeof setTimeout> | ReturnType<typeof setInterval>;
@@ -35,6 +37,24 @@ export function createGracefulShutdown(
           errors.push(result.reason);
           log.error('Addon shutdown failed:', result.reason);
         }
+      }
+
+      // Persisted events are serialized through db.eventTail. Ingress is
+      // already stopped, so drain it while Mongo is still connected.
+      try {
+        await db.drainAnalyticsEvents();
+      } catch (err) {
+        errors.push(err);
+        log.error('Analytics event drain failed:', err);
+      }
+
+      // Compatibility push webhooks are intentionally off the request path,
+      // but accepted deliveries should still get a chance to finish on SIGTERM.
+      try {
+        await webhooks.drainWebhooks();
+      } catch (err) {
+        errors.push(err);
+        log.error('Webhook drain failed:', err);
       }
 
       try {
