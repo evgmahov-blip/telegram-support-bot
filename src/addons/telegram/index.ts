@@ -5,6 +5,7 @@ import * as middleware from '../../middleware';
 import * as permissions from '../../permissions';
 import * as inline from '../../inline';
 import * as mostCommands from '../../most-commands';
+import * as updateDedup from '../../telegram-update-dedup';
 import cache from '../../cache';
 import { registerCommonHandlers } from '../../handlers';
 import * as log from '../../logger'
@@ -16,6 +17,7 @@ class TelegramAddon implements Addon {
   public botInfo: Record<string, unknown> = {};
 
   private static instance: TelegramAddon | null = null;
+  private started = false;
 
   private constructor(token: string) {
     this.bot = new Bot<BotContext>(token);
@@ -161,7 +163,39 @@ class TelegramAddon implements Addon {
   }
 
   start(): void {
+    if (this.started) return;
+    this.started = true;
     log.info('Starting Telegram Addon...');
+
+    // Claim update_id before any session or business middleware mutates state.
+    // The claim is completed only after the entire downstream chain resolves.
+    this.bot.use(async (ctx: BotContext, next) => {
+      const updateId = ctx.update.update_id;
+      const claimed = await updateDedup.claimTelegramUpdate(updateId);
+      if (!claimed) {
+        log.info(`Skipping duplicate Telegram update ${updateId}.`);
+        return;
+      }
+
+      let downstreamCompleted = false;
+      try {
+        await next();
+        downstreamCompleted = true;
+        await updateDedup.completeTelegramUpdate(updateId);
+      } catch (err) {
+        // Handler failures release the lease so a replay can retry. If the
+        // handler succeeded but completion persistence failed, keep the claim
+        // leased rather than immediately risking duplicate side effects.
+        if (!downstreamCompleted) {
+          try {
+            await updateDedup.releaseTelegramUpdate(updateId);
+          } catch (releaseErr) {
+            log.error(`Failed to release Telegram update ${updateId}:`, releaseErr);
+          }
+        }
+        throw err;
+      }
+    });
 
     this.bot.use(this.initSession());
     this.bot.use(async (ctx: BotContext, next) => {
@@ -174,14 +208,24 @@ class TelegramAddon implements Addon {
           `_Dev mode is on: You might notice some delay in messages, no replies or other errors._`
         );
       }
-      permissions.checkPermissions(typedCtx, next, cache.config);
+      await permissions.checkPermissions(typedCtx, next, cache.config);
     });
 
     const keys = inline.initInline(this);
     registerCommonHandlers(this, keys);
     this.command('queue', (ctx: Context) => mostCommands.queueCommand(ctx));
 
-    this.bot.start();
+    void this.bot.start().catch((err) => {
+      this.started = false;
+      log.error('Telegram polling stopped with an error:', err);
+    });
+  }
+
+  async stop(): Promise<void> {
+    if (!this.started) return;
+    log.info('Stopping Telegram Addon...');
+    await this.bot.stop();
+    this.started = false;
   }
 }
 
