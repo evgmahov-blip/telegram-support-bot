@@ -11,13 +11,13 @@ const mockAddIdAndName = jest.fn().mockResolvedValue(undefined);
 const mockUsersChat = jest.fn().mockResolvedValue(undefined);
 const mockCheckBan = jest.fn().mockResolvedValue(null);
 const mockTransitionTicketStatus = jest.fn();
+const mockResumeWaitingTicket = jest.fn();
 const mockRecordAnalyticsEvent = jest.fn().mockResolvedValue(undefined);
 
 jest.mock('../src/middleware', () => ({
   reply: mockReply,
   sendMessage: mockSendMessage,
   strictEscape: jest.fn((str: string) => str),
-  buildInlineKeyboard: jest.fn().mockReturnValue({}),
 }));
 
 jest.mock('../src/db', () => ({
@@ -34,6 +34,10 @@ jest.mock('../src/db', () => ({
   setFirstResponseAt: jest.fn().mockResolvedValue(undefined),
   setClosedAt: jest.fn().mockResolvedValue(undefined),
   open: jest.fn().mockResolvedValue([]),
+}));
+
+jest.mock('../src/ticket-state', () => ({
+  resumeWaitingTicket: mockResumeWaitingTicket,
 }));
 
 jest.mock('../src/users', () => ({ chat: mockUsersChat }));
@@ -285,11 +289,11 @@ describe('ticket_per_message (#172)', () => {
     const waiting = { ticketId: 9, status: 'waiting_user' };
     const resumed = { ticketId: 9, status: 'open' };
     mockGetTicketByUserId.mockResolvedValue(waiting);
-    mockTransitionTicketStatus.mockResolvedValue(resumed);
+    mockResumeWaitingTicket.mockResolvedValue(resumed);
 
     const ticket = await text.ticketHandler(bot, makeCtx());
 
-    expect(mockTransitionTicketStatus).toHaveBeenCalledWith(9, 'open');
+    expect(mockResumeWaitingTicket).toHaveBeenCalledWith(9);
     expect(mockRecordAnalyticsEvent).toHaveBeenCalledWith(
       'ticket.resumed',
       9,
@@ -324,7 +328,7 @@ describe('forward_replies_to_parent (#79)', () => {
     expect(staff.findParentCategory('Bugs', '-100BUGS')?.name).toBe('Product');
     expect(staff.findParentCategory(null, '-100BILL')?.name).toBe('Product');
     expect(staff.findParentCategory('Flat', '-100FLAT')).toBeNull();
-    expect(staff.findParentCategory('Bugs', '-100PARENT')).toBeNull(); // reply already in parent
+    expect(staff.findParentCategory('Bugs', '-100PARENT')).toBeNull();
   });
 
   it('mirrors the reply only when enabled', async () => {
