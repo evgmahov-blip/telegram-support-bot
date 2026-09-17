@@ -24,43 +24,13 @@ function ticketMsg(
   return `${config.language.dear} ${esc(name)},\n\n${esc(message.text)}\n\n${config.language.regards}\n${config.language.regardsGroup}`;
 }
 
-/**
- * Legacy private-reply mode kept for compatibility. It is deliberately routed
- * through the bot with no direct engineer link and no engineer signature.
- */
-function privateReply(ctx: Context, msg: any = {}) {
-  if (Object.keys(msg).length === 0) {
-    msg = ctx.message;
-  }
-
-  const { session, messenger, chat } = ctx;
-  const { modeData } = session;
-  middleware.sendMessage(
-    modeData.userid,
-    messenger,
-    ticketMsg(`${modeData.name}`, msg),
-    { parse_mode: cache.config.parse_mode },
-  ).catch(log.error);
-
-  middleware.sendMessage(chat.id, messenger, cache.config.language.msg_sent, {}).catch(log.error);
-}
-
-/**
- * Compatibility-only text resolver for staff messages that predate internalIds.
- * New replies are correlated by Telegram message ID first.
- */
+/** Compatibility-only resolver for historical ticket text. */
 function extractTicketId(replyText: string): string | null {
   const match = replyText.match(/#T0*(\d+)\b/);
   return match ? match[1] : null;
 }
 
-/**
- * Extracts the supportee's Telegram user ID from a forwarded ticket message.
- * Handles both MarkdownV2/HTML link formats and plain text fallback.
- *
- * @param replyText - The original forwarded ticket message text.
- * @returns The extracted user ID or null if not found.
- */
+/** Compatibility-only user-id resolver for historical forwarded messages. */
 function extractSupporteeId(replyText: string): string | null {
   const linkMatch = replyText.match(/tg:\/\/user\?id=(\d+)/);
   if (linkMatch) return linkMatch[1];
@@ -71,9 +41,6 @@ function extractSupporteeId(replyText: string): string | null {
   return null;
 }
 
-/**
- * Extracts the display name from old formatted ticket messages.
- */
 function extractName(replyText: string): string | null {
   const { language } = cache.config;
   const fromToken = language.from || 'from';
@@ -84,10 +51,6 @@ function extractName(replyText: string): string | null {
   return replyText.slice(start + fromToken.length + 1, end).trim() || null;
 }
 
-/**
- * Finds the parent category of the (sub)category a ticket was routed to (#79).
- * Matches by the ticket's category name or by the group the reply was written in.
- */
 function findParentCategory(ticketCategory: string | null, chatId: string | number) {
   const { categories } = cache.config;
   if (!Array.isArray(categories)) return null;
@@ -103,10 +66,6 @@ function findParentCategory(ticketCategory: string | null, chatId: string | numb
   return null;
 }
 
-/**
- * Mirrors a staff reply into the parent category group so supervisors can follow
- * subcategory traffic (forward_replies_to_parent, #79). This stays internal.
- */
 async function forwardReplyToParent(ctx: Context, ticket: ISupportee, staffMessage: string): Promise<void> {
   if (!cache.config.forward_replies_to_parent) return;
   const parent = findParentCategory(ticket.category, ctx.chat.id);
@@ -117,9 +76,7 @@ async function forwardReplyToParent(ctx: Context, ticket: ISupportee, staffMessa
   await middleware.sendMessage(parent.group_id, staffchat_type, text).catch(log.error);
 }
 
-/**
- * Handles staff chat replies to tickets.
- */
+/** Handles replies written in the closed staff group. */
 async function chat(ctx: Context) {
   if (!ctx.session.admin) return;
 
@@ -139,13 +96,11 @@ async function chat(ctx: Context) {
   let ticket: ISupportee | null = null;
   let ticketId = 0;
 
-  // Authoritative correlation for all new staff-chat messages.
   if (typeof correlatedMessageId === 'number') {
     ticket = await db.getTicketByInternalId(correlatedMessageId);
     if (ticket) ticketId = ticket.ticketId;
   }
 
-  // Compatibility fallback for older staff messages created before internalIds.
   if (!ticket && replyText) {
     const extractedId = extractTicketId(replyText);
     if (extractedId) {
@@ -154,7 +109,6 @@ async function chat(ctx: Context) {
     }
   }
 
-  // Final compatibility fallback for very old forwarded messages.
   if (!ticket && replyText) {
     const supporteeId = extractSupporteeId(replyText);
     if (supporteeId) {
@@ -173,14 +127,12 @@ async function chat(ctx: Context) {
 
   const staffMessage = ctx.message.text || '';
 
-  // Internal notes never leave the staff chat.
   if (staffMessage.startsWith('!note ') || staffMessage.startsWith('!internal ')) {
     const noteText = staffMessage.replace(/^!(?:note|internal)\s+/i, '');
     await team.addInternalNoteCommand(ctx, ticketId, noteText);
     return;
   }
 
-  // Agents may reply only to tickets they own. Supervisors/admins may intervene.
   if (!team.canManageTicket(senderId, ticket.assigned_to)) {
     await middleware.reply(ctx, ticket.assigned_to
       ? 'This ticket is owned by another engineer.'
@@ -225,7 +177,6 @@ async function chat(ctx: Context) {
     `${cache.config.language.msg_sent} ${middleware.strictEscape(name)}`,
   ).catch(log.error);
 
-  // Safe operational log: no user ID, name, or message body.
   log.info(`Staff reply sent for #T${ticketId}`);
   delete cache.ticketSent[ticketId];
 
@@ -243,4 +194,4 @@ async function chat(ctx: Context) {
   }
 }
 
-export { privateReply, chat, ticketMsg, extractSupporteeId, findParentCategory, forwardReplyToParent };
+export { chat, ticketMsg, extractSupporteeId, findParentCategory, forwardReplyToParent };
