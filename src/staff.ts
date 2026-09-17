@@ -8,14 +8,9 @@ import * as webhooks from './webhooks';
 import * as analytics from './analytics';
 import * as team from './team';
 
-const escapeRegex = (str: string): string => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
 /**
- * Generates a ticket message.
- *
- * @param name - The name to include in the message.
- * @param message - The message object.
- * @returns The formatted ticket message.
+ * Generates user-facing staff text. MOST never exposes the engineer identity to
+ * the user; replies are signed only with the configured support-team label.
  */
 function ticketMsg(
   name: string,
@@ -26,58 +21,37 @@ function ticketMsg(
   if (config.clean_replies) {
     return esc(message.text);
   }
-  if (config.anonymous_replies) {
-    return `${config.language.dear} ${esc(name)},\n\n${esc(message.text)}\n\n${config.language.regards}\n${config.language.regardsGroup}`;
-  }
-  return `${config.language.dear} ${esc(name)},\n\n${esc(message.text)}\n\n${config.language.regards}\n${esc(message.from.first_name)}`;
+  return `${config.language.dear} ${esc(name)},\n\n${esc(message.text)}\n\n${config.language.regards}\n${config.language.regardsGroup}`;
 }
 
 /**
- * Sends a private reply to a user.
- *
- * @param ctx - The bot context.
- * @param msg - The message object (defaults to ctx.message if empty).
+ * Legacy private-reply mode kept for compatibility. It is deliberately routed
+ * through the bot with no direct engineer link and no engineer signature.
  */
 function privateReply(ctx: Context, msg: any = {}) {
   if (Object.keys(msg).length === 0) {
     msg = ctx.message;
   }
 
-  const { session, messenger, from, message, chat } = ctx;
+  const { session, messenger, chat } = ctx;
   const { modeData } = session;
   middleware.sendMessage(
     modeData.userid,
     messenger,
     ticketMsg(`${modeData.name}`, msg),
-    {
-      parse_mode: cache.config.parse_mode,
-      reply_markup: cache.config.direct_reply
-        ? {
-          html: '',
-          inline_keyboard: [
-            [{ text: cache.config.language.replyPrivate, url: `https://t.me/${from.username}` }],
-          ],
-        }
-        : middleware.buildInlineKeyboard(from.id, message.from.first_name, modeData.category, modeData.ticketid),
-    },
+    { parse_mode: cache.config.parse_mode },
   ).catch(log.error);
-  // Send confirmation message
+
   middleware.sendMessage(chat.id, messenger, cache.config.language.msg_sent, {}).catch(log.error);
 }
 
 /**
- * Extracts the ticket ID from the reply text.
- *
- * @param replyText - The text from which to extract the ticket ID.
- * @returns The extracted ticket ID or null if not found.
+ * Compatibility-only text resolver for staff messages that predate internalIds.
+ * New replies are correlated by Telegram message ID first.
  */
 function extractTicketId(replyText: string): string | null {
-  const { language } = cache.config;
-  let match = replyText.match(new RegExp(`#T(.*) ${escapeRegex(language.from)}`));
-  if (!match) {
-    match = replyText.match(new RegExp(`#T(.*)\\n${escapeRegex(language.from)}`));
-  }
-  return match ? match[1].trim() : null;
+  const match = replyText.match(/#T0*(\d+)\b/);
+  return match ? match[1] : null;
 }
 
 /**
@@ -88,11 +62,9 @@ function extractTicketId(replyText: string): string | null {
  * @returns The extracted user ID or null if not found.
  */
 function extractSupporteeId(replyText: string): string | null {
-  // Try to extract from tg://user?id=<id> link (MarkdownV2 / HTML format)
   const linkMatch = replyText.match(/tg:\/\/user\?id=(\d+)/);
   if (linkMatch) return linkMatch[1];
 
-  // Fallback: try [name](tg://user?id=<id>) Markdown pattern
   const mdMatch = replyText.match(/\[.*?\]\(tg:\/\/user\?id=(\d+)\)/);
   if (mdMatch) return mdMatch[1];
 
@@ -100,15 +72,16 @@ function extractSupporteeId(replyText: string): string | null {
 }
 
 /**
- * Extracts the name from the reply text.
- *
- * @param replyText - The text from which to extract the name.
- * @returns The extracted name or null if not found.
+ * Extracts the display name from old formatted ticket messages.
  */
 function extractName(replyText: string): string | null {
   const { language } = cache.config;
-  const match = replyText.match(new RegExp(`${escapeRegex(language.from)} (.*) ${escapeRegex(language.language)}`));
-  return match ? match[1].trim() : null;
+  const fromToken = language.from || 'from';
+  const languageToken = language.language || 'language';
+  const start = replyText.indexOf(`${fromToken} `);
+  const end = replyText.indexOf(` ${languageToken}:`, start + fromToken.length + 1);
+  if (start < 0 || end < 0) return null;
+  return replyText.slice(start + fromToken.length + 1, end).trim() || null;
 }
 
 /**
@@ -132,7 +105,7 @@ function findParentCategory(ticketCategory: string | null, chatId: string | numb
 
 /**
  * Mirrors a staff reply into the parent category group so supervisors can follow
- * subcategory traffic (forward_replies_to_parent, #79).
+ * subcategory traffic (forward_replies_to_parent, #79). This stays internal.
  */
 async function forwardReplyToParent(ctx: Context, ticket: ISupportee, staffMessage: string): Promise<void> {
   if (!cache.config.forward_replies_to_parent) return;
@@ -146,85 +119,83 @@ async function forwardReplyToParent(ctx: Context, ticket: ISupportee, staffMessa
 
 /**
  * Handles staff chat replies to tickets.
- *
- * @param ctx - The bot context.
  */
 async function chat(ctx: Context) {
-  if (!ctx.session.admin) {
+  if (!ctx.session.admin) return;
+
+  const senderId = ctx.from.id.toString();
+  if (!team.canPerformAction(senderId, 'reply')) {
+    await middleware.reply(ctx, 'You do not have permission to reply to tickets.');
     return;
   }
 
   const replyMsg = ctx.message?.reply_to_message;
   if (!replyMsg) return;
 
-  const replyText = replyMsg.text || replyMsg.caption;
-  const replyMessageId = ctx.message.external_reply?.message_id;
-  if (!replyText && !replyMessageId) return;
+  const replyText = replyMsg.text || replyMsg.caption || '';
+  const replyToMessageId = (replyMsg as typeof replyMsg & { message_id?: number }).message_id;
+  const correlatedMessageId = replyToMessageId ?? ctx.message.external_reply?.message_id;
 
   let ticket: ISupportee | null = null;
-  let ticketId: number = 0;
-  if (replyMessageId) {
-    ticket = await db.getTicketByInternalId(replyMessageId);
-    if (ticket) {
-      ticketId = ticket.ticketId;
-    }
+  let ticketId = 0;
+
+  // Authoritative correlation for all new staff-chat messages.
+  if (typeof correlatedMessageId === 'number') {
+    ticket = await db.getTicketByInternalId(correlatedMessageId);
+    if (ticket) ticketId = ticket.ticketId;
   }
 
-  // If internal ID lookup failed, try regex extraction from text
+  // Compatibility fallback for older staff messages created before internalIds.
   if (!ticket && replyText) {
     const extractedId = extractTicketId(replyText);
     if (extractedId) {
       ticketId = parseInt(extractedId, 10);
-      if (ticketId) {
-        ticket = await db.getTicketById(ticketId, ctx.session.groupCategory);
-      }
+      if (ticketId) ticket = await db.getTicketById(ticketId, ctx.session.groupCategory);
     }
   }
 
-  // If regex also failed, try to find the supportee by extracting their Telegram ID from the forwarded message
+  // Final compatibility fallback for very old forwarded messages.
   if (!ticket && replyText) {
     const supporteeId = extractSupporteeId(replyText);
     if (supporteeId) {
       ticket = await db.getTicketByUserId(supporteeId, ctx.session.groupCategory);
-      if (ticket) {
-        ticketId = ticket.ticketId;
-      }
+      if (ticket) ticketId = ticket.ticketId;
     }
   }
 
-  if (!ticket || !ticketId) {
-    middleware.reply(ctx, cache.config.language.ticketClosedError);
+  if (!ticket || !ticketId || ticket.status === 'closed') {
+    await middleware.reply(ctx, cache.config.language.ticketClosedError);
     return;
   }
-  let name: string | null;
-  if (ticket.name) {
-    name = ticket.name;
-  } else {
-    name = extractName(replyText);
-  }
-  if (!name) return;
 
-  // Check for internal note prefix (!note or !internal)
+  let name: string | null = ticket.name || extractName(replyText);
+  if (!name) name = cache.config.language.customer || 'customer';
+
   const staffMessage = ctx.message.text || '';
+
+  // Internal notes never leave the staff chat.
   if (staffMessage.startsWith('!note ') || staffMessage.startsWith('!internal ')) {
     const noteText = staffMessage.replace(/^!(?:note|internal)\s+/i, '');
     await team.addInternalNoteCommand(ctx, ticketId, noteText);
     return;
   }
 
-  // Mark ticket as no longer active
+  // Agents may reply only to tickets they own. Supervisors/admins may intervene.
+  if (!team.canManageTicket(senderId, ticket.assigned_to)) {
+    await middleware.reply(ctx, ticket.assigned_to
+      ? 'This ticket is owned by another engineer.'
+      : 'Take the ticket first with /take.');
+    return;
+  }
+
   cache.ticketStatus[ticketId] = false;
 
-  // Set first response time if not already set
   if (!ticket.first_response_at) {
     await db.setFirstResponseAt(ticketId);
   }
 
-  // Log conversation memory
-  const senderId = ctx.from.id.toString();
   await db.addTicketMessage(ticketId, 'staff', senderId, staffMessage);
 
-  // Reply to web users differently
   if (ticket.userid.includes('WEB')) {
     try {
       const socketId = ticket.userid.split('WEB')[1];
@@ -233,12 +204,11 @@ async function chat(ctx: Context) {
       middleware.sendMessage(
         ctx.chat.id,
         ticket.messenger,
-        `Web chat already closed.`,
+        'Web chat already closed.',
       ).catch(log.error);
-      log.error(e);
+      log.error('Web reply delivery failed', e);
     }
   } else {
-    // Apply translation if enabled
     let replyContent = ticketMsg(name, ctx.message);
     if (cache.config.translate_enabled) {
       const translated = await import('./addons/llm.js').then(m => m.translateText(staffMessage));
@@ -249,33 +219,27 @@ async function chat(ctx: Context) {
     middleware.sendMessage(ticket.userid, ticket.messenger, replyContent).catch(log.error);
   }
 
-  const esc = middleware.strictEscape;
   middleware.sendMessage(
     ctx.chat.id,
     cache.config.staffchat_type,
-    `${cache.config.language.msg_sent} ${esc(name)}`,
+    `${cache.config.language.msg_sent} ${middleware.strictEscape(name)}`,
   ).catch(log.error);
-  log.info(`Answer by @${ctx.from.username ?? '-'} (${ctx.from.id}) to ${ticket.userid} (${name}) on #T${ticketId}: ${staffMessage}`);
+
+  // Safe operational log: no user ID, name, or message body.
+  log.info(`Staff reply sent for #T${ticketId}`);
   delete cache.ticketSent[ticketId];
 
-  // Mirror the reply to the parent category group if configured
   await forwardReplyToParent(ctx, ticket, staffMessage);
-
-  // Record analytics event for staff reply
   await db.recordAnalyticsEvent('staff_reply', ticketId, senderId);
-
-  // Fire webhook for ticket reply
   await webhooks.webhooks.ticketReplied(ticketId, senderId, staffMessage.substring(0, 200));
 
-  // Auto-close the ticket if enabled
   if (cache.config.auto_close_tickets) {
-    await db.add(String(ticketId), 'closed', '', ticket.messenger);
-    await db.setClosedAt(ticketId);
-    await db.recordAnalyticsEvent('ticket_closed', ticketId, senderId);
-    await webhooks.webhooks.ticketClosed(ticketId, senderId.toString());
-
-    // Send CSAT survey on close
-    await analytics.sendCSATSurvey(ticket.userid, ticket.messenger, ticketId);
+    const closed = await db.transitionTicketStatus(ticketId, 'closed');
+    if (closed) {
+      await db.recordAnalyticsEvent('ticket_closed', ticketId, senderId);
+      await webhooks.webhooks.ticketClosed(ticketId, senderId);
+      await analytics.sendCSATSurvey(ticket.userid, ticket.messenger, ticketId);
+    }
   }
 }
 
