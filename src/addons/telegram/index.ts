@@ -171,8 +171,8 @@ class TelegramAddon implements Addon {
     // The claim is completed only after the entire downstream chain resolves.
     this.bot.use(async (ctx: BotContext, next) => {
       const updateId = ctx.update.update_id;
-      const claimed = await updateDedup.claimTelegramUpdate(updateId);
-      if (!claimed) {
+      const claimId = await updateDedup.claimTelegramUpdate(updateId);
+      if (!claimId) {
         log.info(`Skipping duplicate Telegram update ${updateId}.`);
         return;
       }
@@ -181,14 +181,14 @@ class TelegramAddon implements Addon {
       try {
         await next();
         downstreamCompleted = true;
-        await updateDedup.completeTelegramUpdate(updateId);
+        await updateDedup.completeTelegramUpdate(updateId, claimId);
       } catch (err) {
-        // Handler failures release the lease so a replay can retry. If the
+        // Handler failures release only the lease owned by this worker. If the
         // handler succeeded but completion persistence failed, keep the claim
         // leased rather than immediately risking duplicate side effects.
         if (!downstreamCompleted) {
           try {
-            await updateDedup.releaseTelegramUpdate(updateId);
+            await updateDedup.releaseTelegramUpdate(updateId, claimId);
           } catch (releaseErr) {
             log.error(`Failed to release Telegram update ${updateId}:`, releaseErr);
           }
