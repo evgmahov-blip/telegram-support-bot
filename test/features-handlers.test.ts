@@ -9,6 +9,9 @@ const mockAddNewTicket = jest.fn().mockResolvedValue(2);
 const mockAddTicketMessage = jest.fn().mockResolvedValue(undefined);
 const mockAddIdAndName = jest.fn().mockResolvedValue(undefined);
 const mockUsersChat = jest.fn().mockResolvedValue(undefined);
+const mockCheckBan = jest.fn().mockResolvedValue(null);
+const mockTransitionTicketStatus = jest.fn();
+const mockRecordAnalyticsEvent = jest.fn().mockResolvedValue(undefined);
 
 jest.mock('../src/middleware', () => ({
   reply: mockReply,
@@ -25,8 +28,9 @@ jest.mock('../src/db', () => ({
   addIdAndName: mockAddIdAndName,
   getTicketByInternalId: jest.fn().mockResolvedValue(null),
   getTicketById: jest.fn().mockResolvedValue(null),
-  checkBan: jest.fn().mockResolvedValue(null),
-  recordAnalyticsEvent: jest.fn().mockResolvedValue(undefined),
+  checkBan: mockCheckBan,
+  transitionTicketStatus: mockTransitionTicketStatus,
+  recordAnalyticsEvent: mockRecordAnalyticsEvent,
   setFirstResponseAt: jest.fn().mockResolvedValue(undefined),
   setClosedAt: jest.fn().mockResolvedValue(undefined),
   open: jest.fn().mockResolvedValue([]),
@@ -37,6 +41,9 @@ jest.mock('../src/team', () => ({
   getStaffRole: jest.fn().mockReturnValue(null),
   addInternalNoteCommand: jest.fn(),
   canPerformAction: jest.fn().mockReturnValue(true),
+  takeTicketCommand: jest.fn(),
+  transferTicketCommand: jest.fn(),
+  waitingUserCommand: jest.fn(),
 }));
 jest.mock('../src/webhooks', () => ({ webhooks: { ticketReplied: jest.fn(), ticketClosed: jest.fn() } }));
 jest.mock('../src/analytics', () => ({ sendCSATSurvey: jest.fn(), handleCSATCallback: jest.fn(), showStatsCommand: jest.fn() }));
@@ -61,6 +68,7 @@ jest.mock('../src/cache', () => ({
         confirmationMessage: 'Thanks',
         file_sent: 'File sent to user',
         yourTicketId: 'Your Ticket ID',
+        banned: 'Banned',
       },
       parse_mode: 'MarkdownV2',
       staffchat_id: '-100123',
@@ -231,6 +239,7 @@ describe('ticket_per_message (#172)', () => {
   const bot = {} as Addon;
   beforeEach(() => {
     jest.clearAllMocks();
+    mockCheckBan.mockResolvedValue(null);
     cache.config.ticket_per_message = false;
   });
 
@@ -238,6 +247,7 @@ describe('ticket_per_message (#172)', () => {
     mockGetTicketByUserId.mockResolvedValue({ ticketId: 1, status: 'open' });
     await text.ticketHandler(bot, makeCtx());
     expect(mockAdd).not.toHaveBeenCalled();
+    expect(mockAddNewTicket).not.toHaveBeenCalled();
     expect(mockUsersChat).toHaveBeenCalled();
   });
 
@@ -248,27 +258,45 @@ describe('ticket_per_message (#172)', () => {
       .mockResolvedValueOnce({ ticketId: 2, status: 'open' });
     const ticket = await text.ticketHandler(bot, makeCtx());
     expect(mockAddNewTicket).toHaveBeenCalledWith('42', null, 'telegram');
-    // add() replaces the user's document and would drop ticket #1 — must not be used here
     expect(mockAdd).not.toHaveBeenCalled();
     expect(ticket?.ticketId).toBe(2);
   });
 
-  it('still uses add() for a user without any ticket', async () => {
+  it('uses addNewTicket for a user without any ticket', async () => {
     cache.config.ticket_per_message = true;
     mockGetTicketByUserId
       .mockResolvedValueOnce(null)
       .mockResolvedValueOnce({ ticketId: 1, status: 'open' });
     await text.ticketHandler(bot, makeCtx());
-    expect(mockAdd).toHaveBeenCalledWith('42', 'open', null, 'telegram');
+    expect(mockAddNewTicket).toHaveBeenCalledWith('42', null, 'telegram');
+    expect(mockAdd).not.toHaveBeenCalled();
+  });
+
+  it('never creates or reopens a ticket for a banned user', async () => {
+    cache.config.ticket_per_message = true;
+    mockCheckBan.mockResolvedValue({ userid: '42', messenger: 'telegram' });
+    await text.ticketHandler(bot, makeCtx());
+    expect(mockGetTicketByUserId).not.toHaveBeenCalled();
+    expect(mockAdd).not.toHaveBeenCalled();
     expect(mockAddNewTicket).not.toHaveBeenCalled();
   });
 
-  it('never re-opens a banned user', async () => {
-    cache.config.ticket_per_message = true;
-    mockGetTicketByUserId.mockResolvedValue({ ticketId: 1, status: 'banned' });
-    await text.ticketHandler(bot, makeCtx());
-    expect(mockAdd).not.toHaveBeenCalled();
-    expect(mockAddNewTicket).not.toHaveBeenCalled();
+  it('resumes WAITING_USER on a user reply', async () => {
+    const waiting = { ticketId: 9, status: 'waiting_user' };
+    const resumed = { ticketId: 9, status: 'open' };
+    mockGetTicketByUserId.mockResolvedValue(waiting);
+    mockTransitionTicketStatus.mockResolvedValue(resumed);
+
+    const ticket = await text.ticketHandler(bot, makeCtx());
+
+    expect(mockTransitionTicketStatus).toHaveBeenCalledWith(9, 'open');
+    expect(mockRecordAnalyticsEvent).toHaveBeenCalledWith(
+      'ticket.resumed',
+      9,
+      null,
+      { reason: 'user_reply' },
+    );
+    expect(ticket?.status).toBe('open');
   });
 });
 
@@ -373,7 +401,10 @@ describe('handler registration and command matching', () => {
     expect(matchedCommand(undefined)).toBeNull();
   });
 
-  it('registers /ticket, /broadcast, sticker and edited_message handlers', () => {
+  it('registers MOST ownership commands plus existing handlers', () => {
+    expect(captured.commands.has('take')).toBe(true);
+    expect(captured.commands.has('transfer')).toBe(true);
+    expect(captured.commands.has('waiting')).toBe(true);
     expect(captured.commands.has('ticket')).toBe(true);
     expect(captured.commands.has('broadcast')).toBe(true);
     expect(captured.on).toContainEqual([':sticker']);
