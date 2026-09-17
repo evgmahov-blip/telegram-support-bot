@@ -55,11 +55,11 @@ export function registerCommonHandlers(addon: Addon, keys?: string[][]) {
   addon.command('unassign', (ctx: Context) => commands.unassignCommand(ctx));
   addon.command('tag', (ctx: Context) => commands.tagCommand(ctx));
   addon.command('untag', (ctx: Context) => commands.untagCommand(ctx));
-  addon.command('priority', (ctx: Context) => commands.priorityCommand(ctx));
+  addon.command('priority', (ctx: Context) => mostCommands.priorityCommand(ctx));
   addon.command('mute', (ctx: Context) => commands.muteCommand(ctx));
   addon.command('unmute', (ctx: Context) => commands.unmuteCommand(ctx));
-  addon.command('note', (ctx: Context) => commands.noteCommand(ctx));
-  addon.command('notes', (ctx: Context) => commands.notesCommand(ctx));
+  addon.command('note', (ctx: Context) => mostCommands.noteCommand(ctx));
+  addon.command('notes', (ctx: Context) => mostCommands.notesCommand(ctx));
   addon.command('staff', (ctx: Context) => commands.listStaffCommand(ctx));
 
   // Analytics commands
@@ -193,21 +193,9 @@ export function registerCommonHandlers(addon: Addon, keys?: string[][]) {
     }
     if (!ctx.session.admin) return;
 
-    // Check if this is a canned response key
     const cannedText = workflows.getCannedResponse(cmd);
     if (cannedText) {
-      // If replying to a ticket, send the canned response as reply
-      const replyMsg = ctx.message?.reply_to_message;
-      if (replyMsg && replyMsg.text) {
-        const replyText = replyMsg.text || replyMsg.caption;
-        const match = replyText.match(/#T(.*)/);
-        if (match) {
-          // Store canned text on context for staff handler to pick up
-          ctx.message.text = cannedText;
-          return; // Let the regular chat handler process it
-        }
-      }
-      middleware.reply(ctx, `Template "${cmd}":\n\n${cannedText}`, { parse_mode: cache.config.parse_mode });
+      await mostCommands.cannedResponseCommand(ctx, cmd, cannedText);
     }
   });
 
