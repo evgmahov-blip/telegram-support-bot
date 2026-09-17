@@ -3,6 +3,7 @@ const mockGetTicketById = jest.fn();
 const mockRecordAnalyticsEvent = jest.fn().mockResolvedValue(undefined);
 const mockAddInternalNote = jest.fn().mockResolvedValue(undefined);
 const mockGetInternalNotes = jest.fn().mockResolvedValue([]);
+const mockGetTicketAuditHistory = jest.fn().mockResolvedValue([]);
 const mockTakeTicketCommand = jest.fn();
 const mockTransferTicketCommand = jest.fn();
 const mockWaitingUserCommand = jest.fn();
@@ -45,6 +46,10 @@ jest.mock('../src/ticket-queue', () => ({
 jest.mock('../src/ticket-metadata', () => ({
   setPriority: mockSetPriority,
   getActiveManageableTicket: mockGetActiveManageableTicket,
+}));
+
+jest.mock('../src/ticket-audit', () => ({
+  getTicketAuditHistory: mockGetTicketAuditHistory,
 }));
 
 jest.mock('../src/staff', () => ({
@@ -96,6 +101,7 @@ describe('MOST ticket commands', () => {
     mockSetPriority.mockResolvedValue({ ticketId: 19, priority: 'high' });
     mockGetActiveManageableTicket.mockResolvedValue({ ticketId: 20, status: 'open' });
     mockGetInternalNotes.mockResolvedValue([]);
+    mockGetTicketAuditHistory.mockResolvedValue([]);
   });
 
   it('resolves a replied ticket by Telegram message id before parsing text', async () => {
@@ -255,6 +261,28 @@ describe('MOST ticket commands', () => {
       'Internal notes #T000020:\n• Agent One: internal only',
       { parse_mode: 'MarkdownV2' },
     );
+  });
+
+  it('/history shows event type and actor without metadata payloads', async () => {
+    mockGetTicketByInternalId.mockResolvedValue({ ticketId: 20, assigned_to: 'agent-1', status: 'open' });
+    mockGetTicketAuditHistory.mockResolvedValue([
+      {
+        type: 'ticket.priority_changed',
+        ticketId: 20,
+        timestamp: new Date('2026-09-17T10:00:00Z'),
+        agent_id: 'agent-1',
+        metadata: { secret: 'must not render' },
+      },
+    ]);
+    const ctx = makeCtx({ message_id: 506, text: '', caption: '' });
+
+    await commands.historyCommand(ctx);
+
+    expect(mockGetTicketAuditHistory).toHaveBeenCalledWith(20, 20);
+    const rendered = String(mockReply.mock.calls[0][1]);
+    expect(rendered).toContain('ticket.priority_changed');
+    expect(rendered).toContain('Agent One');
+    expect(rendered).not.toContain('must not render');
   });
 
   it('sends a canned response through the normal staff reply path', async () => {
