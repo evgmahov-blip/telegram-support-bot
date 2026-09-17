@@ -34,13 +34,8 @@ jest.mock('../src/team', () => ({
 }));
 jest.mock('fancy-log');
 
-const mockSendMessage = jest.fn().mockResolvedValue(undefined);
 const mockStrictEscape = jest.fn((text) => text);
-const mockReply = jest.fn();
-
-(middleware as any).sendMessage = mockSendMessage;
 (middleware as any).strictEscape = mockStrictEscape;
-(middleware as any).reply = mockReply;
 
 describe('Staff Module', () => {
   beforeEach(() => {
@@ -59,77 +54,8 @@ describe('Staff Module', () => {
     };
   });
 
-  const createMockContext = (): any => ({
-    message: {
-      text: 'Test message',
-      from: {
-        id: 123,
-        first_name: 'John Engineer',
-        is_bot: false
-      },
-      date: Date.now(),
-    },
-    chat: { id: 456, type: 'group' },
-    update_id: 1,
-    messenger: 'telegram',
-    session: {
-      modeData: {
-        userid: 'user123',
-        name: 'Jane Doe',
-        ticketid: 'T001',
-        category: 'support',
-      }
-    },
-    reply: mockReply,
-    from: { id: 123, first_name: 'John Engineer' }
-  });
-
-  describe('privateReply', () => {
-    it('routes through the bot without engineer identity or direct-link markup', () => {
-      const ctx = createMockContext();
-
-      (staff as any).privateReply(ctx);
-
-      expect(mockSendMessage).toHaveBeenCalledWith(
-        'user123',
-        'telegram',
-        expect.stringContaining('Dear Jane Doe'),
-        { parse_mode: 'MarkdownV2' },
-      );
-      const userMessage = mockSendMessage.mock.calls[0][2] as string;
-      expect(userMessage).toContain('Support Team');
-      expect(userMessage).not.toContain('John Engineer');
-      expect(mockSendMessage.mock.calls[0][3]).not.toHaveProperty('reply_markup');
-    });
-
-    it('should handle clean replies mode without adding identity', () => {
-      const ctx = createMockContext();
-      (cache as any).config.clean_replies = true;
-
-      (staff as any).privateReply(ctx);
-
-      expect(mockSendMessage).toHaveBeenCalledWith(
-        'user123',
-        'telegram',
-        'Test message',
-        { parse_mode: 'MarkdownV2' },
-      );
-    });
-
-    it('should use custom message while preserving anonymous support identity', () => {
-      const ctx = createMockContext();
-      const customMsg = {
-        text: 'Custom response',
-        from: { first_name: 'Another Engineer' }
-      };
-
-      (staff as any).privateReply(ctx, customMsg);
-
-      const userMessage = mockSendMessage.mock.calls[0][2] as string;
-      expect(userMessage).toContain('Custom response');
-      expect(userMessage).toContain('Support Team');
-      expect(userMessage).not.toContain('Another Engineer');
-    });
+  it('does not export the legacy private engineer reply handler', () => {
+    expect((staff as any).privateReply).toBeUndefined();
   });
 
   describe('ticketMsg', () => {
