@@ -172,20 +172,7 @@ const closeCommand = async (ctx: Context): Promise<void> => {
     }
     return;
   }
-  const groups: string[] = [];
-  const { categories, language } = cache.config;
-
-  if (categories) {
-    categories.forEach(category => {
-      if (!category.subgroups || category.subgroups.length === 0) {
-        if (category.group_id === ctx.chat.id) groups.push(category.name);
-      } else {
-        category.subgroups.forEach((sub: { group_id: unknown; name: string }) => {
-          if (sub.group_id === ctx.chat.id) groups.push(sub.name);
-        });
-      }
-    });
-  }
+  const { language } = cache.config;
 
   // Only process if the reply is to a bot message
   if (!ctx.message.reply_to_message.from.is_bot) return;
@@ -199,26 +186,19 @@ const closeCommand = async (ctx: Context): Promise<void> => {
   }
   const { ticket, ticketIdStr } = resolved;
 
-  const tickets = await db.open(groups);
-  let userId: string | null = null;
-  for (const t of tickets) {
-    if ((t.ticketId ?? 0).toString().padStart(6, '0') === ticketIdStr.padStart(6, '0')) {
-      await db.add(t.userid, 'closed', t.category ?? '', ctx.messenger);
-    }
-    userId = t.userid;
+  const closed = await db.transitionTicketStatus(ticket.ticketId, 'closed');
+  if (!closed) {
+    middleware.reply(ctx, 'Ticket state changed before it could be closed.');
+    return;
   }
 
-  // Also close directly if not found in open list (ticket might already be closed)
-  if (!userId) {
-    await db.add(ticket.userid, 'closed', ticket.category ?? '', ctx.messenger);
-    userId = ticket.userid;
-  }
+  const userId = ticket.userid;
   const paddedTicket = ticketIdStr.toString().padStart(6, '0');
   await middleware.reply(ctx, `${language.ticket} #T${paddedTicket} ${language.closed}`);
   if (userId) {
     await middleware.sendMessage(
       userId,
-      ctx.messenger,
+      ticket.messenger,
       `${language.ticket} #T${paddedTicket} ${language.closed}\n\n${language.ticketClosed}`,
     ).catch(log.error);
     delete cache.ticketIDs[userId];
@@ -234,15 +214,18 @@ const userCloseCommand = async (ctx: Context): Promise<void> => {
   const { language } = cache.config;
   const userId = ctx.from.id.toString();
   const ticket = await db.getTicketByUserId(userId, ctx.session.groupCategory);
-  if (!ticket || ticket.status !== 'open') {
+  if (!ticket || (ticket.status !== 'open' && ticket.status !== 'waiting_user')) {
     await middleware.reply(ctx, language.ticketClosedError);
     return;
   }
   const ticketId = ticket.ticketId;
   const paddedTicket = ticketId.toString().padStart(6, '0');
 
-  await db.add(ticket.userid, 'closed', ticket.category ?? '', ctx.messenger);
-  await db.setClosedAt(ticketId);
+  const closed = await db.transitionTicketStatus(ticketId, 'closed');
+  if (!closed) {
+    await middleware.reply(ctx, language.ticketClosedError);
+    return;
+  }
   await db.recordAnalyticsEvent('ticket_closed', ticketId, null, { closed_by: 'user' });
   await webhooks.webhooks.ticketClosed(ticketId, userId);
 
@@ -280,7 +263,7 @@ const banCommand = async (ctx: Context): Promise<void> => {
   }
   const { ticket, ticketIdStr } = resolved;
 
-  await db.add(ticket.userid, 'banned', '', ctx.messenger);
+  await db.banUser(ticket.userid, ticket.messenger);
   await middleware.sendMessage(
     ctx.chat.id,
     ctx.messenger,
@@ -305,7 +288,11 @@ const reopenCommand = async (ctx: Context): Promise<void> => {
   }
   const { ticket, ticketIdStr } = resolved;
 
-  await db.reopen(ticket.userid, '', ctx.messenger);
+  const reopened = await db.transitionTicketStatus(ticket.ticketId, 'open');
+  if (!reopened) {
+    middleware.reply(ctx, 'Ticket state changed before it could be reopened.');
+    return;
+  }
   await middleware.sendMessage(
     ctx.chat.id,
     ctx.messenger,
@@ -330,7 +317,7 @@ const unbanCommand = async (ctx: Context): Promise<void> => {
   }
   const { ticket, ticketIdStr } = resolved;
 
-  await db.add(ticket.userid, 'closed', '', ctx.messenger);
+  await db.unbanUser(ticket.userid, ticket.messenger);
   await middleware.sendMessage(
     ctx.chat.id,
     ctx.messenger,
