@@ -1,4 +1,4 @@
-// Tests for the Telegram addon: staffchat_thread_id injection (#183) and sticker sending (#107)
+// Tests for the Telegram addon: staffchat_thread_id injection, media correlation ids and stickers.
 const mockApi = {
   sendMessage: jest.fn().mockResolvedValue({ message_id: 5 }),
   sendPhoto: jest.fn().mockResolvedValue({ message_id: 6 }),
@@ -51,7 +51,7 @@ describe('TelegramAddon', () => {
     expect(mockApi.sendMessage).toHaveBeenCalledWith('-100123', 'hi', expect.not.objectContaining({ message_thread_id: expect.anything() }));
   });
 
-  it('adds message_thread_id for the staff chat when staffchat_thread_id is set (#183)', async () => {
+  it('adds message_thread_id for the staff chat when configured', async () => {
     cache.config.staffchat_thread_id = 42;
     await addon.sendMessage('-100123', 'hi');
     expect(mockApi.sendMessage.mock.calls[0][2]).toMatchObject({ message_thread_id: 42 });
@@ -64,6 +64,13 @@ describe('TelegramAddon', () => {
 
     await addon.sendVideo('-100123', 'vid', {});
     expect(mockApi.sendVideo.mock.calls[0][2]).toMatchObject({ message_thread_id: 42 });
+  });
+
+  it('returns Telegram message ids for media so files can be correlated', async () => {
+    expect(await addon.sendPhoto('-100123', 'photo')).toBe('6');
+    expect(await addon.sendDocument('-100123', 'doc')).toBe('7');
+    expect(await addon.sendVideo('-100123', 'vid')).toBe('8');
+    expect(await addon.sendSticker('-100123', 'sticker')).toBe('9');
   });
 
   it('leaves user chats and explicit thread ids untouched', async () => {
@@ -80,15 +87,15 @@ describe('TelegramAddon', () => {
     expect(mockApi.sendMessage.mock.calls[0][2]).toMatchObject({ parse_mode: 'HTML' });
   });
 
-  it('sends stickers and returns the message id (#107)', async () => {
-    cache.config.staffchat_thread_id = 42;
-    const id = await addon.sendSticker('-100123', 'file-1');
-    expect(id).toBe('9');
-    expect(mockApi.sendSticker).toHaveBeenCalledWith('-100123', 'file-1', { message_thread_id: 42 });
-  });
+  it('returns null on media errors', async () => {
+    mockApi.sendPhoto.mockRejectedValueOnce(new Error('photo boom'));
+    mockApi.sendDocument.mockRejectedValueOnce(new Error('doc boom'));
+    mockApi.sendVideo.mockRejectedValueOnce(new Error('video boom'));
+    mockApi.sendSticker.mockRejectedValueOnce(new Error('sticker boom'));
 
-  it('swallows sticker errors', async () => {
-    mockApi.sendSticker.mockRejectedValueOnce(new Error('boom'));
+    await expect(addon.sendPhoto('555', 'file-1')).resolves.toBeNull();
+    await expect(addon.sendDocument('555', 'file-1')).resolves.toBeNull();
+    await expect(addon.sendVideo('555', 'file-1')).resolves.toBeNull();
     await expect(addon.sendSticker('555', 'file-1')).resolves.toBeNull();
   });
 });
