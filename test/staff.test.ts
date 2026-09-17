@@ -17,16 +17,20 @@ jest.mock('openai', () => {
 import * as staff from '../src/staff';
 import cache from '../src/cache';
 import * as middleware from '../src/middleware';
-import * as db from '../src/db';
 
-// Mock dependencies
 jest.mock('../src/cache');
 jest.mock('../src/middleware');
 jest.mock('../src/db', () => ({
+    Supportee: { findOneAndUpdate: jest.fn() },
     addTicketMessage: jest.fn().mockResolvedValue(undefined),
     recordAnalyticsEvent: jest.fn().mockResolvedValue(undefined),
     setFirstResponseAt: jest.fn().mockResolvedValue(undefined),
-    setClosedAt: jest.fn().mockResolvedValue(undefined),
+    transitionTicketStatus: jest.fn().mockResolvedValue(undefined),
+}));
+jest.mock('../src/team', () => ({
+    canPerformAction: jest.fn().mockReturnValue(true),
+    canManageTicket: jest.fn().mockReturnValue(true),
+    addInternalNoteCommand: jest.fn(),
 }));
 jest.mock('fancy-log');
 
@@ -36,31 +40,32 @@ const mockReply = jest.fn();
 
 (middleware as any).sendMessage = mockSendMessage;
 (middleware as any).strictEscape = mockStrictEscape;
+(middleware as any).reply = mockReply;
 
 describe('Staff Module', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    
-    // Setup cache mock
+
     (cache as any).config = {
       clean_replies: false,
       anonymous_replies: false,
       language: {
         dear: 'Dear',
         regards: 'Best regards',
-        regardsGroup: 'Support Team'
+        regardsGroup: 'Support Team',
+        msg_sent: 'Sent',
       },
       parse_mode: 'MarkdownV2'
     };
   });
 
-  const createMockContext = (isStaff = true): any => ({
+  const createMockContext = (): any => ({
     message: {
       text: 'Test message',
-      from: { 
-        id: 123, 
-        first_name: 'John',
-        is_bot: false 
+      from: {
+        id: 123,
+        first_name: 'John Engineer',
+        is_bot: false
       },
       date: Date.now(),
     },
@@ -71,112 +76,88 @@ describe('Staff Module', () => {
       modeData: {
         userid: 'user123',
         name: 'Jane Doe',
-        ticketId: 'T001'
+        ticketid: 'T001',
+        category: 'support',
       }
     },
     reply: mockReply,
-    from: { id: 123, first_name: 'John' }
+    from: { id: 123, first_name: 'John Engineer' }
   });
 
   describe('privateReply', () => {
-    it('should send message to user with proper formatting', () => {
+    it('routes through the bot without engineer identity or direct-link markup', () => {
       const ctx = createMockContext();
-      
+
       (staff as any).privateReply(ctx);
-      
+
       expect(mockSendMessage).toHaveBeenCalledWith(
         'user123',
         'telegram',
         expect.stringContaining('Dear Jane Doe'),
-        expect.objectContaining({
-          parse_mode: 'MarkdownV2'
-        })
+        { parse_mode: 'MarkdownV2' },
       );
+      const userMessage = mockSendMessage.mock.calls[0][2] as string;
+      expect(userMessage).toContain('Support Team');
+      expect(userMessage).not.toContain('John Engineer');
+      expect(mockSendMessage.mock.calls[0][3]).not.toHaveProperty('reply_markup');
     });
 
-    it('should handle clean replies mode', () => {
+    it('should handle clean replies mode without adding identity', () => {
       const ctx = createMockContext();
       (cache as any).config.clean_replies = true;
-      
+
       (staff as any).privateReply(ctx);
-      
+
       expect(mockSendMessage).toHaveBeenCalledWith(
         'user123',
         'telegram',
         'Test message',
-        expect.any(Object)
+        { parse_mode: 'MarkdownV2' },
       );
     });
 
-    it('should handle anonymous replies mode', () => {
-      const ctx = createMockContext();
-      (cache as any).config.anonymous_replies = true;
-      
-      (staff as any).privateReply(ctx);
-      
-      expect(mockSendMessage).toHaveBeenCalledWith(
-        'user123',
-        'telegram',
-        expect.stringContaining('Support Team'),
-        expect.any(Object)
-      );
-    });
-
-    it('should use custom message when provided', () => {
+    it('should use custom message while preserving anonymous support identity', () => {
       const ctx = createMockContext();
       const customMsg = {
         text: 'Custom response',
-        from: { first_name: 'Staff' }
+        from: { first_name: 'Another Engineer' }
       };
-      
+
       (staff as any).privateReply(ctx, customMsg);
-      
-      expect(mockSendMessage).toHaveBeenCalledWith(
-        'user123',
-        'telegram',
-        expect.stringContaining('Custom response'),
-        expect.any(Object)
-      );
+
+      const userMessage = mockSendMessage.mock.calls[0][2] as string;
+      expect(userMessage).toContain('Custom response');
+      expect(userMessage).toContain('Support Team');
+      expect(userMessage).not.toContain('Another Engineer');
     });
   });
 
   describe('ticketMsg', () => {
-    it('should format normal ticket message', () => {
+    it('formats every normal reply with support-team identity only', () => {
       const message = {
         text: 'Hello world',
-        from: { first_name: 'John' }
+        from: { first_name: 'John Engineer' }
       };
-      
+
       const result = (staff as any).ticketMsg('Jane', message);
-      
+
       expect(result).toContain('Dear Jane');
       expect(result).toContain('Hello world');
-      expect(result).toContain('John');
+      expect(result).toContain('Support Team');
+      expect(result).not.toContain('John Engineer');
     });
 
     it('should handle clean replies', () => {
       (cache as any).config.clean_replies = true;
       const message = {
         text: 'Clean message',
-        from: { first_name: 'John' }
+        from: { first_name: 'John Engineer' }
       };
-      
-      const result = (staff as any).ticketMsg('Jane', message);
-      
-      expect(result).toBe('Clean message');
-    });
 
-    it('should handle anonymous replies', () => {
-      (cache as any).config.anonymous_replies = true;
-      const message = {
-        text: 'Anonymous message',
-        from: { first_name: 'John' }
-      };
-      
       const result = (staff as any).ticketMsg('Jane', message);
-      
-      expect(result).toContain('Support Team');
-      expect(result).not.toContain('John');
+
+      expect(result).toBe('Clean message');
+      expect(result).not.toContain('John Engineer');
     });
   });
 });
