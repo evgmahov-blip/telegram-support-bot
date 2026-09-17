@@ -85,7 +85,11 @@ export async function ticketHandler(bot: Addon, ctx: Context): Promise<ISupporte
       ticket = await db.getTicketByUserId(userId, session.groupCategory);
     } else if (ticket.status === 'waiting_user') {
       // User response resumes the same ticket atomically.
-      ticket = await db.transitionTicketStatus(ticket.ticketId, 'open') ?? ticket;
+      const resumed = await db.transitionTicketStatus(ticket.ticketId, 'open');
+      if (resumed) {
+        ticket = resumed;
+        await db.recordAnalyticsEvent('ticket.resumed', ticket.ticketId, null, { reason: 'user_reply' });
+      }
     } else if (cache.config.ticket_per_message) {
       // ticket_per_message (#172): every message gets an additional ticket with a fresh id;
       // earlier tickets are kept so staff can still reply to them.
