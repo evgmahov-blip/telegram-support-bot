@@ -17,11 +17,13 @@ describe('TelegramUpdateDeduper', () => {
     deduper = new TelegramUpdateDeduper(store, () => 'bot-test', 1_000, 10_000);
   });
 
-  it('claims a fresh update with a scoped durable receipt', async () => {
-    await expect(deduper.claim(42)).resolves.toBe(true);
+  it('claims a fresh update with a scoped durable fencing token', async () => {
+    const claimId = await deduper.claim(42);
+    expect(claimId).toEqual(expect.any(String));
     expect(store.create).toHaveBeenCalledWith(expect.objectContaining({
       _id: 'bot-test:telegram:42',
       update_id: 42,
+      claim_id: claimId,
       state: 'processing',
       attempts: 1,
     }));
@@ -32,20 +34,29 @@ describe('TelegramUpdateDeduper', () => {
     store.create.mockRejectedValueOnce({ code: 11000 });
     store.reclaim.mockResolvedValueOnce(false);
 
-    await expect(deduper.claim(42)).resolves.toBe(false);
+    await expect(deduper.claim(42)).resolves.toBeNull();
     expect(store.reclaim).toHaveBeenCalledWith(
       'bot-test:telegram:42',
+      expect.any(String),
       expect.any(Date),
       expect.any(Date),
       expect.any(Date),
     );
   });
 
-  it('reclaims an expired processing lease', async () => {
+  it('reclaims an expired processing lease with a new fencing token', async () => {
     store.create.mockRejectedValueOnce({ code: 11000 });
     store.reclaim.mockResolvedValueOnce(true);
 
-    await expect(deduper.claim(42)).resolves.toBe(true);
+    const claimId = await deduper.claim(42);
+    expect(claimId).toEqual(expect.any(String));
+    expect(store.reclaim).toHaveBeenCalledWith(
+      'bot-test:telegram:42',
+      claimId,
+      expect.any(Date),
+      expect.any(Date),
+      expect.any(Date),
+    );
   });
 
   it('does not hide non-duplicate storage errors', async () => {
@@ -54,25 +65,26 @@ describe('TelegramUpdateDeduper', () => {
     await expect(deduper.claim(42)).rejects.toBe(error);
   });
 
-  it('marks a claimed update complete and releases failed work', async () => {
-    await expect(deduper.complete(42)).resolves.toBeUndefined();
+  it('uses the fencing token for completion and release', async () => {
+    await expect(deduper.complete(42, 'claim-1')).resolves.toBeUndefined();
     expect(store.complete).toHaveBeenCalledWith(
       'bot-test:telegram:42',
+      'claim-1',
       expect.any(Date),
       expect.any(Date),
     );
 
-    await expect(deduper.release(42)).resolves.toBeUndefined();
-    expect(store.release).toHaveBeenCalledWith('bot-test:telegram:42');
+    await expect(deduper.release(42, 'claim-1')).resolves.toBeUndefined();
+    expect(store.release).toHaveBeenCalledWith('bot-test:telegram:42', 'claim-1');
   });
 
-  it('fails completion when the claim disappeared', async () => {
+  it('rejects completion after ownership was lost to a newer claim', async () => {
     store.complete.mockResolvedValueOnce(false);
-    await expect(deduper.complete(42)).rejects.toThrow('claim disappeared');
+    await expect(deduper.complete(42, 'stale-claim')).rejects.toThrow('no longer owned');
   });
 
   it('fails open for malformed synthetic update ids without touching storage', async () => {
-    await expect(deduper.claim(-1)).resolves.toBe(true);
+    await expect(deduper.claim(-1)).resolves.toBe('synthetic');
     expect(store.create).not.toHaveBeenCalled();
   });
 });
