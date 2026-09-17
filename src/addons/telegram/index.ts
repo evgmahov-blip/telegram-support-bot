@@ -4,6 +4,7 @@ import { apiThrottler } from '@grammyjs/transformer-throttler';
 import * as middleware from '../../middleware';
 import * as permissions from '../../permissions';
 import * as inline from '../../inline';
+import * as mostCommands from '../../most-commands';
 import cache from '../../cache';
 import { registerCommonHandlers } from '../../handlers';
 import * as log from '../../logger'
@@ -177,6 +178,7 @@ class TelegramAddon implements Addon {
 
     const keys = inline.initInline(this);
     registerCommonHandlers(this, keys);
+    this.command('queue', (ctx: Context) => mostCommands.queueCommand(ctx));
 
     this.bot.start();
   }
