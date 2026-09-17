@@ -60,7 +60,7 @@ class TelegramAddon implements Addon {
 
     return session({
       initial,
-      getSessionKey: (ctx: BotContext) => {
+      getSessionKey: (ctx) => {
         if (!ctx.from) return undefined;
         return `${ctx.from.id}:${ctx.chat?.id ?? ctx.from.id}`;
       },
