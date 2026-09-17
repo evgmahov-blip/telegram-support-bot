@@ -6,8 +6,7 @@ const mockOpen = jest.fn();
 const mockGetByTicketId = jest.fn();
 const mockGetTicketByUserId = jest.fn();
 const mockGetAllUsers = jest.fn();
-const mockAdd = jest.fn().mockResolvedValue(0);
-const mockSetClosedAt = jest.fn().mockResolvedValue(undefined);
+const mockTransitionTicketStatus = jest.fn();
 const mockRecordAnalyticsEvent = jest.fn().mockResolvedValue(undefined);
 const mockTicketClosedWebhook = jest.fn().mockResolvedValue(undefined);
 const mockSendCSATSurvey = jest.fn().mockResolvedValue(undefined);
@@ -25,8 +24,7 @@ jest.mock('../src/db', () => ({
   getTicketById: jest.fn().mockResolvedValue(null),
   getTicketByUserId: mockGetTicketByUserId,
   getAllUsers: mockGetAllUsers,
-  add: mockAdd,
-  setClosedAt: mockSetClosedAt,
+  transitionTicketStatus: mockTransitionTicketStatus,
   recordAnalyticsEvent: mockRecordAnalyticsEvent,
   getInternalNotes: jest.fn().mockResolvedValue([{ text: 'n1' }]),
   getConversationHistory: jest.fn().mockResolvedValue([
@@ -34,7 +32,8 @@ jest.mock('../src/db', () => ({
     { sender: 'user', text: 'Hello', timestamp: new Date('2026-09-05T10:00:00Z') },
   ]),
   closeAll: jest.fn(),
-  reopen: jest.fn(),
+  banUser: jest.fn().mockResolvedValue(undefined),
+  unbanUser: jest.fn().mockResolvedValue(undefined),
   addTicketMessage: jest.fn(),
 }));
 
@@ -211,7 +210,6 @@ describe('ticketCommand (#85)', () => {
     expect(text).toContain('assigned to: Agent Smith');
     expect(text).toContain('Summary: Wants a refund');
     expect(text).toContain('Internal Note: 1');
-    // history is printed oldest first
     expect(text.indexOf('Hello')).toBeLessThan(text.indexOf('Hello back'));
   });
 
@@ -259,7 +257,6 @@ describe('broadcastCommand (#159)', () => {
 
     await commands.broadcastCommand(makeCtx(true, { match: 'Maintenance tonight' } as Partial<Context>));
 
-    // Sent as plain text (no parse_mode): staff Markdown must not fail per recipient
     expect(mockSendMessage).toHaveBeenCalledWith('1', 'telegram', 'Maintenance tonight', {});
     expect(mockSendMessage).toHaveBeenCalledWith('2', 'signal', 'Maintenance tonight', {});
     expect(mockReply).toHaveBeenCalledWith(expect.anything(), 'Broadcast sent to 1/2');
@@ -284,14 +281,15 @@ describe('user /close (#112)', () => {
     expect(mockReply).not.toHaveBeenCalled();
   });
 
-  it('closes the user\'s own open ticket, notifies staff and sends the CSAT survey', async () => {
+  it('closes the user\'s own active ticket through the guarded lifecycle API', async () => {
     cache.config.allow_user_close = true;
-    mockGetTicketByUserId.mockResolvedValue({ ticketId: 7, userid: 'user123', status: 'open', category: null, messenger: 'telegram' });
+    const ticket = { ticketId: 7, userid: 'user123', status: 'open', category: null, messenger: 'telegram' };
+    mockGetTicketByUserId.mockResolvedValue(ticket);
+    mockTransitionTicketStatus.mockResolvedValue({ ...ticket, status: 'closed' });
 
     await commands.closeCommand(makeCtx(false));
 
-    expect(mockAdd).toHaveBeenCalledWith('user123', 'closed', '', 'telegram');
-    expect(mockSetClosedAt).toHaveBeenCalledWith(7);
+    expect(mockTransitionTicketStatus).toHaveBeenCalledWith(7, 'closed');
     expect(mockRecordAnalyticsEvent).toHaveBeenCalledWith('ticket_closed', 7, null, { closed_by: 'user' });
     expect(mockTicketClosedWebhook).toHaveBeenCalledWith(7, 'user123');
     expect(mockReply).toHaveBeenCalledWith(expect.anything(), 'Ticket #T000007 closed');
@@ -299,11 +297,22 @@ describe('user /close (#112)', () => {
     expect(mockSendCSATSurvey).toHaveBeenCalledWith('user123', 'telegram', 7);
   });
 
-  it('tells the user when there is no open ticket', async () => {
+  it('allows the user to close a WAITING_USER ticket', async () => {
+    cache.config.allow_user_close = true;
+    const ticket = { ticketId: 8, userid: 'user123', status: 'waiting_user', category: null, messenger: 'telegram' };
+    mockGetTicketByUserId.mockResolvedValue(ticket);
+    mockTransitionTicketStatus.mockResolvedValue({ ...ticket, status: 'closed' });
+
+    await commands.closeCommand(makeCtx(false));
+
+    expect(mockTransitionTicketStatus).toHaveBeenCalledWith(8, 'closed');
+  });
+
+  it('tells the user when there is no active ticket', async () => {
     cache.config.allow_user_close = true;
     mockGetTicketByUserId.mockResolvedValue({ ticketId: 7, status: 'closed' });
     await commands.closeCommand(makeCtx(false));
-    expect(mockAdd).not.toHaveBeenCalled();
+    expect(mockTransitionTicketStatus).not.toHaveBeenCalled();
     expect(mockReply).toHaveBeenCalledWith(expect.anything(), 'You cannot reply to a closed ticket.');
   });
 
