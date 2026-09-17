@@ -1,11 +1,10 @@
-import { Context, Messenger, ParseMode } from './interfaces';
+import { Context, ParseMode } from './interfaces';
 import cache from './cache';
-import * as llm from './addons/llm';
 import * as db from './db';
 import { strictEscape as esc, reply, sendMessage } from './middleware';
 import { ISupportee } from './db';
 import * as log from './logger'
-import * as triage from './triage';
+import * as aiDraft from './ai-draft';
 import * as webhooks from './webhooks';
 import * as workflows from './workflows';
 
@@ -56,10 +55,9 @@ function createAutoReplyMessage(msg: string, ctx: Context): string {
     : `${config.language.dear} ${esc(senderName)},\n\n${msg}\n\n${config.language.regards}\n${config.language.automatedReplyAuthor}\n\n*${config.language.automatedReply}*`;
 }
 
+/** Static configured replies may answer users. AI never does. */
 async function autoReply(ctx: Context): Promise<boolean> {
-  const {
-    config: { autoreply, use_llm },
-  } = cache;
+  const { autoreply } = cache.config;
   const messageText = ctx.message.text.toString();
 
   if (autoreply && autoreply.length > 0 && autoreply[0]?.question) {
@@ -71,13 +69,6 @@ async function autoReply(ctx: Context): Promise<boolean> {
     }
   }
 
-  if (use_llm) {
-    const response = await llm.getResponseFromLLM(ctx);
-    if (response !== null) {
-      reply(ctx, createAutoReplyMessage(response, ctx));
-      return true;
-    }
-  }
   return false;
 }
 
@@ -94,30 +85,6 @@ async function processTicket(
     assigned_to: ticket.assigned_to,
     tags: ticket.tags || [],
   };
-
-  if (!autoReplyInfo && config.auto_triage) {
-    const userText = ctx.message.text;
-    await triage.analyzeMessage(userText, ticket.ticketId);
-
-    const refreshedTicket = await db.getTicketById(ticket.ticketId, ctx.session.groupCategory);
-    if (refreshedTicket) {
-      (ctx.session as any).ticketData = {
-        priority: refreshedTicket.priority,
-        assigned_to: refreshedTicket.assigned_to,
-        tags: refreshedTicket.tags || [],
-      };
-
-      const triagePrefix = triage.formatTriagePrefix({
-        category: refreshedTicket.triage_category,
-        priority: refreshedTicket.priority as import('./interfaces').TicketPriority,
-        summary: refreshedTicket.triage_summary || '',
-        sentimentScore: refreshedTicket.sentiment_score || 3,
-      });
-      if (triagePrefix) {
-        ctx.message.text = triagePrefix + ctx.message.text;
-      }
-    }
-  }
 
   await db.addTicketMessage(ticket.ticketId, 'user', ctx.from.id.toString(), ctx.message.text);
 
@@ -169,6 +136,10 @@ async function processTicket(
       { parse_mode: config.parse_mode },
     ).catch(log.error);
   }
+
+  if (!autoReplyInfo) {
+    await aiDraft.createAIDraft(ticket, ctx);
+  }
 }
 
 async function chat(ctx: Context, chat: { id: string }) {
@@ -205,6 +176,9 @@ async function chat(ctx: Context, chat: { id: string }) {
     cache.ticketSent[cache.userId] = sentCount + 1;
     const ticket = await db.getTicketByUserId(cache.userId, ctx.session.groupCategory);
     if (!ticket) return;
+
+    await db.addTicketMessage(ticket.ticketId, 'user', ctx.from.id.toString(), ctx.message.text);
+
     sendMessage(
       config.staffchat_id,
       config.staffchat_type,
@@ -225,6 +199,10 @@ async function chat(ctx: Context, chat: { id: string }) {
         ),
       ).catch(log.error);
     }
+
+    if (!autoReplyInfo) {
+      await aiDraft.createAIDraft(ticket, ctx);
+    }
   } else if (sentCount === config.spam_cant_msg) {
     cache.ticketSent[cache.userId] = sentCount + 1;
     sendMessage(chat.id, ctx.messenger, config.language.blockedSpam).catch(log.error);
@@ -232,13 +210,7 @@ async function chat(ctx: Context, chat: { id: string }) {
 
   const logTicket = await db.getTicketByUserId(cache.userId, ctx.session.groupCategory);
   if (logTicket) {
-    log.info(
-      formatMessageAsTicket(
-        logTicket.ticketId,
-        ctx,
-        autoReplyInfo,
-      ),
-    );
+    log.info(`User message processed for #T${logTicket.ticketId}`);
   }
 }
 
