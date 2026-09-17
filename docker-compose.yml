@@ -7,7 +7,7 @@ services:
     ports:
       - "127.0.0.1:8080:8080"
     environment:
-      - MONGO_URI=${MONGO_URI:?set authenticated MONGO_URI in .env}
+      - MONGO_URI=${MONGO_URI:?set authenticated app MONGO_URI in .env}
       - MONGO_COLLECTION=most_support_tickets
     depends_on:
       mongodb:
@@ -17,10 +17,14 @@ services:
     image: mongo:8.0
     restart: unless-stopped
     environment:
-      - MONGO_INITDB_ROOT_USERNAME=${MONGO_USERNAME:?set MONGO_USERNAME in .env}
-      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_PASSWORD:?set MONGO_PASSWORD in .env}
+      - MONGO_INITDB_ROOT_USERNAME=${MONGO_ROOT_USERNAME:?set MONGO_ROOT_USERNAME in .env}
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_ROOT_PASSWORD:?set MONGO_ROOT_PASSWORD in .env}
+      - MONGO_APP_USERNAME=${MONGO_APP_USERNAME:?set MONGO_APP_USERNAME in .env}
+      - MONGO_APP_PASSWORD=${MONGO_APP_PASSWORD:?set MONGO_APP_PASSWORD in .env}
+      - MONGO_APP_DATABASE=${MONGO_APP_DATABASE:-support}
     volumes:
       - ./.tmp/mongodb_data:/data/db
+      - ./docker/mongo-init.js:/docker-entrypoint-initdb.d/10-create-app-user.js:ro
     healthcheck:
       test:
         - CMD-SHELL
