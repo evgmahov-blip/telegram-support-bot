@@ -116,7 +116,8 @@ async function fileHandler(type: string, bot: Addon, ctx: Context) {
       break;
     case 'sticker': {
       if (!bot.sendSticker) return;
-      messageId = await bot.sendSticker(receiverId, fileId);
+      const stickerMessageId = await bot.sendSticker(receiverId, fileId);
+      messageId = typeof stickerMessageId === 'string' ? stickerMessageId : null;
       const headerMessenger = session.admin ? ticket.messenger : config.staffchat_type;
       if (captionText.trim()) {
         sendMessage(receiverId, headerMessenger, captionText).catch(log.error);
