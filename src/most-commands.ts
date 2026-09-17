@@ -5,6 +5,7 @@ import * as db from './db';
 import * as team from './team';
 import * as ticketQueue from './ticket-queue';
 import * as ticketMetadata from './ticket-metadata';
+import * as ticketAudit from './ticket-audit';
 import * as staff from './staff';
 import * as middleware from './middleware';
 import { resolveTicketFromReply } from './ticket-resolution';
@@ -234,6 +235,40 @@ export async function notesCommand(ctx: Context): Promise<void> {
   await middleware.reply(
     ctx,
     `Internal notes #T${ticket.ticketId.toString().padStart(6, '0')}:\n${lines.join('\n')}`,
+    { parse_mode: cache.config.parse_mode },
+  );
+}
+
+/** Read the ticket audit trail without exposing event metadata payloads. */
+export async function historyCommand(ctx: Context): Promise<void> {
+  if (!ctx.session.admin) return;
+  const ticket = await requireRepliedTicket(ctx);
+  if (!ticket) return;
+  const access = await requireManageableTicket(ctx, ticket, 'view ticket history');
+  if (!access) return;
+
+  const events = await ticketAudit.getTicketAuditHistory(ticket.ticketId, 20);
+  if (events.length === 0) {
+    await middleware.reply(
+      ctx,
+      `No audit events for #T${ticket.ticketId.toString().padStart(6, '0')}.`,
+    );
+    return;
+  }
+
+  const esc = middleware.strictEscape;
+  const lines = events.map((event) => {
+    const when = event.timestamp
+      ? new Date(event.timestamp).toISOString().slice(0, 16).replace('T', ' ')
+      : '-';
+    const member = event.agent_id ? cache.staffMembers.get(event.agent_id) : undefined;
+    const actor = event.agent_id ? (member?.name || event.agent_id) : 'system/user';
+    return `• ${esc(when)} · ${esc(event.type)} · ${esc(actor)}`;
+  });
+
+  await middleware.reply(
+    ctx,
+    `Audit #T${ticket.ticketId.toString().padStart(6, '0')}:\n${lines.join('\n')}`,
     { parse_mode: cache.config.parse_mode },
   );
 }
