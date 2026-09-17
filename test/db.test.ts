@@ -10,6 +10,8 @@ const mockBanFindOne = jest.fn();
 const mockBanFindOneAndUpdate = jest.fn();
 const mockBanDeleteOne = jest.fn();
 const mockCreate = jest.fn();
+const mockEventSave = jest.fn().mockResolvedValue(undefined);
+const mockEventFindOne = jest.fn(() => query({ seq: 0 }));
 
 /** Minimal chainable, awaitable query like mongoose returns from findOne(). */
 const query = (result: unknown, reject = false) => {
@@ -36,6 +38,15 @@ jest.mock('mongoose', () => {
     findOneAndUpdate: mockCounterFindOneAndUpdate,
   };
 
+
+const analyticsEventModel: any = jest.fn(function (this: any, data: any) {
+  Object.assign(this, data);
+  this.save = mockEventSave;
+});
+analyticsEventModel.findOne = mockEventFindOne;
+analyticsEventModel.find = jest.fn();
+analyticsEventModel.updateOne = jest.fn().mockResolvedValue({ modifiedCount: 1 });
+
   const userBanModel = {
     findOne: mockBanFindOne,
     findOneAndUpdate: mockBanFindOneAndUpdate,
@@ -49,6 +60,7 @@ jest.mock('mongoose', () => {
     Schema,
     model: jest.fn((name: string) => {
       if (name === 'TicketCounter') return counterModel;
+      if (name === 'AnalyticsEvent') return analyticsEventModel;
       if (name === 'UserBan') return userBanModel;
       return supporteeModel;
     }),

@@ -12,6 +12,7 @@ export interface SessionData {
   mode: string | null;
   modeData: ModeData;
   lastContactDate: number;
+  lastOfflineNoticeDate?: number;
   groupCategory: string | null;
   groupTag: string;
   group: string;
@@ -283,6 +284,8 @@ export class Config {
   discord_channel_id: string = '';
   api_enabled: boolean = false;
   api_token: string = '';
+  api_port: number = 8081;
+  api_host: string = '127.0.0.1';
   // Web chat widget
   web_chat: WebChatConfig = {
     enabled: false,

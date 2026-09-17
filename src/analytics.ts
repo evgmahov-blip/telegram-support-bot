@@ -52,8 +52,8 @@ export async function handleCSATCallback(ticketId: number, rating: number): Prom
  */
 export async function getAverageResponseTime(startDate?: Date, endDate?: Date): Promise<number | null> {
     try {
-        const createdEvents = await db.getAnalyticsEvents('ticket_created', startDate, endDate);
-        const replyEvents = await db.getAnalyticsEvents('first_reply', startDate, endDate);
+        const createdEvents = await db.getAnalyticsEvents('ticket.created', startDate, endDate);
+        const replyEvents = await db.getAnalyticsEvents('ticket.replied', startDate, endDate);
 
         if (createdEvents.length === 0 || replyEvents.length === 0) return null;
 
@@ -83,8 +83,8 @@ export async function getAverageResponseTime(startDate?: Date, endDate?: Date): 
  */
 export async function getAverageResolutionTime(startDate?: Date, endDate?: Date): Promise<number | null> {
     try {
-        const createdEvents = await db.getAnalyticsEvents('ticket_created', startDate, endDate);
-        const closedEvents = await db.getAnalyticsEvents('ticket_closed', startDate, endDate);
+        const createdEvents = await db.getAnalyticsEvents('ticket.created', startDate, endDate);
+        const closedEvents = await db.getAnalyticsEvents('ticket.closed', startDate, endDate);
 
         if (createdEvents.length === 0 || closedEvents.length === 0) return null;
 
@@ -130,7 +130,7 @@ export async function getAverageCSAT(startDate?: Date, endDate?: Date): Promise<
  */
 export async function getTicketCount(startDate?: Date, endDate?: Date): Promise<number> {
     try {
-        const events = await db.getAnalyticsEvents('ticket_created', startDate, endDate);
+        const events = await db.getAnalyticsEvents('ticket.created', startDate, endDate);
         return events.length;
     } catch (err) {
         log.error('Error getting ticket count:', err);
@@ -143,8 +143,8 @@ export async function getTicketCount(startDate?: Date, endDate?: Date): Promise<
  */
 export async function getAgentStats(startDate?: Date, endDate?: Date): Promise<Array<{ agent_id: string; ticketsResolved: number; avgResponseTime: number | null }>> {
     try {
-        const replyEvents = await db.getAnalyticsEvents('staff_reply', startDate, endDate);
-        const closedEvents = await db.getAnalyticsEvents('ticket_closed', startDate, endDate);
+        const replyEvents = await db.getAnalyticsEvents('ticket.replied', startDate, endDate);
+        const closedEvents = await db.getAnalyticsEvents('ticket.closed', startDate, endDate);
 
         const agentMap = new Map<string, { ticketsResolved: number; responseTimes: number[] }>();
 

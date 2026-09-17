@@ -181,13 +181,13 @@ async function chat(ctx: Context) {
   delete cache.ticketSent[ticketId];
 
   await forwardReplyToParent(ctx, ticket, staffMessage);
-  await db.recordAnalyticsEvent('staff_reply', ticketId, senderId);
+  await db.recordAnalyticsEvent('ticket.replied', ticketId, senderId);
   await webhooks.webhooks.ticketReplied(ticketId, senderId, staffMessage.substring(0, 200));
 
   if (cache.config.auto_close_tickets) {
     const closed = await db.transitionTicketStatus(ticketId, 'closed');
     if (closed) {
-      await db.recordAnalyticsEvent('ticket_closed', ticketId, senderId);
+      await db.recordAnalyticsEvent('ticket.closed', ticketId, senderId);
       await webhooks.webhooks.ticketClosed(ticketId, senderId);
       await analytics.sendCSATSurvey(ticket.userid, ticket.messenger, ticketId);
     }

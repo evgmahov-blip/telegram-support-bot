@@ -173,6 +173,7 @@ export async function connect() {
     serverSelectionTimeoutMS: 5000,
   });
 
+  await backfillLegacyEvents();
   return connection;
 }
 
@@ -204,17 +205,55 @@ export const getNextTicketId = async (): Promise<number> => {
   return counter.seq;
 };
 
-const getNextEventSeq = async (): Promise<number> => {
-  const counterId = `${getCollectionName()}:eventSeq`;
-  const counter = await TicketCounter.findOneAndUpdate(
-    { _id: counterId },
-    { $inc: { seq: 1 } },
-    { upsert: true, new: true, setDefaultsOnInsert: true },
-  );
+const MAX_EVENT_APPEND_RETRIES = 8;
 
-  if (!counter) throw new Error('Failed to allocate event sequence');
-  return counter.seq;
-};
+function isDuplicateSequenceError(err: unknown): boolean {
+  const mongoError = err as { code?: number; keyPattern?: Record<string, number> };
+  return mongoError?.code === 11000 && Boolean(mongoError.keyPattern?.seq);
+}
+
+async function nextEventSequenceCandidate(): Promise<number> {
+  const latest = await AnalyticsEvent.findOne({ seq: { $exists: true } })
+    .sort({ seq: -1 })
+    .select('seq');
+  return (latest?.seq ?? 0) + 1;
+}
+
+/** Backfill pre-event-log rows without rewinding any existing cursor. */
+export async function backfillLegacyEvents(): Promise<number> {
+  const latest = await AnalyticsEvent.findOne({ seq: { $exists: true } })
+    .sort({ seq: -1 })
+    .select('seq');
+  let nextSeq = latest?.seq ?? 0;
+  let migrated = 0;
+
+  const legacyEvents = await AnalyticsEvent.find({
+    $or: [
+      { seq: { $exists: false } },
+      { seq: null },
+      { event_id: { $exists: false } },
+      { event_id: null },
+    ],
+  }).sort({ timestamp: 1, _id: 1 });
+
+  for (const event of legacyEvents) {
+    const updates: Record<string, unknown> = {};
+    if (!event.event_id) updates.event_id = randomUUID();
+    if (!Number.isSafeInteger(event.seq)) {
+      nextSeq += 1;
+      updates.seq = nextSeq;
+    } else {
+      nextSeq = Math.max(nextSeq, event.seq as number);
+    }
+    if (Object.keys(updates).length > 0) {
+      await AnalyticsEvent.updateOne({ _id: event._id }, { $set: updates });
+      migrated += 1;
+    }
+  }
+
+  if (migrated > 0) log.info(`Backfilled ${migrated} legacy analytics events.`);
+  return migrated;
+}
 
 const allowedStatusSources: Record<TicketStatus, TicketStatus[]> = {
   open: ['open', 'waiting_user', 'closed'],
@@ -502,13 +541,17 @@ export async function addTicketMessage(
   sender_id: string,
   text: string,
 ): Promise<void> {
+  const msg = new TicketMessage({ ticketId, sender, sender_id, text });
   try {
-    const msg = new TicketMessage({ ticketId, sender, sender_id, text });
     await msg.save();
-    await recordAnalyticsEvent(`ticket.message.${sender}`, ticketId, sender_id || null);
   } catch (err) {
     log.error('DB addTicketMessage error:', err);
+    throw err;
   }
+
+  // The message and event are separate documents, but event loss must be
+  // observable instead of silently hidden after history was persisted.
+  await recordAnalyticsEvent(`ticket.message.${sender}`, ticketId, sender_id || null);
 }
 
 /** LLM context is a bounded read; stored ticket history is never pruned. */
@@ -553,21 +596,37 @@ export async function recordAnalyticsEvent(
   ticketId: number,
   agent_id: string | null = null,
   metadata: Record<string, any> = {},
-): Promise<void> {
-  try {
-    const seq = await getNextEventSeq();
+): Promise<IAnalyticsEvent> {
+  const eventId = randomUUID();
+  let lastError: unknown = null;
+
+  for (let attempt = 0; attempt < MAX_EVENT_APPEND_RETRIES; attempt += 1) {
+    const seq = await nextEventSequenceCandidate();
     const event = new AnalyticsEvent({
-      event_id: randomUUID(),
+      event_id: eventId,
       seq,
       type,
       ticketId,
       agent_id,
       metadata,
     });
-    await event.save();
-  } catch (err) {
-    log.error('DB recordAnalyticsEvent error:', err);
+
+    try {
+      await event.save();
+      return event as IAnalyticsEvent;
+    } catch (err) {
+      lastError = err;
+      if (isDuplicateSequenceError(err)) continue;
+      log.error('DB recordAnalyticsEvent error:', err);
+      throw err;
+    }
   }
+
+  const error = lastError instanceof Error
+    ? lastError
+    : new Error('Failed to append analytics event after sequence retries');
+  log.error('DB recordAnalyticsEvent error:', error);
+  throw error;
 }
 
 export async function getEventsSince(
@@ -576,11 +635,20 @@ export async function getEventsSince(
 ): Promise<IAnalyticsEvent[]> {
   try {
     const safeSince = Number.isSafeInteger(since) && since >= 0 ? since : 0;
-    const safeLimit = Math.max(1, Math.min(limit, 500));
-    return await AnalyticsEvent.find({ seq: { $gt: safeSince } })
+    const safeLimit = Math.max(1, Math.min(limit, 501));
+    const events = await AnalyticsEvent.find({ seq: { $gt: safeSince } })
       .sort({ seq: 1 })
       .limit(safeLimit)
       .lean<IAnalyticsEvent[]>();
+
+    const contiguous: IAnalyticsEvent[] = [];
+    let expected = safeSince + 1;
+    for (const event of events) {
+      if (event.seq !== expected) break;
+      contiguous.push(event);
+      expected += 1;
+    }
+    return contiguous;
   } catch (err) {
     log.error('DB getEventsSince error:', err);
     return [];

@@ -51,6 +51,7 @@ class TelegramAddon implements Addon {
       modeData: { ticketid: '', userid: '', name: null, category: '' } as ModeData,
       mode: null,
       lastContactDate: 0,
+      lastOfflineNoticeDate: 0,
       groupCategory: null,
       groupTag: '',
       group: '',

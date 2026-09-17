@@ -149,9 +149,16 @@ async function chat(ctx: Context, chat: { id: string }) {
   // After-hours is a notification policy, never a data-loss gate. The message
   // is still persisted and forwarded to the staff queue.
   if (!workflows.isWithinBusinessHours()) {
+  const now = Date.now();
+  if (
+    ctx.session.lastOfflineNoticeDate === undefined ||
+    ctx.session.lastOfflineNoticeDate < now - TIME_BETWEEN_CONFIRMATION_MESSAGES
+  ) {
+    ctx.session.lastOfflineNoticeDate = now;
     const offlineMsg = config.language.businessHoursClosed || 'Our support team is currently offline. We will respond during business hours.';
     await reply(ctx, offlineMsg);
   }
+}
 
   cache.userId = ctx.message.from.id;
   const isAutoReply = await autoReply(ctx);

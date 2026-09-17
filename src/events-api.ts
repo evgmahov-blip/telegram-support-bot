@@ -1,11 +1,23 @@
+import { createHash, timingSafeEqual } from 'crypto';
+import { rateLimit } from 'express-rate-limit';
 import cache from './cache';
 import * as db from './db';
 import * as log from './logger';
 
 let server: any = null;
 
-function configView(): { api_enabled?: boolean; api_token?: string; api_port?: number } {
-  return cache.config as unknown as { api_enabled?: boolean; api_token?: string; api_port?: number };
+function configView(): {
+  api_enabled?: boolean;
+  api_token?: string;
+  api_port?: number;
+  api_host?: string;
+} {
+  return cache.config as unknown as {
+    api_enabled?: boolean;
+    api_token?: string;
+    api_port?: number;
+    api_host?: string;
+  };
 }
 
 function bearerToken(req: any): string {
@@ -14,20 +26,15 @@ function bearerToken(req: any): string {
 }
 
 function authorized(req: any, expected: string): boolean {
-  const actual = bearerToken(req);
-  if (!actual || actual.length !== expected.length) return false;
-
-  let diff = 0;
-  for (let i = 0; i < actual.length; i += 1) {
-    diff |= actual.charCodeAt(i) ^ expected.charCodeAt(i);
-  }
-  return diff === 0;
+  const actualDigest = createHash('sha256').update(bearerToken(req)).digest();
+  const expectedDigest = createHash('sha256').update(expected).digest();
+  return timingSafeEqual(actualDigest, expectedDigest);
 }
 
 /**
  * Read-only catch-up API for out-of-process subscribers.
- * The host port is bound to localhost by docker-compose; Bearer auth remains
- * mandatory so a reverse proxy cannot accidentally expose an open event feed.
+ * Bare runs bind loopback. Compose sets API_HOST=0.0.0.0 inside the
+ * container, while publishing the port only on host loopback.
  */
 export function startEventsApi(): any {
   const config = configView();
@@ -35,13 +42,12 @@ export function startEventsApi(): any {
   if (server) return server;
 
   const token = String(config.api_token || '').trim();
-  if (!token) {
-    throw new Error('api_enabled requires a non-empty api_token');
-  }
+  if (!token) throw new Error('api_enabled requires a non-empty api_token');
 
   const express = require('express');
   const app = express();
   app.disable('x-powered-by');
+  app.use('/events', rateLimit({ windowMs: 60_000, limit: 120 }));
 
   app.get('/healthz', (_req: any, res: any) => {
     res.status(200).json({ ok: true });
@@ -58,8 +64,10 @@ export function startEventsApi(): any {
     const since = Number.isSafeInteger(rawSince) && rawSince >= 0 ? rawSince : 0;
     const limit = Number.isSafeInteger(rawLimit) ? Math.max(1, Math.min(rawLimit, 500)) : 100;
 
-    const events = await db.getEventsSince(since, limit);
-    const payload = events.map((event) => ({
+    const rows = await db.getEventsSince(since, Math.min(limit + 1, 501));
+    const hasMore = rows.length > limit;
+    const page = hasMore ? rows.slice(0, limit) : rows;
+    const events = page.map((event) => ({
       event_id: event.event_id,
       seq: event.seq,
       type: event.type,
@@ -71,16 +79,16 @@ export function startEventsApi(): any {
       metadata: event.metadata || {},
     }));
 
-    const nextSince = payload.length > 0
-      ? payload[payload.length - 1].seq ?? since
+    const nextSince = events.length > 0
+      ? events[events.length - 1].seq ?? since
       : since;
-
-    res.status(200).json({ events: payload, next_since: nextSince });
+    res.status(200).json({ events, next_since: nextSince, has_more: hasMore });
   });
 
-  const port = Number(config.api_port || 8080);
-  server = app.listen(port, '0.0.0.0', () => {
-    log.info(`Event replay API listening on port ${port}`);
+  const port = Number(config.api_port || 8081);
+  const host = String(process.env.API_HOST || config.api_host || '127.0.0.1');
+  server = app.listen(port, host, () => {
+    log.info(`Event replay API listening on ${host}:${port}`);
   });
   return server;
 }
@@ -88,8 +96,8 @@ export function startEventsApi(): any {
 export async function stopEventsApi(): Promise<void> {
   if (!server) return;
   const current = server;
-  server = null;
   await new Promise<void>((resolve, reject) => {
     current.close((err?: Error) => err ? reject(err) : resolve());
   });
+  if (server === current) server = null;
 }

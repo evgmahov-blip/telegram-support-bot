@@ -48,7 +48,7 @@ export async function checkEscalation(ticketId: number): Promise<void> {
     // Use first_response_at or fallback to analytics event for creation time
     let createdAt: Date | null = ticket.first_response_at;
     if (!createdAt) {
-      const createdEvents = await db.getAnalyticsEvents('ticket_created');
+      const createdEvents = await db.getAnalyticsEvents('ticket.created');
       const ticketCreated = createdEvents.find((e: any) => e.ticketId === ticketId);
       if (ticketCreated) {
         createdAt = new Date(ticketCreated.timestamp);
@@ -72,13 +72,13 @@ export async function checkEscalation(ticketId: number): Promise<void> {
                             );
                         }
                     }
-                    await db.recordAnalyticsEvent('ticket_escalated', ticketId, null, { reason: `no_response_${rule.after_hours}h` });
+                    await db.recordAnalyticsEvent('ticket.escalated', ticketId, null, { reason: `no_response_${rule.after_hours}h` });
                     break;
 
                 case 'tag_urgent':
                     await db.setPriority(ticketId, 'urgent' as any);
                     await db.addTags(ticketId, ['auto-escalated']);
-                    await db.recordAnalyticsEvent('ticket_escalated', ticketId, null, { reason: `auto_tag_${rule.after_hours}h` });
+                    await db.recordAnalyticsEvent('ticket.escalated', ticketId, null, { reason: `auto_tag_${rule.after_hours}h` });
                     break;
             }
         }
@@ -105,7 +105,7 @@ export async function checkAutoClose(): Promise<void> {
             if (messages.length === 0 || new Date(messages[0].timestamp) < cutoffDate) {
                 await db.add(ticket.userid, 'closed', ticket.category, ticket.messenger);
                 await db.setClosedAt(ticket.ticketId);
-                await db.recordAnalyticsEvent('ticket_closed', ticket.ticketId, null, { reason: 'auto_close_inactivity' });
+                await db.recordAnalyticsEvent('ticket.closed', ticket.ticketId, null, { reason: 'auto_close_inactivity' });
 
                 // Notify user
                 const msg = `${cache.config.language.ticket} #T${ticket.ticketId.toString().padStart(6, '0')} ${cache.config.language.closed}\n\nYour ticket was auto-closed due to inactivity (${days} days). You can open a new ticket at any time.`;

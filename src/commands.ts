@@ -226,7 +226,7 @@ const userCloseCommand = async (ctx: Context): Promise<void> => {
     await middleware.reply(ctx, language.ticketClosedError);
     return;
   }
-  await db.recordAnalyticsEvent('ticket_closed', ticketId, null, { closed_by: 'user' });
+  await db.recordAnalyticsEvent('ticket.closed', ticketId, null, { closed_by: 'user' });
   await webhooks.webhooks.ticketClosed(ticketId, userId);
 
   delete cache.ticketIDs[userId];
