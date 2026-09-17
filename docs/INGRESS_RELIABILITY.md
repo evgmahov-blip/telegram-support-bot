@@ -2,7 +2,7 @@
 
 Telegram updates are guarded by a durable MongoDB receipt keyed by the deployment scope and Telegram `update_id`.
 
-For a fresh update the bot creates a `processing` receipt before session or business middleware runs. A duplicate with a completed receipt, or with an active processing lease, is ignored. A processing receipt can be reclaimed only after its 30-minute lease expires, which lets another process recover work after a crash. Completed receipts are retained for seven days and then removed by a TTL index.
+For a fresh update the bot creates a `processing` receipt before session or business middleware runs. A duplicate with a completed receipt, or with an active processing lease, is ignored. A processing receipt can be reclaimed only after its 30-minute lease expires, which lets another process recover work after a crash. Each fresh or reclaimed lease receives a new UUID `claim_id`; completion and release operations must match that fencing token, so a stale worker cannot complete or delete a newer worker's claim. Completed receipts are retained for seven days and then removed by a TTL index.
 
 The receipt is marked `done` only after the full grammY middleware/handler chain resolves. If a handler throws, the processing receipt is released so a replay can retry. If business handling succeeds but the final receipt update fails, the receipt is deliberately left leased instead of being released immediately; this avoids turning a completion-write outage into an immediate duplicate side effect.
 
