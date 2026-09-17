@@ -27,6 +27,7 @@ jest.mock('../src/middleware', () => ({ reply: jest.fn() }));
 jest.mock('../src/permissions', () => ({ checkPermissions: jest.fn() }));
 jest.mock('../src/inline', () => ({ initInline: jest.fn().mockReturnValue([]) }));
 jest.mock('../src/handlers', () => ({ registerCommonHandlers: jest.fn() }));
+jest.mock('../src/most-commands', () => ({ queueCommand: jest.fn() }));
 jest.mock('../src/cache', () => ({
   __esModule: true,
   default: {
