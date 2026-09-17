@@ -2,68 +2,84 @@ import * as db from './db';
 import cache from './cache';
 import { reply, sendMessage } from './middleware';
 import { Addon, Context } from './interfaces';
+import { ISupportee } from './db';
 import * as ticketState from './ticket-state';
+import * as team from './team';
 import * as log from './logger'
 
 const escapeRegex = (str: string): string => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
+async function resolveStaffFileTicket(ctx: Context): Promise<ISupportee | null> {
+  const replyMessage = ctx.message?.reply_to_message;
+  if (!replyMessage) return null;
+
+  const replyMessageId = (replyMessage as typeof replyMessage & { message_id?: number }).message_id;
+  const correlatedMessageId = replyMessageId ?? ctx.message.external_reply?.message_id;
+  if (typeof correlatedMessageId === 'number') {
+    const correlated = await db.getTicketByInternalId(correlatedMessageId);
+    if (correlated) return correlated;
+  }
+
+  // Compatibility fallback for historical staff messages without persisted ids.
+  const replyText = replyMessage.text || replyMessage.caption || '';
+  const match = replyText.match(/#T0*(\d+)\b/);
+  if (!match) return null;
+
+  return await db.getTicketById(parseInt(match[1], 10), ctx.session.groupCategory);
+}
+
 /**
  * Handles forwarding of files (document, photo, video, sticker).
- * User files go to the staff surfaces; staff files are sent to the ticket user
- * through the bot. MOST has no private/direct engineer reply mode.
+ * Users send files to staff surfaces; engineers reply with files only from the
+ * closed staff group and delivery to the user always goes through the bot.
  */
 async function fileHandler(type: string, bot: Addon, ctx: Context) {
   const { message, session } = ctx;
   const { config } = cache;
-  let userid: string | null = null;
+  let ticket: ISupportee | null = null;
   let replyText = '';
+  let userInfo: string | undefined;
 
-  // Staff file reply: resolve the ticket from the replied staff-chat message.
-  if (message?.reply_to_message && session.admin) {
-    replyText = message.reply_to_message.text || message.reply_to_message.caption || '';
-    const replyMessageId = (message.reply_to_message as typeof message.reply_to_message & { message_id?: number }).message_id;
-    const correlatedMessageId = replyMessageId ?? message.external_reply?.message_id;
-    if (typeof correlatedMessageId === 'number') {
-      const ticket = await db.getTicketByInternalId(correlatedMessageId);
-      userid = ticket?.userid ?? null;
+  if (session.admin) {
+    const actorId = ctx.from.id.toString();
+    if (!team.canPerformAction(actorId, 'reply')) {
+      await reply(ctx, 'You do not have permission to reply to tickets.');
+      return;
     }
 
-    // Historical/file-message fallback where no internal message id was stored.
-    if (!userid && replyText) {
-      const match = replyText.match(/#T0*(\d+)\b/);
-      if (match) {
-        const ticket = await db.getTicketById(parseInt(match[1], 10), session.groupCategory);
-        userid = ticket?.userid ?? null;
-      }
+    ticket = await resolveStaffFileTicket(ctx);
+    if (!ticket) {
+      await reply(ctx, config.language.ticketClosedError);
+      return;
+    }
+    if (ticket.status === 'closed') {
+      await reply(ctx, config.language.ticketClosedError);
+      return;
+    }
+    if (!team.canManageTicket(actorId, ticket.assigned_to)) {
+      await reply(ctx, ticket.assigned_to
+        ? 'This ticket is owned by another engineer.'
+        : 'Take the ticket first with /take.');
+      return;
+    }
+
+    replyText = message.reply_to_message?.text || message.reply_to_message?.caption || '';
+  } else {
+    userInfo = await forwardFile(ctx);
+    if (userInfo === undefined) return;
+    ticket = await db.getTicketByUserId(message.from.id.toString(), session.groupCategory);
+    if (!ticket || ticket.status === 'closed') {
+      await reply(ctx, config.language.textFirst);
+      return;
     }
   }
 
-  if (!userid) userid = message.from.id;
-
-  const userInfo = await forwardFile(ctx);
   let receiverId: string | number = config.staffchat_id;
-
-  const ticket = await db.getTicketByUserId(userid.toString(), session.groupCategory);
-  if (!ticket) {
-    if (session.admin && userInfo === undefined) {
-      reply(ctx, config.language.ticketClosedError);
-    } else {
-      reply(ctx, config.language.textFirst);
-    }
-    return;
-  }
-
-  if (ticket.status === 'closed') {
-    reply(ctx, config.language.ticketClosedError);
-    return;
-  }
-
-  let captionText = `${config.language.ticket} #T${(ticket.ticketId ?? ticket.id ?? 0)
+  let captionText = `${config.language.ticket} #T${ticket.ticketId
     .toString()
     .padStart(6, '0')} ${userInfo ?? ''}\n${message.caption || ''}`;
 
-  // Staff -> user file delivery. No engineer identity or private-session markup.
-  if (session.admin && userInfo === undefined) {
+  if (session.admin) {
     receiverId = ticket.userid;
     captionText = message.caption || '';
   }
@@ -72,7 +88,7 @@ async function fileHandler(type: string, bot: Addon, ctx: Context) {
   const fileId = (fileResult as { file_id: string }).file_id;
   const commonOptions = { caption: captionText };
 
-  let messageId: string | null | undefined = undefined;
+  let messageId: string | null | undefined;
   const shouldForwardToGroup = (
     !session.admin &&
     session.group !== '' &&
@@ -81,27 +97,27 @@ async function fileHandler(type: string, bot: Addon, ctx: Context) {
 
   switch (type) {
     case 'document':
-      messageId = (await bot.sendDocument(receiverId, fileId, commonOptions)) as string | null;
+      messageId = await bot.sendDocument(receiverId, fileId, commonOptions) as string | null;
       if (shouldForwardToGroup) {
         Promise.resolve(bot.sendDocument(session.group, fileId, { caption: captionText })).catch(log.error);
       }
       break;
     case 'photo':
-      messageId = (await bot.sendPhoto(receiverId, fileId, commonOptions)) as string | null;
+      messageId = await bot.sendPhoto(receiverId, fileId, commonOptions) as string | null;
       if (shouldForwardToGroup) {
         Promise.resolve(bot.sendPhoto(session.group, fileId, { caption: captionText })).catch(log.error);
       }
       break;
     case 'video':
-      messageId = (await bot.sendVideo(receiverId, fileId, commonOptions)) as string | null;
+      messageId = await bot.sendVideo(receiverId, fileId, commonOptions) as string | null;
       if (shouldForwardToGroup) {
         Promise.resolve(bot.sendVideo(session.group, fileId, { caption: captionText })).catch(log.error);
       }
       break;
     case 'sticker': {
       if (!bot.sendSticker) return;
-      messageId = (await bot.sendSticker(receiverId, fileId)) as string | null;
-      const headerMessenger = session.admin && userInfo === undefined ? ticket.messenger : config.staffchat_type;
+      messageId = await bot.sendSticker(receiverId, fileId);
+      const headerMessenger = session.admin ? ticket.messenger : config.staffchat_type;
       if (captionText.trim()) {
         sendMessage(receiverId, headerMessenger, captionText).catch(log.error);
       }
@@ -110,20 +126,29 @@ async function fileHandler(type: string, bot: Addon, ctx: Context) {
       }
       break;
     }
+    default:
+      return;
   }
 
-  // Only staff-facing copies are valid reply-correlation ids. User-private
-  // message ids are from a different Telegram chat and must not pollute internalIds.
+  // Correlation ids are staff-chat message ids only. A staff -> user Telegram
+  // message id belongs to another chat and must never enter internalIds.
   if (messageId && !session.admin) {
-    db.addIdAndName(ticket.ticketId, messageId, ctx.message.from.first_name);
+    await db.addIdAndName(ticket.ticketId, messageId, ctx.message.from.first_name);
+  }
+
+  if (session.admin) {
+    const actorId = ctx.from.id.toString();
+    if (!ticket.first_response_at) await db.setFirstResponseAt(ticket.ticketId);
+    await db.recordAnalyticsEvent('staff_file_reply', ticket.ticketId, actorId, { type });
   }
 
   if (!config.autoreply_confirmation) return;
+
   let confirmationMessage = `${config.language.confirmationMessage}${config.show_user_ticket
-    ? config.language.yourTicketId + ' #T' + (ticket.ticketId ?? ticket.id ?? 0).toString().padStart(6, '0')
-    : ''
-    }`;
-  if (session.admin && userInfo === undefined) {
+    ? config.language.yourTicketId + ' #T' + ticket.ticketId.toString().padStart(6, '0')
+    : ''}`;
+
+  if (session.admin) {
     const nameMatch = replyText.match(
       new RegExp(`${escapeRegex(config.language.from)} (.*) ${escapeRegex(config.language.language)}`)
     );
@@ -131,19 +156,20 @@ async function fileHandler(type: string, bot: Addon, ctx: Context) {
       ? `${config.language.file_sent} ${nameMatch[1]}`
       : config.language.file_sent;
   }
+
   sendMessage(ctx.chat.id, ticket.messenger, confirmationMessage).catch(log.error);
 };
 
 /**
  * Ensures an incoming user file belongs to an active ticket and applies the same
- * ban/lifecycle rules as text messages.
+ * account ban and lifecycle rules as incoming text.
  */
 async function forwardFile(ctx: Context): Promise<string | undefined> {
-  // Staff file replies are handled against the replied ticket; they must never
-  // create or resume a ticket for the staff member themselves.
   if (ctx.session.admin) return undefined;
 
   const userId = ctx.message.from.id.toString();
+  cache.userId = userId;
+
   if (await db.checkBan(userId, ctx.messenger)) {
     await reply(ctx, cache.config.language.banned);
     return undefined;
@@ -174,29 +200,32 @@ async function forwardFile(ctx: Context): Promise<string | undefined> {
 
   if (!ticket) return undefined;
 
-  const sentCount = cache.ticketSent[cache.userId];
+  const sentCount = cache.ticketSent[userId];
   if (sentCount === undefined) {
     setTimeout(() => {
-      delete cache.ticketSent[cache.userId];
+      delete cache.ticketSent[userId];
     }, cache.config.spam_time);
-    cache.ticketSent[cache.userId] = 0;
+    cache.ticketSent[userId] = 0;
     return forwardHandler(ctx);
-  } else if (sentCount < cache.config.spam_cant_msg) {
-    cache.ticketSent[cache.userId] = sentCount + 1;
+  }
+  if (sentCount < cache.config.spam_cant_msg) {
+    cache.ticketSent[userId] = sentCount + 1;
     return forwardHandler(ctx);
-  } else if (sentCount === cache.config.spam_cant_msg) {
-    cache.ticketSent[cache.userId] = sentCount + 1;
+  }
+  if (sentCount === cache.config.spam_cant_msg) {
+    cache.ticketSent[userId] = sentCount + 1;
     sendMessage(ctx.chat.id, ticket.messenger, cache.config.language.blockedSpam, {}).catch(log.error);
   }
+
+  return undefined;
 };
 
 function forwardHandler(ctx: Context): string | undefined {
   if (ctx.chat.type === 'private') {
     cache.userId = ctx.message.from.id;
-    const userInfo = `${cache.config.language.from} ${ctx.message.from.first_name} ${cache.config.language.language}: ${ctx.message.from.language_code}\n\n`;
-    return userInfo;
+    return `${cache.config.language.from} ${ctx.message.from.first_name} ${cache.config.language.language}: ${ctx.message.from.language_code}\n\n`;
   }
   return undefined;
 };
 
-export { fileHandler, forwardFile, forwardHandler };
+export { fileHandler, forwardFile, forwardHandler, resolveStaffFileTicket };
