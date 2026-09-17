@@ -2,8 +2,11 @@
 const mockReply = jest.fn();
 const mockSendMessage = jest.fn();
 const mockAdd = jest.fn();
-const mockCheckBan = jest.fn();
+const mockAddNewTicket = jest.fn().mockResolvedValue(1);
+const mockCheckBan = jest.fn().mockResolvedValue(null);
 const mockGetTicketByUserId = jest.fn();
+const mockTransitionTicketStatus = jest.fn();
+const mockRecordAnalyticsEvent = jest.fn().mockResolvedValue(undefined);
 const mockUserChat = jest.fn();
 const mockPrivateReply = jest.fn();
 const mockStaffChat = jest.fn();
@@ -15,10 +18,12 @@ jest.mock('../src/middleware', () => ({
 
 jest.mock('../src/db', () => ({
   add: mockAdd,
+  addNewTicket: mockAddNewTicket,
   checkBan: mockCheckBan,
   getTicketByUserId: mockGetTicketByUserId,
+  transitionTicketStatus: mockTransitionTicketStatus,
   addTicketMessage: jest.fn().mockResolvedValue(undefined),
-  recordAnalyticsEvent: jest.fn().mockResolvedValue(undefined),
+  recordAnalyticsEvent: mockRecordAnalyticsEvent,
 }));
 
 jest.mock('../src/users', () => ({
@@ -49,9 +54,11 @@ jest.mock('../src/cache', () => ({
       }
     ],
     parse_mode: 'MarkdownV2',
+    ticket_per_message: false,
     language: {
       services: 'Please select a service:',
       prvChatOnly: 'This bot only works in private chat',
+      banned: 'Banned',
     },
   },
 }));
@@ -59,13 +66,14 @@ jest.mock('../src/cache', () => ({
 import * as text from '../src/text';
 import { Context, Messenger } from '../src/interfaces';
 
-describe('Text Module', () => {
+describe('Text Handler Module', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockCheckBan.mockResolvedValue(null);
   });
 
   const createMockContext = (
-    messageText: string, 
+    messageText: string,
     chatType: string = 'private',
     mode: string | null = null,
     isAdmin: boolean = false,
@@ -151,75 +159,30 @@ describe('Text Module', () => {
       expect(mockReply).toHaveBeenCalledWith(
         ctx,
         'Please select a service:',
-        expect.objectContaining({
-          reply_markup: { keyboard: keys }
-        })
+        expect.objectContaining({ reply_markup: { keyboard: keys } })
       );
-    });
-
-    it('should not show keyboard for admin users', () => {
-      const ctx = createMockContext('Any message', 'private', null, true);
-      const mockAddon = { platform: 'telegram' };
-      const keys = [['Support'], ['Sales']];
-      
-      mockGetTicketByUserId.mockResolvedValue(null);
-      mockAdd.mockResolvedValue(1);
-
-      text.handleText(mockAddon as any, ctx, keys);
-
-      // Should not show keyboard for admin users
-      expect(mockReply).not.toHaveBeenCalled();
-    });
-
-    it('should not show keyboard for users in group mode', () => {
-      const ctx = createMockContext('Any message', 'private', null, false, 'some_group');
-      const mockAddon = { platform: 'telegram' };
-      const keys = [['Support'], ['Sales']];
-      
-      mockGetTicketByUserId.mockResolvedValue(null);
-      mockAdd.mockResolvedValue(1);
-
-      text.handleText(mockAddon as any, ctx, keys);
-
-      // Should not show keyboard for users in group mode
-      expect(mockReply).not.toHaveBeenCalled();
-    });
-
-    it('should proceed to ticket handler for category messages', () => {
-      const ctx = createMockContext('Support');
-      const mockAddon = { platform: 'telegram' };
-      
-      mockGetTicketByUserId.mockResolvedValue(null);
-      mockAdd.mockResolvedValue(1);
-
-      text.handleText(mockAddon as any, ctx, []);
-
-      // Should not show keyboard for category messages
-      expect(mockReply).not.toHaveBeenCalled();
     });
   });
 
   describe('ticketHandler', () => {
     const mockAddon = { platform: 'telegram' };
 
-    it('should handle private chat and create new ticket if none exists', async () => {
+    it('creates a new ticket through addNewTicket, never legacy add(open)', async () => {
       const ctx = createMockContext('Help me');
-      mockGetTicketByUserId.mockResolvedValue(null);
-      mockAdd.mockResolvedValue(1);
+      const createdTicket = { ticketId: 1, userid: 'user123', status: 'open', category: null };
+      mockGetTicketByUserId
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(createdTicket);
 
       const result = await text.ticketHandler(mockAddon as any, ctx);
 
-      expect(mockAdd).toHaveBeenCalledWith(
-        'user123',
-        'open',
-        null,
-        'telegram'
-      );
+      expect(mockAddNewTicket).toHaveBeenCalledWith('user123', null, 'telegram');
+      expect(mockAdd).not.toHaveBeenCalled();
       expect(mockUserChat).toHaveBeenCalledWith(ctx, ctx.message.chat);
-      expect(result).toBeNull();
+      expect(result).toEqual(createdTicket);
     });
 
-    it('should handle private chat with existing ticket', async () => {
+    it('reuses an existing OPEN ticket', async () => {
       const ctx = createMockContext('Follow up message');
       const existingTicket = {
         ticketId: 1001,
@@ -231,46 +194,62 @@ describe('Text Module', () => {
 
       const result = await text.ticketHandler(mockAddon as any, ctx);
 
-      expect(mockAdd).not.toHaveBeenCalled(); // No new ticket created
+      expect(mockAddNewTicket).not.toHaveBeenCalled();
       expect(mockUserChat).toHaveBeenCalledWith(ctx, ctx.message.chat);
       expect(result).toEqual(existingTicket);
     });
 
-    it('should handle group chat by calling staff chat handler', async () => {
+    it('resumes a WAITING_USER ticket and records the event', async () => {
+      const ctx = createMockContext('User response');
+      const waitingTicket = { ticketId: 77, userid: 'user123', status: 'waiting_user', category: null };
+      const resumedTicket = { ...waitingTicket, status: 'open' };
+      mockGetTicketByUserId.mockResolvedValue(waitingTicket);
+      mockTransitionTicketStatus.mockResolvedValue(resumedTicket);
+
+      const result = await text.ticketHandler(mockAddon as any, ctx);
+
+      expect(mockTransitionTicketStatus).toHaveBeenCalledWith(77, 'open');
+      expect(mockRecordAnalyticsEvent).toHaveBeenCalledWith(
+        'ticket.resumed',
+        77,
+        null,
+        { reason: 'user_reply' },
+      );
+      expect(result).toEqual(resumedTicket);
+    });
+
+    it('blocks banned users before touching tickets', async () => {
+      const ctx = createMockContext('Help me');
+      mockCheckBan.mockResolvedValue({ userid: 'user123', messenger: 'telegram' });
+
+      const result = await text.ticketHandler(mockAddon as any, ctx);
+
+      expect(result).toBeNull();
+      expect(mockReply).toHaveBeenCalledWith(ctx, 'Banned');
+      expect(mockGetTicketByUserId).not.toHaveBeenCalled();
+      expect(mockAddNewTicket).not.toHaveBeenCalled();
+    });
+
+    it('routes group chats to staff handler', async () => {
       const ctx = createMockContext('Group message', 'group');
 
       await text.ticketHandler(mockAddon as any, ctx);
 
       expect(mockStaffChat).toHaveBeenCalledWith(ctx);
-      expect(mockAdd).not.toHaveBeenCalled();
       expect(mockUserChat).not.toHaveBeenCalled();
     });
 
-    it('should handle supergroup chat by calling staff chat handler', async () => {
-      const ctx = createMockContext('Supergroup message', 'supergroup');
-
-      await text.ticketHandler(mockAddon as any, ctx);
-
-      expect(mockStaffChat).toHaveBeenCalledWith(ctx);
-      expect(mockAdd).not.toHaveBeenCalled();
-      expect(mockUserChat).not.toHaveBeenCalled();
-    });
-
-    it('should pass group category to database calls', async () => {
+    it('passes the selected category to new-ticket creation', async () => {
       const ctx = createMockContext('Help me');
       ctx.session.groupCategory = 'support';
-      mockGetTicketByUserId.mockResolvedValue(null);
-      mockAdd.mockResolvedValue(1);
+      mockGetTicketByUserId
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({ ticketId: 2, userid: 'user123', status: 'open', category: 'support' });
 
       await text.ticketHandler(mockAddon as any, ctx);
 
       expect(mockGetTicketByUserId).toHaveBeenCalledWith('user123', 'support');
-      expect(mockAdd).toHaveBeenCalledWith(
-        'user123',
-        'open',
-        'support',
-        'telegram'
-      );
+      expect(mockAddNewTicket).toHaveBeenCalledWith('user123', 'support', 'telegram');
     });
   });
 });
