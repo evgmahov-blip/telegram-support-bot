@@ -30,7 +30,19 @@ jobs:
         run: npm ci
 
       - name: TypeScript build
-        run: npm run build
+        run: npm run build 2>&1 | tee build.log
 
       - name: Unit tests
-        run: npm test
+        if: always()
+        run: npm test 2>&1 | tee test.log
+
+      - name: Upload CI diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: most-core-ci-logs
+          path: |
+            build.log
+            test.log
+          if-no-files-found: ignore
+          retention-days: 3
