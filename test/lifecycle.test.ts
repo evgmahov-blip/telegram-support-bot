@@ -1,5 +1,6 @@
 const mockDisconnect = jest.fn().mockResolvedValue(undefined);
 const mockStopEventsApi = jest.fn().mockResolvedValue(undefined);
+const mockDrainWebhooks = jest.fn().mockResolvedValue(undefined);
 
 jest.mock('mongoose', () => ({
   __esModule: true,
@@ -11,6 +12,10 @@ jest.mock('mongoose', () => ({
 
 jest.mock('../src/events-api', () => ({
   stopEventsApi: mockStopEventsApi,
+}));
+
+jest.mock('../src/webhooks', () => ({
+  drainWebhooks: mockDrainWebhooks,
 }));
 
 jest.mock('../src/logger', () => ({
@@ -30,8 +35,13 @@ describe('graceful shutdown', () => {
     jest.useRealTimers();
   });
 
-  it('stops ingress, clears timers, closes HTTP and disconnects Mongo once', async () => {
-    const stop = jest.fn().mockResolvedValue(undefined);
+  it('stops ingress, clears timers, drains webhooks, closes HTTP and disconnects Mongo once', async () => {
+    const order: string[] = [];
+    const stop = jest.fn().mockImplementation(async () => { order.push('stop'); });
+    mockDrainWebhooks.mockImplementationOnce(async () => { order.push('webhooks'); });
+    mockStopEventsApi.mockImplementationOnce(async () => { order.push('events-api'); });
+    mockDisconnect.mockImplementationOnce(async () => { order.push('mongo'); });
+
     const timer = setTimeout(() => {}, 60_000);
     const interval = setInterval(() => {}, 60_000);
     const timers = new Set<any>([timer, interval]);
@@ -40,8 +50,10 @@ describe('graceful shutdown', () => {
     await Promise.all([shutdown('SIGTERM'), shutdown('SIGINT')]);
 
     expect(stop).toHaveBeenCalledTimes(1);
+    expect(mockDrainWebhooks).toHaveBeenCalledTimes(1);
     expect(mockStopEventsApi).toHaveBeenCalledTimes(1);
     expect(mockDisconnect).toHaveBeenCalledTimes(1);
+    expect(order).toEqual(['stop', 'webhooks', 'events-api', 'mongo']);
     expect(timers.size).toBe(0);
     expect(jest.getTimerCount()).toBe(0);
   });
@@ -52,6 +64,7 @@ describe('graceful shutdown', () => {
     const shutdown = createGracefulShutdown([{ stop } as any]);
 
     await expect(shutdown('SIGTERM')).rejects.toThrow('1 error');
+    expect(mockDrainWebhooks).toHaveBeenCalledTimes(1);
     expect(mockStopEventsApi).toHaveBeenCalledTimes(1);
     expect(mockDisconnect).toHaveBeenCalledTimes(1);
   });
