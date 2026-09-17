@@ -20,7 +20,8 @@ export async function resolveTicketFromReply(
   const reply = ctx.message?.reply_to_message;
   if (!reply) return null;
 
-  const correlatedMessageId = reply.message_id ?? ctx.message.external_reply?.message_id;
+  const replyMessageId = (reply as typeof reply & { message_id?: number }).message_id;
+  const correlatedMessageId = replyMessageId ?? ctx.message.external_reply?.message_id;
   if (typeof correlatedMessageId === 'number') {
     const ticket = await db.getTicketByInternalId(correlatedMessageId);
     if (ticket) {
