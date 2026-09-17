@@ -24,7 +24,7 @@ Existing analytics rows from deployments before the sequenced event log are back
 
 Message event types are `ticket.message.user`, `ticket.message.staff`, and `ticket.message.ai`. Domain events use dotted names such as `ticket.created`, `ticket.replied`, `ticket.closed`, `ticket.escalated`, `ticket.priority_changed`, `ticket.queue_changed`, `ticket.note_added`, and `csat.rated`.
 
-Ticket message bodies are not copied into event metadata. Full conversation history remains in the append-only `TicketMessage` collection; `llm_memory_depth` only limits AI reads. Some trusted-module events may contain identifiers such as Telegram `user_id` in metadata; replay subscribers are privileged internal components.
+Ticket message bodies are not copied into event metadata. Full conversation history remains in the append-only `TicketMessage` collection; `llm_memory_depth` only limits AI reads. Inbound user text is persisted to that authoritative history before the staff-chat delivery attempt; the corresponding replay-log mirror is emitted only after successful staff delivery. Some trusted-module events may contain identifiers such as Telegram `user_id` in metadata; replay subscribers are privileged internal components.
 
 `GET /healthz` is intentionally unauthenticated and returns only `{ "ok": true }`. `/events` requires Bearer authentication and is rate-limited.
 
