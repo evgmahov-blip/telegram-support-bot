@@ -9,6 +9,26 @@ import * as webhooks from './webhooks';
 import * as workflows from './workflows';
 
 const TIME_BETWEEN_CONFIRMATION_MESSAGES = 86400000; // 24 hours
+const STAFF_CORRELATION_ATTEMPTS = 3;
+
+async function persistStaffMessageCorrelation(
+  ticketId: number,
+  messageId: string,
+  name: string | null,
+): Promise<void> {
+  let lastError: unknown = null;
+
+  for (let attempt = 0; attempt < STAFF_CORRELATION_ATTEMPTS; attempt += 1) {
+    try {
+      await db.addIdAndName(ticketId, messageId, name);
+      return;
+    } catch (err) {
+      lastError = err;
+    }
+  }
+
+  log.error(`Could not persist staff message correlation for #T${ticketId}:`, lastError);
+}
 
 function formatMessageAsTicket(
   ticket: { toString: () => string },
@@ -120,7 +140,11 @@ async function processTicket(
     ),
   );
   if (messageId) {
-    db.addIdAndName(ticket.ticketId, messageId, ctx.message.from.first_name);
+    await persistStaffMessageCorrelation(
+      ticket.ticketId,
+      messageId,
+      ctx.message.from.first_name,
+    );
   }
 
   db.recordAnalyticsEventBestEffort('ticket.message.user', ticket.ticketId, ctx.from.id.toString());
@@ -201,7 +225,11 @@ async function chat(ctx: Context, chat: { id: string }) {
       ),
     );
     if (messageId) {
-      db.addIdAndName(ticket.ticketId, messageId, ctx.message.from.first_name);
+      await persistStaffMessageCorrelation(
+        ticket.ticketId,
+        messageId,
+        ctx.message.from.first_name,
+      );
     }
 
     db.recordAnalyticsEventBestEffort('ticket.message.user', ticket.ticketId, ctx.from.id.toString());
