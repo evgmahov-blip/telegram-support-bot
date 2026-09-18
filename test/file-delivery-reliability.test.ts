@@ -208,6 +208,27 @@ describe('file delivery reliability', () => {
     );
   });
 
+  it.each(['document', 'photo', 'video', 'sticker'])(
+    'surfaces a null user -> staff %s delivery as an ingress failure',
+    async (type) => {
+      const bot = {
+        sendDocument: jest.fn().mockResolvedValue(null),
+        sendPhoto: jest.fn().mockResolvedValue(null),
+        sendVideo: jest.fn().mockResolvedValue(null),
+        sendSticker: jest.fn().mockResolvedValue(null),
+      } as any;
+
+      await expect(fileHandler(type, bot, userContext())).rejects.toThrow(
+        `Primary ${type} delivery failed for #T42 to staff123`,
+      );
+
+      expect(mockPersistTicketMessage).toHaveBeenCalledTimes(1);
+      expect(mockPersistCorrelation).not.toHaveBeenCalled();
+      expect(mockRecordEventBestEffort).not.toHaveBeenCalled();
+      expect(mockSendMessage).not.toHaveBeenCalled();
+    },
+  );
+
   it('persists staff file history before primary user delivery', async () => {
     const error = new Error('history unavailable');
     mockPersistTicketMessage.mockRejectedValueOnce(error);
@@ -236,6 +257,52 @@ describe('file delivery reliability', () => {
     await expect(fileHandler('document', bot, staffContext())).rejects.toBe(error);
 
     expect(mockPersistTicketMessage).toHaveBeenCalledTimes(1);
+    expect(mockRecordEventBestEffort).not.toHaveBeenCalled();
+  });
+
+  it.each(['document', 'photo', 'video', 'sticker'])(
+    'surfaces a null staff -> user %s delivery before SLA/events/confirmation',
+    async (type) => {
+      const bot = {
+        sendDocument: jest.fn().mockResolvedValue(null),
+        sendPhoto: jest.fn().mockResolvedValue(null),
+        sendVideo: jest.fn().mockResolvedValue(null),
+        sendSticker: jest.fn().mockResolvedValue(null),
+      } as any;
+
+      await expect(fileHandler(type, bot, staffContext())).rejects.toThrow(
+        `Primary ${type} delivery failed for #T42 to user1`,
+      );
+
+      expect(mockPersistTicketMessage).toHaveBeenCalledTimes(1);
+      expect(mockSetFirstResponseAt).not.toHaveBeenCalled();
+      expect(mockRecordEventBestEffort).not.toHaveBeenCalled();
+      expect(mockSendMessage).not.toHaveBeenCalled();
+      expect(mockPersistCorrelation).not.toHaveBeenCalled();
+    },
+  );
+
+  it('rejects unsupported staff -> WEB file delivery before history or transport', async () => {
+    mockGetTicketByInternalId.mockResolvedValue({
+      ...ticket(),
+      userid: 'WEBsocket-123',
+      messenger: 'web',
+    });
+    const ctx = staffContext();
+    const bot = {
+      sendDocument: jest.fn().mockResolvedValue(null),
+    } as any;
+
+    await expect(fileHandler('document', bot, ctx)).resolves.toBeUndefined();
+
+    expect(mockReply).toHaveBeenCalledWith(
+      ctx,
+      'File delivery to web chat is not supported.',
+    );
+    expect(ctx.getFile).not.toHaveBeenCalled();
+    expect(mockPersistTicketMessage).not.toHaveBeenCalled();
+    expect(bot.sendDocument).not.toHaveBeenCalled();
+    expect(mockSetFirstResponseAt).not.toHaveBeenCalled();
     expect(mockRecordEventBestEffort).not.toHaveBeenCalled();
   });
 
