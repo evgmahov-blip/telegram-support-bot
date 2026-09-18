@@ -7,6 +7,7 @@ import * as ticketState from './ticket-state';
 import * as team from './team';
 import * as log from './logger'
 import { persistStaffMessageCorrelation } from './staff-correlation';
+import { getTicketMessageSourceId } from './ticket-message-source';
 
 const escapeRegex = (str: string): string => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -108,6 +109,7 @@ async function fileHandler(type: string, bot: Addon, ctx: Context) {
     session.admin ? 'staff' : 'user',
     session.admin ? ctx.from.id.toString() : message.from.id.toString(),
     historyText,
+    getTicketMessageSourceId(ctx),
   );
 
   let messageId: string | null | undefined;
