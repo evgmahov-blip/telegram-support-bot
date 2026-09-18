@@ -69,6 +69,7 @@ describe('ticket message ingress source ids', () => {
   it('uses the exact Slack event id when update_id is unavailable', () => {
     expect(getTicketMessageSourceId(context({
       messenger: 'slack',
+      update: undefined,
       update_id: 0,
       message: {
         message_id: 1712345678123456,
@@ -83,6 +84,7 @@ describe('ticket message ingress source ids', () => {
   it('uses the exact Discord snowflake string instead of its lossy numeric id', () => {
     expect(getTicketMessageSourceId(context({
       messenger: 'discord',
+      update: undefined,
       update_id: 0,
       message: {
         message_id: 1234567890123456800,
@@ -97,6 +99,7 @@ describe('ticket message ingress source ids', () => {
   it('keeps Signal timestamp identity even though its mapped message has web_msg=true', () => {
     expect(getTicketMessageSourceId(context({
       messenger: 'signal',
+      update: undefined,
       update_id: 1726650000123,
       message: {
         web_msg: true,
@@ -123,6 +126,7 @@ describe('ticket message ingress source ids', () => {
   it('falls back to a safe numeric message id when no update or exact event id exists', () => {
     expect(getTicketMessageSourceId(context({
       messenger: 'telegram',
+      update: undefined,
       update_id: 0,
       message: {
         message_id: 88,
@@ -136,6 +140,7 @@ describe('ticket message ingress source ids', () => {
 
   it('returns undefined rather than inventing an unstable source identity', () => {
     expect(getTicketMessageSourceId(context({
+      update: undefined,
       update_id: 0,
       message: {
         message_id: 0,
