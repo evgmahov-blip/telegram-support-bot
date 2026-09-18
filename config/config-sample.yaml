@@ -222,9 +222,21 @@ staff_roles: [] # List of staff members and their roles
 
 # --- Webhooks ---
 webhooks: [] # Event-driven webhooks to external URLs
+  # Legacy compatibility delivery (fire-and-track, not replayed after restart):
   # - url: "https://example.com/webhook"
   #   events: ["ticket.created", "ticket.closed"]
   #   secret: "whsec_..." # Optional HMAC verification secret
+  #
+  # Durable at-least-once delivery from the persisted AnalyticsEvent stream:
+  # - id: "crm" # Stable identity; strongly recommended if the URL may change
+  #   url: "https://example.com/webhook"
+  #   events: ["ticket.created", "ticket.replied", "ticket.closed"]
+  #   secret: "whsec_..."
+  #   durable: true
+  #
+  # New durable subscribers begin at the current event tail. On restart they
+  # resume from their persisted cursor. Receivers should deduplicate by
+  # X-TSB-Event-ID (or payload event_id); delivery is at-least-once.
 
 # --- Integrations ---
 slack_enabled: false # Mirror tickets to Slack channel

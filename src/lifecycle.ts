@@ -48,6 +48,16 @@ export function createGracefulShutdown(
         log.error('Analytics event drain failed:', err);
       }
 
+      // Durable webhook delivery is driven from persisted events. Stop it
+      // after the event queue is drained and before Mongo disconnects; aborted
+      // deliveries retain their cursor and replay safely after restart.
+      try {
+        await webhooks.stopDurableWebhookWorker();
+      } catch (err) {
+        errors.push(err);
+        log.error('Durable webhook worker shutdown failed:', err);
+      }
+
       // Compatibility push webhooks are intentionally off the request path,
       // but accepted deliveries should still get a chance to finish on SIGTERM.
       try {
