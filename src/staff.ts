@@ -7,6 +7,7 @@ import * as log from './logger'
 import * as webhooks from './webhooks';
 import * as analytics from './analytics';
 import * as team from './team';
+import { getTicketMessageSourceId } from './ticket-message-source';
 
 /**
  * Generates user-facing staff text. MOST never exposes the engineer identity to
@@ -166,7 +167,13 @@ async function chat(ctx: Context) {
   if (ticket.userid.includes('WEB')) {
     // Persist before the external delivery side effect so a history failure is
     // safe to retry and can never replay an already delivered staff reply.
-    await db.persistTicketMessage(ticketId, 'staff', senderId, staffMessage);
+    await db.persistTicketMessage(
+      ticketId,
+      'staff',
+      senderId,
+      staffMessage,
+      getTicketMessageSourceId(ctx),
+    );
     try {
       const socketId = ticket.userid.split('WEB')[1];
       cache.io.to(socketId).emit('chat_staff', ticketMsg(name, ctx.message));
