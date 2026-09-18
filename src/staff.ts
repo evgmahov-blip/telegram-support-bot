@@ -198,7 +198,13 @@ async function chat(ctx: Context) {
     // Translation is still pre-delivery and may safely fail/retry. Once the
     // immutable history write succeeds, the only remaining throwing operation
     // before the delivery boundary is the delivery itself.
-    await db.persistTicketMessage(ticketId, 'staff', senderId, staffMessage);
+    await db.persistTicketMessage(
+      ticketId,
+      'staff',
+      senderId,
+      staffMessage,
+      getTicketMessageSourceId(ctx),
+    );
     await middleware.sendMessage(ticket.userid, ticket.messenger, replyContent);
   }
 
