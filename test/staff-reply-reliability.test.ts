@@ -78,6 +78,8 @@ import { chat } from '../src/staff';
 
 function createContext(): any {
   return {
+    messenger: 'telegram',
+    update_id: 901,
     session: {
       admin: true,
       groupCategory: 'general',
@@ -144,6 +146,7 @@ describe('staff reply delivery reliability', () => {
       'staff',
       'agent1',
       'We fixed it',
+      'telegram:message:staff123:update:901',
     );
     expect(mockSendMessage).not.toHaveBeenCalled();
     expect(mockRecordEventBestEffort).not.toHaveBeenCalled();
