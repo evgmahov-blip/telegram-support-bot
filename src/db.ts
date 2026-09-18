@@ -121,7 +121,7 @@ export interface IWebhookCursor extends mongoose.Document {
 }
 
 const WebhookCursorSchema = new mongoose.Schema<IWebhookCursor>({
-  subscriber_id: { type: String, required: true, unique: true },
+  subscriber_id: { type: String, required: true },
   last_seq: { type: Number, required: true, default: 0 },
 }, {
   timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' },
@@ -796,14 +796,24 @@ export async function initializeWebhookCursor(
   initialSeq: number,
 ): Promise<number> {
   const safeSeq = Number.isSafeInteger(initialSeq) && initialSeq >= 0 ? initialSeq : 0;
-  const cursor = await WebhookCursor.findOneAndUpdate(
-    { subscriber_id: subscriberId },
-    { $setOnInsert: { subscriber_id: subscriberId, last_seq: safeSeq } },
-    { upsert: true, new: true, setDefaultsOnInsert: true },
-  );
+  try {
+    const cursor = await WebhookCursor.findOneAndUpdate(
+      { subscriber_id: subscriberId },
+      { $setOnInsert: { subscriber_id: subscriberId, last_seq: safeSeq } },
+      { upsert: true, new: true, setDefaultsOnInsert: true },
+    );
 
-  if (!cursor) throw new Error(`Failed to initialize webhook cursor ${subscriberId}`);
-  return cursor.last_seq;
+    if (!cursor) throw new Error(`Failed to initialize webhook cursor ${subscriberId}`);
+    return cursor.last_seq;
+  } catch (err) {
+    // Two bot instances may initialize the same subscriber simultaneously.
+    // The unique index elects one insert; the loser resumes the created cursor.
+    if ((err as { code?: number })?.code === 11000) {
+      const existing = await WebhookCursor.findOne({ subscriber_id: subscriberId }).select('last_seq');
+      if (existing) return existing.last_seq;
+    }
+    throw err;
+  }
 }
 
 export async function advanceWebhookCursor(
