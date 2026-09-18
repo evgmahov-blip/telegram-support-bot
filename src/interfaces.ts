@@ -53,9 +53,16 @@ export interface StaffMemberConfig {
 }
 
 export interface WebhookConfig {
+  /** Stable durable subscriber identity. Recommended when durable is enabled. */
+  id?: string;
   url: string;
   events: WebhookEvent[];
   secret?: string;
+  /**
+   * Replay from the persisted AnalyticsEvent stream with an independent
+   * durable cursor. Legacy entries keep compatibility fire-and-track delivery.
+   */
+  durable?: boolean;
 }
 
 export type WebhookEvent =
