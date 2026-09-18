@@ -200,7 +200,13 @@ async function chat(ctx: Context, chat: { id: string }) {
     const ticket = await db.getTicketByUserId(cache.userId, ctx.session.groupCategory);
     if (!ticket) return;
 
-    await db.persistTicketMessage(ticket.ticketId, 'user', ctx.from.id.toString(), ctx.message.text);
+    await db.persistTicketMessage(
+      ticket.ticketId,
+      'user',
+      ctx.from.id.toString(),
+      ctx.message.text,
+      getTicketMessageSourceId(ctx),
+    );
 
     const messageId = await sendMessage(
       config.staffchat_id,
