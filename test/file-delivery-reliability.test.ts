@@ -142,6 +142,7 @@ describe('file delivery reliability', () => {
     jest.clearAllMocks();
     cache.ticketSent = { user1: 0 };
     mockCheckBan.mockResolvedValue(false);
+    mockSendMessage.mockResolvedValue(undefined);
     mockGetTicketByUserId.mockResolvedValue(ticket());
     mockGetTicketByInternalId.mockResolvedValue(ticket());
     mockPersistTicketMessage.mockResolvedValue(undefined);
@@ -218,11 +219,22 @@ describe('file delivery reliability', () => {
         sendSticker: jest.fn().mockResolvedValue(null),
       } as any;
 
-      await expect(fileHandler(type, bot, userContext())).rejects.toThrow(
+      const ctx = userContext();
+      ctx.session.group = 'secondary-staff';
+
+      await expect(fileHandler(type, bot, ctx)).rejects.toThrow(
         `Primary ${type} delivery failed for #T42 to staff123`,
       );
 
       expect(mockPersistTicketMessage).toHaveBeenCalledTimes(1);
+      const primaryMethod = type === 'document'
+        ? bot.sendDocument
+        : type === 'photo'
+          ? bot.sendPhoto
+          : type === 'video'
+            ? bot.sendVideo
+            : bot.sendSticker;
+      expect(primaryMethod).toHaveBeenCalledTimes(1);
       expect(mockPersistCorrelation).not.toHaveBeenCalled();
       expect(mockRecordEventBestEffort).not.toHaveBeenCalled();
       expect(mockSendMessage).not.toHaveBeenCalled();
