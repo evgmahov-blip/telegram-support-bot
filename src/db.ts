@@ -695,9 +695,8 @@ export async function addTicketMessage(
   sender: 'user' | 'staff' | 'ai',
   sender_id: string,
   text: string,
-  source_id?: string,
 ): Promise<void> {
-  await persistTicketMessage(ticketId, sender, sender_id, text, source_id);
+  await persistTicketMessage(ticketId, sender, sender_id, text);
   recordAnalyticsEventBestEffort(`ticket.message.${sender}`, ticketId, sender_id || null);
 }
 
