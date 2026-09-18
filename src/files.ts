@@ -88,6 +88,14 @@ async function fileHandler(type: string, bot: Addon, ctx: Context) {
   if (!['document', 'photo', 'video', 'sticker'].includes(type)) return;
   if (type === 'sticker' && !bot.sendSticker) return;
 
+  // The legacy web widget supports text only. Do not persist a staff file as
+  // delivered and do not throw into ingress/retry for a transport that cannot
+  // ever handle media.
+  if (session.admin && ticket.userid.includes('WEB')) {
+    await reply(ctx, 'File delivery to web chat is not supported.');
+    return;
+  }
+
   const fileResult = await ctx.getFile();
   const fileId = (fileResult as { file_id: string }).file_id;
   const commonOptions = { caption: captionText };
@@ -142,6 +150,15 @@ async function fileHandler(type: string, bot: Addon, ctx: Context) {
     }
     default:
       return;
+  }
+
+  // Media addons report transport failure by returning null rather than
+  // rejecting. Surface that failure so fenced ingress releases the update for
+  // retry instead of recording a delivery that never happened.
+  if (!messageId) {
+    throw new Error(
+      `Primary ${type} delivery failed for #T${ticket.ticketId} to ${receiverId}`,
+    );
   }
 
   // Correlation ids are staff-chat message ids only. A staff -> user Telegram
