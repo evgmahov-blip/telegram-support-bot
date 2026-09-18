@@ -1,6 +1,7 @@
 jest.unmock('../src/db');
 
 const mockMessageSave = jest.fn().mockResolvedValue(undefined);
+const mockMessageUpdateOne = jest.fn().mockResolvedValue({ matchedCount: 0, upsertedCount: 1 });
 const mockEventSave = jest.fn().mockResolvedValue(undefined);
 const mockCounterFindOneAndUpdate = jest.fn();
 const mockCounterFindOne = jest.fn();
@@ -16,6 +17,7 @@ const TicketMessageModel: any = jest.fn(function (this: any, data: any) {
   this.save = mockMessageSave;
 });
 TicketMessageModel.find = mockMessageFind;
+TicketMessageModel.updateOne = mockMessageUpdateOne;
 
 const AnalyticsEventModel: any = jest.fn(function (this: any, data: any) {
   Object.assign(this, data);
@@ -89,6 +91,62 @@ describe('append-only ticket history and event log', () => {
     await db.persistTicketMessage(8, 'user', '123', 'durable first');
     expect(mockMessageSave).toHaveBeenCalledTimes(1);
     expect(mockEventSave).not.toHaveBeenCalled();
+  });
+
+  it('upserts source-keyed history without appending a duplicate row', async () => {
+    await db.persistTicketMessage(
+      8,
+      'user',
+      '123',
+      'durable first',
+      'telegram:message:123:update:77',
+    );
+
+    expect(TicketMessageModel).not.toHaveBeenCalled();
+    expect(mockMessageSave).not.toHaveBeenCalled();
+    expect(mockMessageUpdateOne).toHaveBeenCalledWith(
+      { ticketId: 8, source_id: 'telegram:message:123:update:77' },
+      {
+        $setOnInsert: {
+          ticketId: 8,
+          sender: 'user',
+          sender_id: '123',
+          text: 'durable first',
+          source_id: 'telegram:message:123:update:77',
+          timestamp: expect.any(Date),
+        },
+      },
+      { upsert: true },
+    );
+    expect(mockEventSave).not.toHaveBeenCalled();
+  });
+
+  it('treats a concurrent source-id duplicate-key race as already persisted', async () => {
+    mockMessageUpdateOne.mockRejectedValueOnce({ code: 11000 });
+
+    await expect(
+      db.persistTicketMessage(
+        8,
+        'staff',
+        'agent-1',
+        'same ingress',
+        'telegram:message:staff:update:99',
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it('still propagates non-duplicate source-keyed history failures', async () => {
+    mockMessageUpdateOne.mockRejectedValueOnce(new Error('mongo unavailable'));
+
+    await expect(
+      db.persistTicketMessage(
+        8,
+        'staff',
+        'agent-1',
+        'same ingress',
+        'telegram:message:staff:update:100',
+      ),
+    ).rejects.toThrow('mongo unavailable');
   });
 
   it('serializes best-effort and acknowledged appends in call order', async () => {
