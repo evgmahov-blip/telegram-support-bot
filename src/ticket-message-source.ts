@@ -23,8 +23,12 @@ export function getTicketMessageSourceId(
   const chatId = String(message.chat?.id ?? ctx.chat?.id ?? '').trim();
   if (!messenger || !chatId) return undefined;
 
-  if (Number.isSafeInteger(ctx.update_id) && ctx.update_id > 0) {
-    return `${messenger}:${kind}:${chatId}:update:${ctx.update_id}`;
+  const ingressUpdateId = Number(
+    (ctx as unknown as { update?: { update_id?: number } }).update?.update_id
+      ?? ctx.update_id,
+  );
+  if (Number.isSafeInteger(ingressUpdateId) && ingressUpdateId > 0) {
+    return `${messenger}:${kind}:${chatId}:update:${ingressUpdateId}`;
   }
 
   // Slack and Discord preserve their exact external message/event id here,
