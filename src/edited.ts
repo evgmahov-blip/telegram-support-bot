@@ -4,6 +4,7 @@ import * as middleware from './middleware';
 import { Context } from './interfaces';
 import * as log from './logger';
 import { persistStaffMessageCorrelation } from './staff-correlation';
+import { getTicketMessageSourceId } from './ticket-message-source';
 
 /**
  * Forwards an edited user message to the staff chat (forward_edited_messages, #147).
@@ -40,6 +41,7 @@ export async function handleEditedMessage(ctx: Context): Promise<boolean> {
     'user',
     userId,
     `[${config.language.editedMessage}] ${msg.text}`,
+    getTicketMessageSourceId(ctx, 'edited'),
   );
 
   // Primary staff delivery is authoritative for ingress success. A transport
