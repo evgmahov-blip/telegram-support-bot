@@ -3,7 +3,8 @@ import { getTicketMessageSourceId } from '../src/ticket-message-source';
 function context(overrides: Record<string, any> = {}): any {
   const base = {
     messenger: 'telegram',
-    update_id: 123,
+    update: { update_id: 123 },
+    update_id: 0,
     message: {
       web_msg: false,
       message_id: 55,
@@ -44,6 +45,24 @@ describe('ticket message ingress source ids', () => {
   it('separates an edited update from the original message source namespace', () => {
     expect(getTicketMessageSourceId(context(), 'edited')).toBe(
       'telegram:edited:chat-1:update:123',
+    );
+  });
+
+  it('keeps separate history rows for two Telegram edits of the same message', () => {
+    const firstEdit = context({
+      update: { update_id: 201 },
+      editedMessage: { message_id: 55 },
+    });
+    const secondEdit = context({
+      update: { update_id: 202 },
+      editedMessage: { message_id: 55 },
+    });
+
+    expect(getTicketMessageSourceId(firstEdit, 'edited')).toBe(
+      'telegram:edited:chat-1:update:201',
+    );
+    expect(getTicketMessageSourceId(secondEdit, 'edited')).toBe(
+      'telegram:edited:chat-1:update:202',
     );
   });
 
