@@ -6,6 +6,7 @@ import { ISupportee } from './db';
 import * as ticketState from './ticket-state';
 import * as team from './team';
 import * as log from './logger'
+import { persistStaffMessageCorrelation } from './staff-correlation';
 
 const escapeRegex = (str: string): string => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -84,9 +85,30 @@ async function fileHandler(type: string, bot: Addon, ctx: Context) {
     captionText = message.caption || '';
   }
 
+  if (!['document', 'photo', 'video', 'sticker'].includes(type)) return;
+  if (type === 'sticker' && !bot.sendSticker) return;
+
+  // The legacy web widget supports text only. Do not persist a staff file as
+  // delivered and do not throw into ingress/retry for a transport that cannot
+  // ever handle media.
+  if (session.admin && ticket.userid.includes('WEB')) {
+    await reply(ctx, 'File delivery to web chat is not supported.');
+    return;
+  }
+
   const fileResult = await ctx.getFile();
   const fileId = (fileResult as { file_id: string }).file_id;
   const commonOptions = { caption: captionText };
+
+  // Persist immutable conversation history before the primary external
+  // delivery side effect. A failure here is safe for ingress to retry.
+  const historyText = `[file:${type}]${message.caption ? ` ${message.caption}` : ''}`;
+  await db.persistTicketMessage(
+    ticket.ticketId,
+    session.admin ? 'staff' : 'user',
+    session.admin ? ctx.from.id.toString() : message.from.id.toString(),
+    historyText,
+  );
 
   let messageId: string | null | undefined;
   const shouldForwardToGroup = (
@@ -98,49 +120,86 @@ async function fileHandler(type: string, bot: Addon, ctx: Context) {
   switch (type) {
     case 'document':
       messageId = await bot.sendDocument(receiverId, fileId, commonOptions) as string | null;
-      if (shouldForwardToGroup) {
-        Promise.resolve(bot.sendDocument(session.group, fileId, { caption: captionText })).catch(log.error);
-      }
       break;
     case 'photo':
       messageId = await bot.sendPhoto(receiverId, fileId, commonOptions) as string | null;
-      if (shouldForwardToGroup) {
-        Promise.resolve(bot.sendPhoto(session.group, fileId, { caption: captionText })).catch(log.error);
-      }
       break;
     case 'video':
       messageId = await bot.sendVideo(receiverId, fileId, commonOptions) as string | null;
-      if (shouldForwardToGroup) {
-        Promise.resolve(bot.sendVideo(session.group, fileId, { caption: captionText })).catch(log.error);
-      }
       break;
     case 'sticker': {
-      if (!bot.sendSticker) return;
-      const stickerMessageId = await bot.sendSticker(receiverId, fileId);
+      const stickerMessageId = await bot.sendSticker!(receiverId, fileId);
       messageId = typeof stickerMessageId === 'string' ? stickerMessageId : null;
-      const headerMessenger = session.admin ? ticket.messenger : config.staffchat_type;
-      if (captionText.trim()) {
-        sendMessage(receiverId, headerMessenger, captionText).catch(log.error);
-      }
-      if (shouldForwardToGroup) {
-        Promise.resolve(bot.sendSticker(session.group, fileId)).catch(log.error);
-      }
       break;
     }
     default:
       return;
   }
 
+  // Media addons report transport failure by returning null rather than
+  // rejecting. Surface that failure so fenced ingress releases the update for
+  // retry instead of recording a delivery that never happened. No secondary
+  // side effect is started until this primary boundary is confirmed.
+  if (!messageId) {
+    throw new Error(
+      `Primary ${type} delivery failed for #T${ticket.ticketId} to ${receiverId}`,
+    );
+  }
+
+  if (type === 'sticker' && captionText.trim()) {
+    const headerMessenger = session.admin ? ticket.messenger : config.staffchat_type;
+    sendMessage(receiverId, headerMessenger, captionText).catch(log.error);
+  }
+
+  if (shouldForwardToGroup) {
+    switch (type) {
+      case 'document':
+        Promise.resolve(bot.sendDocument(session.group, fileId, { caption: captionText })).catch(log.error);
+        break;
+      case 'photo':
+        Promise.resolve(bot.sendPhoto(session.group, fileId, { caption: captionText })).catch(log.error);
+        break;
+      case 'video':
+        Promise.resolve(bot.sendVideo(session.group, fileId, { caption: captionText })).catch(log.error);
+        break;
+      case 'sticker':
+        Promise.resolve(bot.sendSticker!(session.group, fileId)).catch(log.error);
+        break;
+    }
+  }
+
   // Correlation ids are staff-chat message ids only. A staff -> user Telegram
   // message id belongs to another chat and must never enter internalIds.
   if (messageId && !session.admin) {
-    await db.addIdAndName(ticket.ticketId, messageId, ctx.message.from.first_name);
+    await persistStaffMessageCorrelation(
+      ticket.ticketId,
+      messageId,
+      ctx.message.from.first_name,
+    );
   }
 
   if (session.admin) {
     const actorId = ctx.from.id.toString();
     if (!ticket.first_response_at) await db.setFirstResponseAt(ticket.ticketId);
-    await db.recordAnalyticsEvent('ticket.replied', ticket.ticketId, actorId, { kind: 'file', type });
+    db.recordAnalyticsEventBestEffort(
+      'ticket.message.staff',
+      ticket.ticketId,
+      actorId,
+      { kind: 'file', type },
+    );
+    db.recordAnalyticsEventBestEffort(
+      'ticket.replied',
+      ticket.ticketId,
+      actorId,
+      { kind: 'file', type },
+    );
+  } else {
+    db.recordAnalyticsEventBestEffort(
+      'ticket.message.user',
+      ticket.ticketId,
+      message.from.id.toString(),
+      { kind: 'file', type },
+    );
   }
 
   if (!config.autoreply_confirmation) return;

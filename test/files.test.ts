@@ -6,6 +6,8 @@ const mockGetTicketByInternalId = jest.fn();
 const mockAddNewTicket = jest.fn().mockResolvedValue(2);
 const mockCheckBan = jest.fn().mockResolvedValue(null);
 const mockRecordAnalyticsEvent = jest.fn().mockResolvedValue(undefined);
+const mockRecordAnalyticsEventBestEffort = jest.fn();
+const mockPersistTicketMessage = jest.fn().mockResolvedValue(undefined);
 const mockSetFirstResponseAt = jest.fn().mockResolvedValue(undefined);
 const mockAddIdAndName = jest.fn().mockResolvedValue(undefined);
 const mockResumeWaitingTicket = jest.fn();
@@ -24,6 +26,8 @@ jest.mock('../src/db', () => ({
   addNewTicket: mockAddNewTicket,
   checkBan: mockCheckBan,
   recordAnalyticsEvent: mockRecordAnalyticsEvent,
+  recordAnalyticsEventBestEffort: mockRecordAnalyticsEventBestEffort,
+  persistTicketMessage: mockPersistTicketMessage,
   setFirstResponseAt: mockSetFirstResponseAt,
   addIdAndName: mockAddIdAndName,
 }));
@@ -242,7 +246,19 @@ describe('Files Module', () => {
       expect(mockGetTicketByUserId).not.toHaveBeenCalled();
       expect(bot.sendDocument).toHaveBeenCalledWith('user123', 'file-1', { caption: '' });
       expect(mockAddIdAndName).not.toHaveBeenCalled();
-      expect(mockRecordAnalyticsEvent).toHaveBeenCalledWith(
+      expect(mockPersistTicketMessage).toHaveBeenCalledWith(
+        41,
+        'staff',
+        'agent1',
+        '[file:document]',
+      );
+      expect(mockRecordAnalyticsEventBestEffort).toHaveBeenCalledWith(
+        'ticket.message.staff',
+        41,
+        'agent1',
+        { kind: 'file', type: 'document' },
+      );
+      expect(mockRecordAnalyticsEventBestEffort).toHaveBeenCalledWith(
         'ticket.replied',
         41,
         'agent1',
