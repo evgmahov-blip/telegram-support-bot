@@ -680,16 +680,8 @@ export async function persistTicketMessage(
   } catch (err) {
     // Concurrent retries can race the unique source-id upsert. The losing
     // writer is the same logical ingress message, so duplicate-key is success.
-    const mongoError = err as {
-      code?: number;
-      keyPattern?: Record<string, number>;
-    };
-    if (
-      source_id &&
-      mongoError?.code === 11000 &&
-      Boolean(mongoError.keyPattern?.ticketId) &&
-      Boolean(mongoError.keyPattern?.source_id)
-    ) {
+    const mongoError = err as { code?: number };
+    if (source_id && mongoError?.code === 11000) {
       return;
     }
 
