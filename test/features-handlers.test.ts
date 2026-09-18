@@ -7,6 +7,8 @@ const mockGetTicketByUserId = jest.fn();
 const mockAdd = jest.fn().mockResolvedValue(0);
 const mockAddNewTicket = jest.fn().mockResolvedValue(2);
 const mockAddTicketMessage = jest.fn().mockResolvedValue(undefined);
+const mockPersistTicketMessage = jest.fn().mockResolvedValue(undefined);
+const mockRecordAnalyticsEventBestEffort = jest.fn();
 const mockAddIdAndName = jest.fn().mockResolvedValue(undefined);
 const mockUsersChat = jest.fn().mockResolvedValue(undefined);
 const mockCheckBan = jest.fn().mockResolvedValue(null);
@@ -25,12 +27,14 @@ jest.mock('../src/db', () => ({
   add: mockAdd,
   addNewTicket: mockAddNewTicket,
   addTicketMessage: mockAddTicketMessage,
+  persistTicketMessage: mockPersistTicketMessage,
   addIdAndName: mockAddIdAndName,
   getTicketByInternalId: jest.fn().mockResolvedValue(null),
   getTicketById: jest.fn().mockResolvedValue(null),
   checkBan: mockCheckBan,
   transitionTicketStatus: mockTransitionTicketStatus,
   recordAnalyticsEvent: mockRecordAnalyticsEvent,
+  recordAnalyticsEventBestEffort: mockRecordAnalyticsEventBestEffort,
   setFirstResponseAt: jest.fn().mockResolvedValue(undefined),
   setClosedAt: jest.fn().mockResolvedValue(undefined),
   open: jest.fn().mockResolvedValue([]),
@@ -204,7 +208,8 @@ describe('edited messages (#147)', () => {
       'telegram',
       'Ticket #T000012 from [Alice](tg://user?id=42) edited their message:\n\ncorrected text',
     );
-    expect(mockAddTicketMessage).toHaveBeenCalledWith(12, 'user', '42', '[edited their message] corrected text');
+    expect(mockPersistTicketMessage).toHaveBeenCalledWith(12, 'user', '42', '[edited their message] corrected text');
+    expect(mockRecordAnalyticsEventBestEffort).toHaveBeenCalledWith('ticket.message.user', 12, '42');
   });
 
   it('also mirrors to the category group and respects anonymous_tickets', async () => {
