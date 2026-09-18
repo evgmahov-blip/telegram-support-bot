@@ -174,6 +174,9 @@ function getDurableSubscribers(): DurableSubscriber[] {
 
     for (const webhook of configured) {
         if (webhook.durable !== true) continue;
+        if (!Array.isArray(webhook.events)) {
+            throw new Error(`Durable webhook events must be an array: ${webhook.url}`);
+        }
 
         let parsed: URL;
         try {
