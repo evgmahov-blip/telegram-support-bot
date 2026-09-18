@@ -90,6 +90,7 @@ function ticket(): any {
 function userContext(): any {
   return {
     messenger: 'telegram',
+    update_id: 501,
     from: { id: 'user1' },
     chat: { id: 'user1', type: 'private' },
     session: {
@@ -113,6 +114,7 @@ function userContext(): any {
 function staffContext(): any {
   return {
     messenger: 'telegram',
+    update_id: 502,
     from: { id: 'agent1' },
     chat: { id: 'staff123', type: 'supergroup' },
     session: {
@@ -166,6 +168,7 @@ describe('file delivery reliability', () => {
       'user',
       'user1',
       '[file:document] screen.png',
+      'telegram:message:user1:update:501',
     );
     expect(bot.sendDocument).not.toHaveBeenCalled();
     expect(mockPersistCorrelation).not.toHaveBeenCalled();
@@ -255,6 +258,7 @@ describe('file delivery reliability', () => {
       'staff',
       'agent1',
       '[file:document] diagnostic.zip',
+      'telegram:message:staff123:update:502',
     );
     expect(bot.sendDocument).not.toHaveBeenCalled();
     expect(mockRecordEventBestEffort).not.toHaveBeenCalled();

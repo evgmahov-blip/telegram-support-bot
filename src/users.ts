@@ -5,6 +5,7 @@ import { strictEscape as esc, reply, sendMessage } from './middleware';
 import { ISupportee } from './db';
 import * as log from './logger'
 import * as aiDraft from './ai-draft';
+import { getTicketMessageSourceId } from './ticket-message-source';
 import * as webhooks from './webhooks';
 import * as workflows from './workflows';
 import { persistStaffMessageCorrelation } from './staff-correlation';
@@ -86,7 +87,13 @@ async function processTicket(
     tags: ticket.tags || [],
   };
 
-  await db.persistTicketMessage(ticket.ticketId, 'user', ctx.from.id.toString(), ctx.message.text);
+  await db.persistTicketMessage(
+    ticket.ticketId,
+    'user',
+    ctx.from.id.toString(),
+    ctx.message.text,
+    getTicketMessageSourceId(ctx),
+  );
 
   // Legacy push webhooks remain for compatibility. The canonical persisted
   // ticket.created event is emitted exactly once by db.addNewTicket().
@@ -193,7 +200,13 @@ async function chat(ctx: Context, chat: { id: string }) {
     const ticket = await db.getTicketByUserId(cache.userId, ctx.session.groupCategory);
     if (!ticket) return;
 
-    await db.persistTicketMessage(ticket.ticketId, 'user', ctx.from.id.toString(), ctx.message.text);
+    await db.persistTicketMessage(
+      ticket.ticketId,
+      'user',
+      ctx.from.id.toString(),
+      ctx.message.text,
+      getTicketMessageSourceId(ctx),
+    );
 
     const messageId = await sendMessage(
       config.staffchat_id,
