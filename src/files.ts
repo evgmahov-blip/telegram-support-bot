@@ -6,6 +6,7 @@ import { ISupportee } from './db';
 import * as ticketState from './ticket-state';
 import * as team from './team';
 import * as log from './logger'
+import { persistStaffMessageCorrelation } from './staff-correlation';
 
 const escapeRegex = (str: string): string => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -84,9 +85,22 @@ async function fileHandler(type: string, bot: Addon, ctx: Context) {
     captionText = message.caption || '';
   }
 
+  if (!['document', 'photo', 'video', 'sticker'].includes(type)) return;
+  if (type === 'sticker' && !bot.sendSticker) return;
+
   const fileResult = await ctx.getFile();
   const fileId = (fileResult as { file_id: string }).file_id;
   const commonOptions = { caption: captionText };
+
+  // Persist immutable conversation history before the primary external
+  // delivery side effect. A failure here is safe for ingress to retry.
+  const historyText = `[file:${type}]${message.caption ? ` ${message.caption}` : ''}`;
+  await db.persistTicketMessage(
+    ticket.ticketId,
+    session.admin ? 'staff' : 'user',
+    session.admin ? ctx.from.id.toString() : message.from.id.toString(),
+    historyText,
+  );
 
   let messageId: string | null | undefined;
   const shouldForwardToGroup = (
@@ -115,8 +129,7 @@ async function fileHandler(type: string, bot: Addon, ctx: Context) {
       }
       break;
     case 'sticker': {
-      if (!bot.sendSticker) return;
-      const stickerMessageId = await bot.sendSticker(receiverId, fileId);
+      const stickerMessageId = await bot.sendSticker!(receiverId, fileId);
       messageId = typeof stickerMessageId === 'string' ? stickerMessageId : null;
       const headerMessenger = session.admin ? ticket.messenger : config.staffchat_type;
       if (captionText.trim()) {
@@ -134,13 +147,35 @@ async function fileHandler(type: string, bot: Addon, ctx: Context) {
   // Correlation ids are staff-chat message ids only. A staff -> user Telegram
   // message id belongs to another chat and must never enter internalIds.
   if (messageId && !session.admin) {
-    await db.addIdAndName(ticket.ticketId, messageId, ctx.message.from.first_name);
+    await persistStaffMessageCorrelation(
+      ticket.ticketId,
+      messageId,
+      ctx.message.from.first_name,
+    );
   }
 
   if (session.admin) {
     const actorId = ctx.from.id.toString();
     if (!ticket.first_response_at) await db.setFirstResponseAt(ticket.ticketId);
-    await db.recordAnalyticsEvent('ticket.replied', ticket.ticketId, actorId, { kind: 'file', type });
+    db.recordAnalyticsEventBestEffort(
+      'ticket.message.staff',
+      ticket.ticketId,
+      actorId,
+      { kind: 'file', type },
+    );
+    db.recordAnalyticsEventBestEffort(
+      'ticket.replied',
+      ticket.ticketId,
+      actorId,
+      { kind: 'file', type },
+    );
+  } else {
+    db.recordAnalyticsEventBestEffort(
+      'ticket.message.user',
+      ticket.ticketId,
+      message.from.id.toString(),
+      { kind: 'file', type },
+    );
   }
 
   if (!config.autoreply_confirmation) return;
