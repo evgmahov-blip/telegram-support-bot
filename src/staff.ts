@@ -76,6 +76,27 @@ async function forwardReplyToParent(ctx: Context, ticket: ISupportee, staffMessa
   await middleware.sendMessage(parent.group_id, staffchat_type, text).catch(log.error);
 }
 
+const POST_DELIVERY_TRANSITION_ATTEMPTS = 3;
+
+/** Retry post-delivery state changes locally; never replay the user-facing reply. */
+async function transitionTicketAfterDelivery(
+  ticketId: number,
+  target: db.TicketStatus,
+): Promise<ISupportee | null> {
+  let lastError: unknown = null;
+
+  for (let attempt = 0; attempt < POST_DELIVERY_TRANSITION_ATTEMPTS; attempt += 1) {
+    try {
+      return await db.transitionTicketStatus(ticketId, target);
+    } catch (err) {
+      lastError = err;
+    }
+  }
+
+  log.error(`Post-delivery ticket transition failed for #T${ticketId} -> ${target}:`, lastError);
+  return null;
+}
+
 /** Handles replies written in the closed staff group. */
 async function chat(ctx: Context) {
   if (!ctx.session.admin) return;
@@ -143,6 +164,9 @@ async function chat(ctx: Context) {
   cache.ticketStatus[ticketId] = false;
 
   if (ticket.userid.includes('WEB')) {
+    // Persist before the external delivery side effect so a history failure is
+    // safe to retry and can never replay an already delivered staff reply.
+    await db.persistTicketMessage(ticketId, 'staff', senderId, staffMessage);
     try {
       const socketId = ticket.userid.split('WEB')[1];
       cache.io.to(socketId).emit('chat_staff', ticketMsg(name, ctx.message));
@@ -163,13 +187,18 @@ async function chat(ctx: Context) {
         replyContent = ticketMsg(name, { text: translated, from: ctx.message.from });
       }
     }
+
+    // Translation is still pre-delivery and may safely fail/retry. Once the
+    // immutable history write succeeds, the only remaining throwing operation
+    // before the delivery boundary is the delivery itself.
+    await db.persistTicketMessage(ticketId, 'staff', senderId, staffMessage);
     await middleware.sendMessage(ticket.userid, ticket.messenger, replyContent);
   }
 
   if (!ticket.first_response_at) {
     await db.setFirstResponseAt(ticketId);
   }
-  await db.addTicketMessage(ticketId, 'staff', senderId, staffMessage);
+  db.recordAnalyticsEventBestEffort('ticket.message.staff', ticketId, senderId);
 
   middleware.sendMessage(
     ctx.chat.id,
@@ -181,15 +210,17 @@ async function chat(ctx: Context) {
   delete cache.ticketSent[ticketId];
 
   await forwardReplyToParent(ctx, ticket, staffMessage);
-  await db.recordAnalyticsEvent('ticket.replied', ticketId, senderId);
-  await webhooks.webhooks.ticketReplied(ticketId, senderId, staffMessage.substring(0, 200));
+  db.recordAnalyticsEventBestEffort('ticket.replied', ticketId, senderId);
+  webhooks.webhooks.ticketReplied(ticketId, senderId, staffMessage.substring(0, 200));
 
   if (cache.config.auto_close_tickets) {
-    const closed = await db.transitionTicketStatus(ticketId, 'closed');
+    const closed = await transitionTicketAfterDelivery(ticketId, 'closed');
     if (closed) {
-      await db.recordAnalyticsEvent('ticket.closed', ticketId, senderId);
-      await webhooks.webhooks.ticketClosed(ticketId, senderId);
-      await analytics.sendCSATSurvey(ticket.userid, ticket.messenger, ticketId);
+      db.recordAnalyticsEventBestEffort('ticket.closed', ticketId, senderId);
+      webhooks.webhooks.ticketClosed(ticketId, senderId);
+      await analytics.sendCSATSurvey(ticket.userid, ticket.messenger, ticketId).catch((err) => {
+        log.error(`CSAT delivery failed after closing #T${ticketId}:`, err);
+      });
     }
   }
 }
