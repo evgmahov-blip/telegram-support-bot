@@ -4,6 +4,7 @@ const mockReply = jest.fn();
 const mockAdd = jest.fn();
 const mockGetTicketByUserId = jest.fn();
 const mockAddIdAndName = jest.fn();
+const mockLogError = jest.fn();
 
 jest.mock('../src/middleware', () => ({
   sendMessage: mockSendMessage,
@@ -51,6 +52,11 @@ jest.mock('../src/cache', () => ({
     ticketStatus: {},
     ticketSent: {},
   },
+}));
+
+jest.mock('../src/logger', () => ({
+  info: jest.fn(),
+  error: mockLogError,
 }));
 
 jest.mock('../src/addons/llm', () => ({
@@ -185,6 +191,62 @@ describe('Users Module', () => {
         'staff123',
         'telegram',
         expect.stringContaining('#T001001')
+      );
+    });
+
+    it('should wait for staff message correlation before completing', async () => {
+      const ctx = createMockContext('Correlation wait');
+      const mockTicket = {
+        ticketId: 1101,
+        userid: 'user123',
+        messenger: 'telegram',
+        status: 'open',
+        category: 'general',
+      };
+
+      mockGetTicketByUserId.mockResolvedValue(mockTicket);
+      mockSendMessage.mockResolvedValue('12345');
+
+      let release!: () => void;
+      mockAddIdAndName.mockImplementationOnce(() => new Promise<void>((resolve) => {
+        release = resolve;
+      }));
+
+      let settled = false;
+      const processing = users.chat(ctx, { id: 'chat123' }).then(() => {
+        settled = true;
+      });
+
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(mockAddIdAndName).toHaveBeenCalledWith(1101, '12345', 'John');
+      expect(settled).toBe(false);
+
+      release();
+      await processing;
+      expect(settled).toBe(true);
+    });
+
+    it('should retry correlation locally without failing an already delivered update', async () => {
+      const ctx = createMockContext('Correlation retries');
+      const mockTicket = {
+        ticketId: 1102,
+        userid: 'user123',
+        messenger: 'telegram',
+        status: 'open',
+        category: 'general',
+      };
+
+      mockGetTicketByUserId.mockResolvedValue(mockTicket);
+      mockSendMessage.mockResolvedValue('12346');
+      const error = new Error('mongo unavailable');
+      mockAddIdAndName.mockRejectedValue(error);
+
+      await expect(users.chat(ctx, { id: 'chat123' })).resolves.toBeUndefined();
+
+      expect(mockAddIdAndName).toHaveBeenCalledTimes(3);
+      expect(mockLogError).toHaveBeenCalledWith(
+        'Could not persist staff message correlation for #T1102:',
+        error,
       );
     });
 
