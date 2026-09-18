@@ -136,7 +136,7 @@ async function fileHandler(type: string, bot: Addon, ctx: Context) {
         sendMessage(receiverId, headerMessenger, captionText).catch(log.error);
       }
       if (shouldForwardToGroup) {
-        Promise.resolve(bot.sendSticker(session.group, fileId)).catch(log.error);
+        Promise.resolve(bot.sendSticker!(session.group, fileId)).catch(log.error);
       }
       break;
     }
