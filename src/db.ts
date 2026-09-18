@@ -113,6 +113,23 @@ AnalyticsEventSchema.index({ ticketId: 1, timestamp: -1 });
 
 const AnalyticsEvent = mongoose.model('AnalyticsEvent', AnalyticsEventSchema);
 
+export interface IWebhookCursor extends mongoose.Document {
+  subscriber_id: string;
+  last_seq: number;
+  created_at: Date;
+  updated_at: Date;
+}
+
+const WebhookCursorSchema = new mongoose.Schema<IWebhookCursor>({
+  subscriber_id: { type: String, required: true, unique: true },
+  last_seq: { type: Number, required: true, default: 0 },
+}, {
+  timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' },
+});
+WebhookCursorSchema.index({ subscriber_id: 1 }, { unique: true });
+
+const WebhookCursor = mongoose.model('WebhookCursor', WebhookCursorSchema);
+
 export interface IInternalNote extends mongoose.Document {
   ticketId: number;
   author_id: string;
@@ -761,6 +778,51 @@ export async function getEventsSince(
   }
 }
 
+export async function getLatestEventSequence(): Promise<number> {
+  const latest = await AnalyticsEvent.findOne({ seq: { $exists: true } })
+    .sort({ seq: -1 })
+    .select('seq')
+    .lean<{ seq?: number }>();
+
+  return Number.isSafeInteger(latest?.seq) ? Number(latest?.seq) : 0;
+}
+
+/**
+ * Initialize a durable subscriber cursor once. Existing cursors are never
+ * moved by startup, so restart resumes from the last acknowledged event.
+ */
+export async function initializeWebhookCursor(
+  subscriberId: string,
+  initialSeq: number,
+): Promise<number> {
+  const safeSeq = Number.isSafeInteger(initialSeq) && initialSeq >= 0 ? initialSeq : 0;
+  const cursor = await WebhookCursor.findOneAndUpdate(
+    { subscriber_id: subscriberId },
+    { $setOnInsert: { subscriber_id: subscriberId, last_seq: safeSeq } },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  );
+
+  if (!cursor) throw new Error(`Failed to initialize webhook cursor ${subscriberId}`);
+  return cursor.last_seq;
+}
+
+export async function advanceWebhookCursor(
+  subscriberId: string,
+  seq: number,
+): Promise<void> {
+  if (!Number.isSafeInteger(seq) || seq < 0) {
+    throw new Error(`Invalid webhook cursor sequence: ${seq}`);
+  }
+
+  const result = await WebhookCursor.updateOne(
+    { subscriber_id: subscriberId },
+    { $max: { last_seq: seq } },
+  );
+  if (result.matchedCount === 0) {
+    throw new Error(`Webhook cursor not initialized: ${subscriberId}`);
+  }
+}
+
 export async function getAnalyticsEvents(
   type?: string,
   startDate?: Date,
@@ -955,4 +1017,4 @@ export async function recordCSAT(
 
 // --- Export models for use in other modules ---
 
-export { TicketMessage, AnalyticsEvent, InternalNote, TicketCounter, UserBan };
+export { TicketMessage, AnalyticsEvent, WebhookCursor, InternalNote, TicketCounter, UserBan };
