@@ -3,6 +3,7 @@ import * as db from './db';
 import * as middleware from './middleware';
 import { Context } from './interfaces';
 import * as log from './logger';
+import { persistStaffMessageCorrelation } from './staff-correlation';
 
 /**
  * Forwards an edited user message to the staff chat (forward_edited_messages, #147).
@@ -32,11 +33,31 @@ export async function handleEditedMessage(ctx: Context): Promise<boolean> {
     : `[${esc(msg.from.first_name)}](tg://user?id=${userId})`;
   const text = `${config.language.ticket} #T${paddedId} ${config.language.from} ${name} ${config.language.editedMessage}:\n\n${esc(msg.text)}`;
 
-  await middleware.sendMessage(config.staffchat_id, config.staffchat_type, text).catch(log.error);
+  // Persist immutable history before any external side effect. If this fails,
+  // ingress can safely retry without duplicating a staff notification.
+  await db.persistTicketMessage(
+    ticket.ticketId,
+    'user',
+    userId,
+    `[${config.language.editedMessage}] ${msg.text}`,
+  );
+
+  // Primary staff delivery is authoritative for ingress success. A transport
+  // failure must reject so the fenced Telegram update can be retried.
+  const staffMessageId = await middleware.sendMessage(
+    config.staffchat_id,
+    config.staffchat_type,
+    text,
+  );
+  if (staffMessageId) {
+    await persistStaffMessageCorrelation(ticket.ticketId, staffMessageId, msg.from.first_name);
+  }
+
+  // Category mirrors are secondary staff surfaces and remain best-effort.
   if (ctx.session.group && ctx.session.group !== config.staffchat_id) {
     await middleware.sendMessage(ctx.session.group, ticket.messenger, text).catch(log.error);
   }
 
-  await db.addTicketMessage(ticket.ticketId, 'user', userId, `[${config.language.editedMessage}] ${msg.text}`);
+  db.recordAnalyticsEventBestEffort('ticket.message.user', ticket.ticketId, userId);
   return true;
 }

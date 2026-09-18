@@ -7,29 +7,9 @@ import * as log from './logger'
 import * as aiDraft from './ai-draft';
 import * as webhooks from './webhooks';
 import * as workflows from './workflows';
+import { persistStaffMessageCorrelation } from './staff-correlation';
 
 const TIME_BETWEEN_CONFIRMATION_MESSAGES = 86400000; // 24 hours
-const STAFF_CORRELATION_ATTEMPTS = 3;
-
-async function persistStaffMessageCorrelation(
-  ticketId: number,
-  messageId: string,
-  name: string | null,
-): Promise<void> {
-  let lastError: unknown = null;
-
-  for (let attempt = 0; attempt < STAFF_CORRELATION_ATTEMPTS; attempt += 1) {
-    try {
-      await db.addIdAndName(ticketId, messageId, name);
-      return;
-    } catch (err) {
-      lastError = err;
-    }
-  }
-
-  log.error(`Could not persist staff message correlation for #T${ticketId}:`, lastError);
-}
-
 function formatMessageAsTicket(
   ticket: { toString: () => string },
   ctx: Context,
