@@ -6,7 +6,8 @@ const STAFF_CORRELATION_ATTEMPTS = 3;
 /**
  * Persist reply correlation after a staff-chat delivery has already succeeded.
  * Retry locally, but do not rethrow after exhaustion: replaying the ingress
- * update would duplicate the already delivered staff message.
+ * update would duplicate the already delivered staff message. Once delivery
+ * has happened, this helper always resolves after its bounded local attempts.
  */
 export async function persistStaffMessageCorrelation(
   ticketId: number,
