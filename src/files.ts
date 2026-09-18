@@ -120,32 +120,16 @@ async function fileHandler(type: string, bot: Addon, ctx: Context) {
   switch (type) {
     case 'document':
       messageId = await bot.sendDocument(receiverId, fileId, commonOptions) as string | null;
-      if (shouldForwardToGroup) {
-        Promise.resolve(bot.sendDocument(session.group, fileId, { caption: captionText })).catch(log.error);
-      }
       break;
     case 'photo':
       messageId = await bot.sendPhoto(receiverId, fileId, commonOptions) as string | null;
-      if (shouldForwardToGroup) {
-        Promise.resolve(bot.sendPhoto(session.group, fileId, { caption: captionText })).catch(log.error);
-      }
       break;
     case 'video':
       messageId = await bot.sendVideo(receiverId, fileId, commonOptions) as string | null;
-      if (shouldForwardToGroup) {
-        Promise.resolve(bot.sendVideo(session.group, fileId, { caption: captionText })).catch(log.error);
-      }
       break;
     case 'sticker': {
       const stickerMessageId = await bot.sendSticker!(receiverId, fileId);
       messageId = typeof stickerMessageId === 'string' ? stickerMessageId : null;
-      const headerMessenger = session.admin ? ticket.messenger : config.staffchat_type;
-      if (captionText.trim()) {
-        sendMessage(receiverId, headerMessenger, captionText).catch(log.error);
-      }
-      if (shouldForwardToGroup) {
-        Promise.resolve(bot.sendSticker!(session.group, fileId)).catch(log.error);
-      }
       break;
     }
     default:
@@ -154,11 +138,34 @@ async function fileHandler(type: string, bot: Addon, ctx: Context) {
 
   // Media addons report transport failure by returning null rather than
   // rejecting. Surface that failure so fenced ingress releases the update for
-  // retry instead of recording a delivery that never happened.
+  // retry instead of recording a delivery that never happened. No secondary
+  // side effect is started until this primary boundary is confirmed.
   if (!messageId) {
     throw new Error(
       `Primary ${type} delivery failed for #T${ticket.ticketId} to ${receiverId}`,
     );
+  }
+
+  if (type === 'sticker' && captionText.trim()) {
+    const headerMessenger = session.admin ? ticket.messenger : config.staffchat_type;
+    sendMessage(receiverId, headerMessenger, captionText).catch(log.error);
+  }
+
+  if (shouldForwardToGroup) {
+    switch (type) {
+      case 'document':
+        Promise.resolve(bot.sendDocument(session.group, fileId, { caption: captionText })).catch(log.error);
+        break;
+      case 'photo':
+        Promise.resolve(bot.sendPhoto(session.group, fileId, { caption: captionText })).catch(log.error);
+        break;
+      case 'video':
+        Promise.resolve(bot.sendVideo(session.group, fileId, { caption: captionText })).catch(log.error);
+        break;
+      case 'sticker':
+        Promise.resolve(bot.sendSticker!(session.group, fileId)).catch(log.error);
+        break;
+    }
   }
 
   // Correlation ids are staff-chat message ids only. A staff -> user Telegram
