@@ -7,6 +7,7 @@ import { Group, SignalMessage } from './models';
 import { registerCommonHandlers } from '../../handlers';
 import * as db from '../../db';
 import * as log from '../../logger';
+import { AsyncWorkTracker } from '../../async-work';
 
 const SEND_ENDPOINT = 'v2/send';
 const GROUP_ENDPOINT = 'v1/groups';
@@ -25,11 +26,17 @@ class SignalAddon implements Addon {
   private eventHandlers: Record<string, ((ctx: any) => void)[]> = {};
   private hearsHandlers: Array<{ trigger: string | RegExp, callback: (ctx: any) => void }> = [];
   private externalGroups: Record<string, string> = {};
+  private started = false;
+  private stopping = false;
+  private handlersRegistered = false;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private typingTimers = new Set<ReturnType<typeof setTimeout>>();
+  private readonly inFlight = new AsyncWorkTracker();
 
   private static instance: SignalAddon | null = null;
 
   private constructor() {
-    this.axiosInstance = axios.create({ baseURL: this.baseURL });
+    this.axiosInstance = axios.create({ baseURL: this.baseURL, timeout: 10000 });
   }
 
   public static getInstance(): SignalAddon {
@@ -212,126 +219,160 @@ class SignalAddon implements Addon {
   }
 
   start(): void {
-    log.info('Starting Signal Addon with WebSocket connection...');
-    // Register commands.
+  if (this.started) return;
+  this.started = true;
+  this.stopping = false;
+  log.info('Starting Signal Addon with WebSocket connection...');
+  if (!this.handlersRegistered) {
     registerCommonHandlers(this);
-    // Open the WebSocket connection.
-    this.connectWebSocket();
+    this.handlersRegistered = true;
   }
+  this.connectWebSocket();
+}
 
-  private connectWebSocket(): void {
-    this.ws = new WebSocket(this.wsURL);
-    this.ws.on('open', () => {
-      log.info('WebSocket connection established for Signal.');
-    });
-    this.ws.on('message', (data: WebSocket.Data) => this.handleMessage(data));
-    this.ws.on('error', (error) => {
-      log.error('WebSocket error:', error);
+private scheduleReconnect(delayMs: number): void {
+  if (this.stopping || this.reconnectTimer) return;
+  this.reconnectTimer = setTimeout(() => {
+    this.reconnectTimer = null;
+    if (!this.stopping) this.connectWebSocket();
+  }, delayMs);
+  this.reconnectTimer.unref?.();
+}
+
+private connectWebSocket(): void {
+  if (this.stopping) return;
+  const socket = new WebSocket(this.wsURL);
+  this.ws = socket;
+  socket.on('open', () => {
+    if (this.stopping) {
+      try { socket.close(); } catch { socket.terminate(); }
+      return;
+    }
+    log.info('WebSocket connection established for Signal.');
+  });
+  socket.on('message', (data: WebSocket.Data) => {
+    if (this.stopping) return;
+    this.inFlight.track(this.handleMessage(data), (error) => {
+      log.error('Error processing WebSocket message:', error);
       if (this.errorHandler) this.errorHandler(error);
     });
-    this.ws.on('close', () => {
-      log.info('WebSocket connection closed. Reconnecting in 5 seconds...');
-      setTimeout(() => this.connectWebSocket(), 5000);
-    });
+  });
+  socket.on('error', (error) => {
+    if (this.stopping) return;
+    log.error('WebSocket error:', error);
+    if (this.errorHandler) this.errorHandler(error);
+  });
+  socket.on('close', () => {
+    if (this.ws === socket) this.ws = null;
+    if (this.stopping) {
+      log.info('Signal WebSocket connection closed.');
+      return;
+    }
+    log.info('WebSocket connection closed. Reconnecting in 5 seconds...');
+    this.scheduleReconnect(5000);
+  });
+}
+
+private isGroup(ctx: Context): boolean {
+  return ctx.chat.type === 'group';
+}
+
+private async setExternalGroupId(ctx: Context) {
+  if (this.isGroup(ctx) && ctx.chat.id) {
+    const groupId = ctx.chat.id;
+    const externalGroupId = await this.getGroupId(groupId);
+    if (externalGroupId) {
+      this.externalGroups[groupId] = externalGroupId;
+      ctx.chat.id = externalGroupId;
+      log.info(`Mapped internal group ID ${groupId} to external group ID ${externalGroupId}`);
+    } else {
+      log.error(`Failed to map internal group ID ${groupId} to external group ID.`);
+    }
+  }
+}
+
+private async handleMessage(data: WebSocket.Data): Promise<void> {
+  const signalMessage = JSON.parse(data.toString()) as SignalMessage;
+  if (signalMessage.envelope.dataMessage === undefined) return;
+
+  const messageContext: Context = mapSignalMessageToContext(signalMessage);
+  await this.showTypingIndicator(messageContext.chat.id);
+  if (!this.stopping) {
+    const typingTimer = setTimeout(() => {
+      this.typingTimers.delete(typingTimer);
+      void this.hideTypingIndicator(messageContext.chat.id);
+    }, 10000);
+    typingTimer.unref?.();
+    this.typingTimers.add(typingTimer);
   }
 
-  private isGroup(ctx: Context): boolean {
-    return ctx.chat.type === 'group';
-  }
+  await this.setExternalGroupId(messageContext);
+  await this.setGroupAdmin(messageContext);
+  this.setIsBot(signalMessage, messageContext);
 
-  private async setExternalGroupId(ctx: Context) {
-    if (this.isGroup(ctx) && ctx.chat.id) {
-      const groupId = ctx.chat.id;
-      const externalGroupId = await this.getGroupId(groupId);
-      if (externalGroupId) {
-        this.externalGroups[groupId] = externalGroupId;
-        ctx.chat.id = externalGroupId;
-        log.info(`Mapped internal group ID ${groupId} to external group ID ${externalGroupId}`);
-      } else {
-        log.error(`Failed to map internal group ID ${groupId} to external group ID.`);
+  const attachments = signalMessage.envelope.dataMessage.attachments;
+  if (attachments && attachments.length > 0) {
+    for (const attachment of attachments) {
+      const event = attachment.contentType.startsWith('image/')
+        ? ':photo'
+        : attachment.contentType.startsWith('video/') ? ':video' : ':document';
+      for (const handler of this.eventHandlers[event] || []) {
+        await handler(messageContext);
       }
+    }
+    return;
+  }
+
+  let isCommand = false;
+  if (messageContext.message && typeof messageContext.message.text === 'string' &&
+      messageContext.message.text.startsWith('/')) {
+    isCommand = true;
+    const parts = messageContext.message.text.split(' ');
+    const commandName = parts[0].substring(1);
+    const commandKey = `command:${commandName}`;
+    for (const handler of this.eventHandlers[commandKey] || []) {
+      await handler(messageContext);
     }
   }
 
-  private async handleMessage(data: WebSocket.Data): Promise<void> {
+  for (const handler of this.eventHandlers['message'] || []) {
+    await handler(messageContext);
+  }
+
+  if (!isCommand) {
+    for (const { trigger, callback } of this.hearsHandlers) {
+      if (typeof trigger === 'string' && messageContext.message.text === trigger) {
+        await callback(messageContext);
+      } else if (trigger instanceof RegExp && trigger.test(messageContext.message.text)) {
+        await callback(messageContext);
+      }
+    }
+  }
+}
+
+async stop(): Promise<void> {
+  this.stopping = true;
+  this.started = false;
+  if (this.reconnectTimer) {
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+  }
+  for (const timer of this.typingTimers) clearTimeout(timer);
+  this.typingTimers.clear();
+
+  const socket = this.ws;
+  this.ws = null;
+  if (socket && socket.readyState !== WebSocket.CLOSED) {
     try {
-      const signalMessage = JSON.parse(data.toString()) as SignalMessage;
-      if (signalMessage.envelope.dataMessage === undefined) {
-        return;
-      }
-      
-      // Map the raw Signal message to a Context.
-      const messageContext: Context = mapSignalMessageToContext(signalMessage);
-      
-      // Show typing indicator immediately when a message (or attachment) is received.
-      await this.showTypingIndicator(messageContext.chat.id);
-      // Schedule hiding the indicator after 10 seconds in case no outgoing response is sent.
-      setTimeout(() => {
-        this.hideTypingIndicator(messageContext.chat.id);
-      }, 10000);
-      
-      // Set external group id if needed.
-      await this.setExternalGroupId(messageContext);
-      // Set group admin flag.
-      await this.setGroupAdmin(messageContext);
-      // Mark message as coming from a bot if applicable.
-      this.setIsBot(signalMessage, messageContext);
-  
-      // Process attachments if present.
-      const attachments = signalMessage.envelope.dataMessage.attachments;
-      if (attachments && attachments.length > 0) {
-        for (const attachment of attachments) {
-          if (attachment.contentType.startsWith('image/')) {
-            if (this.eventHandlers[':photo']) {
-              this.eventHandlers[':photo'].forEach(handler => handler(messageContext));
-            }
-          } else if (attachment.contentType.startsWith('video/')) {
-            if (this.eventHandlers[':video']) {
-              this.eventHandlers[':video'].forEach(handler => handler(messageContext));
-            }
-          } else {
-            if (this.eventHandlers[':document']) {
-              this.eventHandlers[':document'].forEach(handler => handler(messageContext));
-            }
-          }
-        }
-        // Optionally, attachments can be processed exclusively.
-        return;
-      }
-      
-      // Process command handlers if message starts with a slash.
-      let isCommand = false;
-      if (messageContext.message && typeof messageContext.message.text === 'string' &&
-          messageContext.message.text.startsWith('/')) {
-        isCommand = true;
-        const parts = messageContext.message.text.split(' ');
-        const commandName = parts[0].substring(1);
-        const commandKey = `command:${commandName}`;
-        if (this.eventHandlers[commandKey]) {
-          this.eventHandlers[commandKey].forEach(handler => handler(messageContext));
-        }
-      }
-      
-      // Process generic message handlers.
-      if (this.eventHandlers['message']) {
-        this.eventHandlers['message'].forEach(handler => handler(messageContext));
-      }
-      
-      // Process hears handlers if message is not a command.
-      if (!isCommand) {
-        this.hearsHandlers.forEach(({ trigger, callback }) => {
-          if (typeof trigger === 'string' && messageContext.message.text === trigger) {
-            callback(messageContext);
-          } else if (trigger instanceof RegExp && trigger.test(messageContext.message.text)) {
-            callback(messageContext);
-          }
-        });
-      }
-      
-    } catch (err) {
-      log.error('Error processing WebSocket message:', err);
+      if (socket.readyState === WebSocket.CONNECTING) socket.terminate();
+      else socket.close();
+    } catch {
+      try { socket.terminate(); } catch { /* ignore shutdown close errors */ }
     }
-  }  
+  }
+
+  await this.inFlight.drain();
+}
 }
 
 export default SignalAddon;

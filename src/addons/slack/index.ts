@@ -3,6 +3,7 @@ import { Addon, Context } from '../../interfaces';
 import cache from '../../cache';
 import { registerCommonHandlers } from '../../handlers';
 import * as log from '../../logger';
+import { AsyncWorkTracker } from '../../async-work';
 
 const SLACK_API = 'https://slack.com/api';
 
@@ -14,12 +15,18 @@ class SlackAddon implements Addon {
   private hearsHandlers: Array<{ trigger: string | RegExp; callback: (ctx: any) => void }> = [];
   private ws: any | null = null;
   private channels: Map<string, { name: string; id: string }> = new Map();
+  private started = false;
+  private stopping = false;
+  private handlersRegistered = false;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly inFlight = new AsyncWorkTracker();
 
   private static instance: SlackAddon | null = null;
 
   private constructor() {
     this.axiosInstance = axios.create({
       baseURL: SLACK_API,
+      timeout: 10000,
       headers: {
         'Authorization': `Bearer ${cache.config.slack_bot_token}`,
         'Content-Type': 'application/json',
@@ -206,159 +213,151 @@ class SlackAddon implements Addon {
    * Starts the Slack addon — connects via RTM WebSocket and registers handlers.
    */
   start(): void {
-    if (!cache.config.slack_enabled) return;
-
-    log.info('Starting Slack Addon...');
+  if (!cache.config.slack_enabled || this.started) return;
+  this.started = true;
+  this.stopping = false;
+  log.info('Starting Slack Addon...');
+  if (!this.handlersRegistered) {
     registerCommonHandlers(this);
-    this.connectRTM();
+    this.handlersRegistered = true;
   }
+  this.connectRTM();
+}
 
-  /**
-   * Connects to Slack RTM via WebSocket for real-time message reception.
-   */
-  private connectRTM(): void {
-    // Get WSS URL from Slack
-    this.axiosInstance.get('/rtm.connect').then((response) => {
-      if (!response.data.ok) {
-        log.error('Slack RTM connect failed:', response.data.error);
-        return;
-      }
+private scheduleReconnect(delayMs: number): void {
+  if (this.stopping || this.reconnectTimer) return;
+  this.reconnectTimer = setTimeout(() => {
+    this.reconnectTimer = null;
+    if (!this.stopping) this.connectRTM();
+  }, delayMs);
+  this.reconnectTimer.unref?.();
+}
 
-      const wsURL = response.data.url;
-      log.info('Connecting to Slack RTM WebSocket...');
+private connectRTM(): void {
+  if (this.stopping) return;
+  const connecting = this.axiosInstance.get('/rtm.connect').then((response) => {
+    if (this.stopping) return;
+    if (!response.data.ok) {
+      log.error('Slack RTM connect failed:', response.data.error);
+      this.scheduleReconnect(10000);
+      return;
+    }
 
-      // Cache channel list
-      response.data.channels?.forEach((ch: any) => {
-        this.channels.set(ch.name, { name: ch.name, id: ch.id });
-        this.channels.set(ch.id, { name: ch.name, id: ch.id });
-      });
-
-      const WebSocket = require('ws');
-      this.ws = new WebSocket(wsURL);
-
-      this.ws.on('open', () => {
-        log.info('Slack RTM WebSocket connected.');
-      });
-
-      this.ws.on('message', (data: Buffer) => {
-        try {
-          const message = JSON.parse(data.toString());
-          this.handleRTMMessage(message);
-        } catch (err) {
-          log.error('Error parsing Slack RTM message:', err);
-        }
-      });
-
-      this.ws.on('error', (error: Error) => {
-        log.error('Slack WebSocket error:', error);
-        if (this.errorHandler) this.errorHandler(error);
-      });
-
-      this.ws.on('close', () => {
-        log.info('Slack RTM WebSocket closed. Reconnecting in 5 seconds...');
-        setTimeout(() => this.connectRTM(), 5000);
-      });
-    }).catch((error: Error) => {
-      log.error('Failed to connect Slack RTM:', error);
-      if (this.errorHandler) this.errorHandler(error);
-      // Retry after 10 seconds
-      setTimeout(() => this.connectRTM(), 10000);
+    const wsURL = response.data.url;
+    log.info('Connecting to Slack RTM WebSocket...');
+    response.data.channels?.forEach((ch: any) => {
+      this.channels.set(ch.name, { name: ch.name, id: ch.id });
+      this.channels.set(ch.id, { name: ch.name, id: ch.id });
     });
-  }
 
-  /**
-   * Handles incoming RTM messages from Slack.
-   */
-  private handleRTMMessage(message: any): void {
-    // Only process message events in the configured channel
-    if (message.type !== 'message' || !message.channel) return;
+    const WebSocket = require('ws');
+    const socket = new WebSocket(wsURL);
+    this.ws = socket;
 
-    const targetChannel = cache.config.slack_channel_id;
-    if (targetChannel && message.channel !== targetChannel) return;
-
-    // Ignore bot messages (including our own)
-    if (message.subtype === 'bot_message' || message.bot_id) return;
-
-    // Build a Context-like object from the Slack message
-    const ctx = this.buildContext(message);
-    if (!ctx) return;
-
-    // Process commands
-    const text = ctx.message.text || '';
-    if (text.startsWith('/')) {
-      const parts = text.split(' ');
-      const commandName = parts[0].substring(1).split(':')[0];
-      const handlers = this.commandHandlers.get(commandName);
-      if (handlers) {
-        ctx.match = parts.slice(1).join(' ');
-        handlers.forEach(handler => handler(ctx));
+    socket.on('open', () => {
+      if (this.stopping) {
+        try { socket.close(); } catch { socket.terminate?.(); }
         return;
       }
-    }
+      log.info('Slack RTM WebSocket connected.');
+    });
 
-    // Process hears handlers
-    for (const { trigger, callback } of this.hearsHandlers) {
-      if (typeof trigger === 'string' && text === trigger) {
-        callback(ctx);
-        return;
-      } else if (trigger instanceof RegExp && trigger.test(text)) {
-        ctx.match = trigger.exec(text)?.toString() || '';
-        callback(ctx);
+    socket.on('message', (data: Buffer) => {
+      if (this.stopping) return;
+      try {
+        const message = JSON.parse(data.toString());
+        this.inFlight.track(this.handleRTMMessage(message), (error) => {
+          log.error('Error processing Slack RTM message:', error);
+          if (this.errorHandler) this.errorHandler(error);
+        });
+      } catch (err) {
+        log.error('Error parsing Slack RTM message:', err);
+      }
+    });
+
+    socket.on('error', (error: Error) => {
+      if (this.stopping) return;
+      log.error('Slack WebSocket error:', error);
+      if (this.errorHandler) this.errorHandler(error);
+    });
+
+    socket.on('close', () => {
+      if (this.ws === socket) this.ws = null;
+      if (this.stopping) {
+        log.info('Slack RTM WebSocket closed.');
         return;
       }
-    }
+      log.info('Slack RTM WebSocket closed. Reconnecting in 5 seconds...');
+      this.scheduleReconnect(5000);
+    });
+  }).catch((error: Error) => {
+    if (this.stopping) return;
+    log.error('Failed to connect Slack RTM:', error);
+    if (this.errorHandler) this.errorHandler(error);
+    this.scheduleReconnect(10000);
+  });
 
-    // Process generic message handlers
-    const msgHandlers = this.eventHandlers['message'] || [];
-    msgHandlers.forEach(handler => handler(ctx));
+  this.inFlight.track(connecting, (error) => {
+    log.error('Slack RTM connection task failed:', error);
+  });
+}
+
+private async handleRTMMessage(message: any): Promise<void> {
+  if (message.type !== 'message' || !message.channel) return;
+  const targetChannel = cache.config.slack_channel_id;
+  if (targetChannel && message.channel !== targetChannel) return;
+  if (message.subtype === 'bot_message' || message.bot_id) return;
+
+  const ctx = this.buildContext(message);
+  if (!ctx) return;
+  const text = ctx.message.text || '';
+  if (text.startsWith('/')) {
+    const parts = text.split(' ');
+    const commandName = parts[0].substring(1).split(':')[0];
+    const handlers = this.commandHandlers.get(commandName);
+    if (handlers) {
+      ctx.match = parts.slice(1).join(' ');
+      for (const handler of handlers) await handler(ctx);
+      return;
+    }
   }
 
-  /**
-   * Builds a Context object from a Slack RTM message.
-   */
-  private buildContext(msg: any): Context | null {
-    if (!msg.user) return null;
-
-    const text = msg.text || '';
-    const userId = msg.user;
-    const chatId = msg.channel;
-    const threadTs = msg.thread_ts || msg.ts;
-
-    // Extract reply info (thread parent)
-    let replyToText = '';
-    if (msg.parent_user_id) {
-      replyToText = `#T${msg.parent_user_id} from`;
+  for (const { trigger, callback } of this.hearsHandlers) {
+    if (typeof trigger === 'string' && text === trigger) {
+      await callback(ctx);
+      return;
+    } else if (trigger instanceof RegExp && trigger.test(text)) {
+      ctx.match = trigger.exec(text)?.toString() || '';
+      await callback(ctx);
+      return;
     }
+  }
 
-    return {
-      messenger: 'slack' as any,
-      update_id: 0,
-      message: {
-        web_msg: false,
-        message_id: parseInt(msg.ts?.replace('.', '') || '0'),
-        from: {
-          id: userId,
-          is_bot: false,
-          first_name: msg.username || `Slack User ${userId}`,
-          username: msg.username || '',
-          language_code: 'en',
-        },
-        chat: {
-          id: chatId,
-          first_name: this.channels.get(chatId)?.name || chatId,
-          username: '',
-          type: msg.channel.startsWith('C') ? 'group' : 'private',
-        },
-        date: Math.floor(Date.now() / 1000),
-        text: text,
-        reply_to_message: {
-          from: { is_bot: false },
-          text: replyToText,
-          caption: '',
-        },
-        external_reply: { message_id: parseInt(msg.ts?.replace('.', '') || '0') },
-        getFile: undefined,
-        caption: '',
+  for (const handler of this.eventHandlers['message'] || []) {
+    await handler(ctx);
+  }
+}
+
+private buildContext(msg: any): Context | null {
+  if (!msg.user) return null;
+  const text = msg.text || '';
+  const userId = msg.user;
+  const chatId = msg.channel;
+  let replyToText = '';
+  if (msg.parent_user_id) replyToText = `#T${msg.parent_user_id} from`;
+
+  return {
+    messenger: 'slack' as any,
+    update_id: 0,
+    message: {
+      web_msg: false,
+      message_id: parseInt(msg.ts?.replace('.', '') || '0'),
+      from: {
+        id: userId,
+        is_bot: false,
+        first_name: msg.username || `Slack User ${userId}`,
+        username: msg.username || '',
+        language_code: 'en',
       },
       chat: {
         id: chatId,
@@ -366,35 +365,52 @@ class SlackAddon implements Addon {
         username: '',
         type: msg.channel.startsWith('C') ? 'group' : 'private',
       },
-      session: {} as any,
-      callbackQuery: { data: '', from: { id: userId }, id: msg.ts || '' },
-      from: { username: msg.username || '', id: userId },
-      inlineQuery: null,
-      reply: async (): Promise<void> => {},
-      answerCbQuery: async (): Promise<void> => {},
-      getChat: async (): Promise<{ id: string; first_name: string; username: string; type: string }> => ({ id: '', first_name: '', username: '', type: 'private' }),
-      getFile: async (): Promise<unknown> => ({}),
-    };
+      date: Math.floor(Date.now() / 1000),
+      text,
+      reply_to_message: { from: { is_bot: false }, text: replyToText, caption: '' },
+      external_reply: { message_id: parseInt(msg.ts?.replace('.', '') || '0') },
+      getFile: undefined,
+      caption: '',
+    },
+    chat: {
+      id: chatId,
+      first_name: this.channels.get(chatId)?.name || chatId,
+      username: '',
+      type: msg.channel.startsWith('C') ? 'group' : 'private',
+    },
+    session: {} as any,
+    callbackQuery: { data: '', from: { id: userId }, id: msg.ts || '' },
+    from: { username: msg.username || '', id: userId },
+    inlineQuery: null,
+    reply: async (): Promise<void> => {},
+    answerCbQuery: async (): Promise<void> => {},
+    getChat: async (): Promise<{ id: string; first_name: string; username: string; type: string }> => ({ id: '', first_name: '', username: '', type: 'private' }),
+    getFile: async (): Promise<unknown> => ({}),
+  };
+}
+
+private resolveChannelId(chatId: string | number): string | null {
+  const idStr = String(chatId);
+  if (/^[CDG].+$/.test(idStr)) return idStr;
+  if (idStr === 'default' || !idStr) return cache.config.slack_channel_id || null;
+  const channel = this.channels.get(idStr);
+  return channel ? channel.id : idStr;
+}
+
+async stop(): Promise<void> {
+  this.stopping = true;
+  this.started = false;
+  if (this.reconnectTimer) {
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
   }
-
-  /**
-   * Resolves a chatId to a Slack channel ID.
-   */
-  private resolveChannelId(chatId: string | number): string | null {
-    const idStr = String(chatId);
-
-    // If it's already a Slack channel ID (starts with C, G, D)
-    if (/^[CDG].+$/.test(idStr)) return idStr;
-
-    // Check configured channel
-    if (idStr === 'default' || !idStr) {
-      return cache.config.slack_channel_id || null;
-    }
-
-    // Look up by name
-    const channel = this.channels.get(idStr);
-    return channel ? channel.id : idStr;
+  const socket = this.ws;
+  this.ws = null;
+  if (socket) {
+    try { socket.close(); } catch { try { socket.terminate?.(); } catch { /* ignore */ } }
   }
+  await this.inFlight.drain();
+}
 }
 
 export default SlackAddon;
