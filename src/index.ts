@@ -5,6 +5,7 @@ import { Addon } from './interfaces';
 import * as db from './db';
 import * as error from './error';
 import * as eventsApi from './events-api';
+import * as webhooks from './webhooks';
 import TelegramAddon from './addons/telegram';
 import SignalAddon from './addons/signal';
 import SlackAddon from './addons/slack';
@@ -86,6 +87,11 @@ function createAddons(): Addon[] {
 async function main(logs = true) {
   await db.connect();
   await checkAndMigrateDatabase();
+
+  // Durable webhook cursors are initialized before any addon accepts ingress.
+  // New subscribers start at the current event tail; restarts resume the
+  // persisted cursor without losing events produced while the bot was down.
+  await webhooks.startDurableWebhookWorker();
   eventsApi.startEventsApi();
 
   // Run startup recovery: scan chat history to discover highest ticket ID
