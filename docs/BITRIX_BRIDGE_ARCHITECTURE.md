@@ -1,6 +1,6 @@
 # Bitrix24 Support Bridge Architecture
 
-Status: REVIEW CANDIDATE v3  
+Status: APPROVED ARCHITECTURE (independent review APPROVE on normative commit `3cf916ef7352bad8ccd0c3ed3250b10a4f6c9e4f`)  
 Base: `most-core @ 79a94f2b8c9ab7f141af817a55776beb840e674a`  
 Scope: architecture only. No implementation and no production activation.
 
@@ -779,3 +779,15 @@ After independent APPROVE, record only these as future tasks (no implementation 
 - B24-06 — secure image/document transport;
 - B24-07 — failure/reconciliation/security tests, metrics, runbook;
 - B24-08 — shadow rollout and separate activation gate.
+
+
+## 25. Independent review record
+
+Normative architecture reviewed: `3cf916ef7352bad8ccd0c3ed3250b10a4f6c9e4f`
+
+Independent reviewer verdict: **APPROVE**
+
+Blocking issues: none.  
+Required fixes: none.
+
+The approval is architecture-only. It does not authorize implementation, deployment, or production activation. Future implementation tasks remain separately gated.
