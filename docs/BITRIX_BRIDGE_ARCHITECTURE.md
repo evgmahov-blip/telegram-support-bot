@@ -1,612 +1,598 @@
-# Bitrix24 support bridge architecture
+# Bitrix24 Support Bridge Architecture
 
-Status: PROPOSED / review candidate  
+Status: REVIEW CANDIDATE v3  
 Base: `most-core @ 79a94f2b8c9ab7f141af817a55776beb840e674a`  
-Scope: architecture only; no implementation or production activation.
+Scope: architecture only. No implementation and no production activation.
 
 ## 1. Goal
 
-Expose the existing MOST Telegram support workflow in one dedicated Bitrix24 group chat while keeping Bitrix24 non-authoritative and removable.
+Provide one dedicated Bitrix24 group chat as an optional operator UI for the existing MOST Telegram support system.
 
-The Telegram support bot remains the source of truth for tickets, lifecycle, history, routing, authorization and delivery to end users. Bitrix24 is only an optional operator-facing projection and reply ingress.
+The Telegram support bot remains authoritative for:
+- tickets and lifecycle;
+- ticket/message history;
+- staff identity and authorization;
+- routing/queues;
+- audit/events;
+- end-user Telegram delivery.
 
-Removing the Bitrix credentials, bot, chat membership, or the entire bridge must not break Telegram support.
+Bitrix24 is a removable projection/reply surface only.
+
+**Hard invariant:** disabling or deleting Bitrix credentials, bot membership, the bridge process, or the Bitrix integration must not block, corrupt, or change the existing Telegram support path.
 
 ## 2. Non-goals
 
 V1 does not:
-- move ticket state or history into Bitrix24;
-- make Bitrix CRM, Tasks, Disk, Calendar or users authoritative;
-- install code/modules into Bitrix24;
-- expose the support-bot database directly to Bitrix;
-- let Bitrix execute infrastructure actions;
-- synchronize arbitrary Bitrix chats;
-- mirror edits/deletes/reactions;
-- replace the existing Telegram staff chat.
+- move ticket state/history to Bitrix24;
+- make CRM, Tasks, Disk, Calendar, users, or Bitrix roles authoritative;
+- mirror arbitrary Bitrix chats;
+- install code/modules inside Bitrix24;
+- grant Bitrix direct MongoDB access;
+- allow Bitrix to execute infrastructure actions;
+- replace the Telegram staff chat;
+- expose generic support replay/history APIs to the bridge;
+- synchronize edits/deletes/reactions;
+- enable lifecycle commands such as close/take/transfer from Bitrix.
 
-## 3. Architectural decision
-
-Use a separate `bitrix-bridge` process next to support-bot.
+## 3. Topology and trust boundaries
 
 ```text
 Telegram user
     |
     v
-+---------------------------+
-| telegram-support-bot      |
-| authoritative ticket core |
-| MongoDB / TicketMessage   |
-| lifecycle / auth / audit  |
-+-------------+-------------+
-              |
-              | loopback/private integration API
-              | replay events + idempotent reply commands
-              v
-+---------------------------+
-| bitrix-bridge             |
-| local durable spool       |
-| cursor + mappings only    |
-+-------------+-------------+
-              |
-              | outbound HTTPS only
-              v
-+---------------------------+
-| Bitrix24                  |
-| one dedicated group chat  |
-| regular support bot       |
-+---------------------------+
++----------------------------------+
+| telegram-support-bot             |
+| authoritative core               |
+| MongoDB / TicketMessage / audit  |
+| canonical reply outbox           |
++----------------+-----------------+
+                 |
+                 | private integration API only
+                 | projection feed + reply commands
+                 v
++----------------------------------+
+| bitrix-bridge                    |
+| replaceable external adapter     |
+| durable local spool/mappings     |
+| no ticket database               |
++----------------+-----------------+
+                 |
+                 | outbound HTTPS only
+                 v
++----------------------------------+
+| Bitrix24                         |
+| one dedicated support group chat |
+| regular bot, eventMode=fetch     |
++----------------------------------+
 ```
 
-The bridge is not an Addon inside the support-bot process. This keeps Bitrix API churn, credentials, outages and deployment lifecycle outside the core.
+### 3.1 support-bot trust level
 
-## 4. Trust boundaries
+Trusted authoritative component. It owns all business decisions.
 
-### support-bot
+It MUST NOT synchronously depend on Bitrix availability.
 
-Authoritative for:
-- ticket IDs and lifecycle;
-- TicketMessage history;
-- staff authorization;
-- user delivery;
-- audit/event sequence;
-- duplicate suppression.
+### 3.2 bitrix-bridge trust level
 
-It must never depend synchronously on Bitrix availability.
+Lower-trust replaceable adapter.
 
-### bitrix-bridge
-
-A replaceable adapter. It may persist only integration state:
-- support event cursor;
-- Bitrix event cursor;
-- `support_event_id -> bitrix_message_id`;
-- `bitrix_message_id -> ticket_id`;
-- processed external event IDs;
+It may persist only integration state:
+- support projection cursor;
+- Bitrix fetch cursor/state;
+- projection jobs;
+- correlation mappings;
+- processed Bitrix event IDs;
 - retry/quarantine state.
 
-It must not maintain a second ticket database.
+It MUST NOT persist an independent ticket lifecycle or write MongoDB directly.
 
-### Bitrix24
+### 3.3 Bitrix24 trust level
 
-An untrusted external UI boundary. Data received from Bitrix is treated as external input and must pass authorization, size and format validation before becoming a support command.
+External system and operator UI. All Bitrix input is untrusted until validated by support-bot policy.
 
-## 5. Bitrix24 permission model
+## 4. Bitrix permission model
 
-Use Chatbots 2.0 (`imbot.v2.*`) only.
+Use Chatbots 2.0 only: `imbot.v2.*`.
 
-Required design:
-- inbound webhook authorization with only the `imbot` scope;
-- dedicated integration/service user with the least Bitrix permissions practical;
-- bot type: `bot`, not `personal` and not `supervisor`;
-- event mode: `fetch`;
-- bot is added only to one explicitly configured support group chat;
-- no CRM, Tasks, Disk, Calendar or other REST scopes;
-- no public callback URL from our infrastructure.
+Required:
+- dedicated integration/service user where practical;
+- inbound webhook credential with **only `imbot` scope**;
+- separate random `botToken`;
+- bot type = `bot` (not `personal`, not `supervisor`);
+- `eventMode=fetch`;
+- `withUserEvents=false`;
+- bot present only in one explicitly configured support group chat;
+- no `im`, CRM, Tasks, Disk, Calendar, or other REST scopes;
+- no public callback URL on our infrastructure.
 
-A regular bot in a group receives events addressed to it. Therefore V1 requires an operator to reply to the bot's ticket message and address/mention the support bot. This is intentional: it avoids giving the integration visibility into all ordinary Bitrix chat traffic.
+A regular bot receives events addressed to that bot, e.g. by mention. V1 intentionally requires the operator to reply to/mention the bot. Promotion to a bot type that can observe all chat traffic is a separate future security decision.
 
-If a future UX change requires reading every message in that chat, promotion to `personal`/`supervisor` is a separate security decision and is not part of this architecture approval.
+## 5. Verified Bitrix API assumptions
 
-## 6. Support-bot integration contract
+Architecture relies on documented Chatbots 2.0 behavior:
 
-Do not grant the bridge direct MongoDB access.
+### Registration
+`imbot.v2.Bot.register`
+- scope: `imbot`;
+- V1 fields include `type=bot` and `eventMode=fetch`;
+- returned/configured `botId` is pinned in bridge config.
 
-Reuse the persisted sequenced event feed as the outbound source, but message bodies remain in TicketMessage and are not added to generic event metadata.
+### Event polling
+`imbot.v2.Event.get`
+- scope: `imbot`;
+- returns `events`, `nextOffset`, `hasMore`;
+- request `offset=X` confirms all events with IDs less than X;
+- V1 does not use `withUserEvents=true`;
+- only the application that registered the bot may fetch its events.
 
-Add a narrow feature-gated internal API, bound to loopback/private Docker networking:
+### Send
+`imbot.v2.Chat.Message.send`
+- scope: `imbot`;
+- uses exact configured `dialogId=chat...`;
+- supports `replyId`;
+- returns Bitrix message ID.
 
-### Read path
+### Files
+Optional V1 file support uses only:
+- `imbot.v2.File.upload`;
+- `imbot.v2.File.download`.
 
-`GET /integrations/v1/events?since=<seq>&limit=<n>`
+No generic message-read API is required for a regular bot.
 
-May reuse the existing replay cursor semantics.
+Before production activation, B24-03 MUST run a live contract test against the target portal and record the detected API revision/request-response fixtures.
 
-For message events, return a stable `message_ref` in the integration representation. The event log itself does not need to copy the body.
+## 6. Server-enforced Bitrix projection API
 
-`GET /integrations/v1/messages/<message_ref>`
+The bridge MUST NOT receive a credential that can call the generic support event replay API or arbitrary TicketMessage reads.
 
-Returns only the single support message required for an authorized integration event:
-- ticket_id;
-- direction/type;
-- display-safe actor/customer label;
-- text/caption;
-- supported attachment descriptors;
-- timestamps.
+Support-bot exposes a dedicated, feature-gated Bitrix projection endpoint over private networking.
 
-No arbitrary ticket search is required by V1.
+Example logical API:
 
-### Reply path
+`GET /integrations/bitrix/v1/projection?since=<seq>&limit=<n>`
 
-`POST /integrations/v1/replies`
+The server, not the bridge, decides which events are projectable.
 
-Required fields:
-- `integration = bitrix`;
-- `external_event_id`;
-- `external_message_id`;
-- `ticket_id`;
-- `actor_external_id`;
-- text and/or supported attachment reference;
-- optional reply mapping metadata.
+Initial allowlist:
+- `ticket.message.user`;
+- explicitly approved safe ticket-status notices.
 
-The endpoint:
-1. authenticates the bridge token;
-2. rejects an unconfigured integration source;
-3. checks the external actor against an allowlist/mapping;
-4. validates that the target ticket is active and replyable;
-5. durably deduplicates `integration + external_event_id`;
-6. invokes the same canonical staff-reply service used by native staff ingress;
-7. records the result in authoritative support audit/history.
+Explicitly excluded by default:
+- `ticket.message.staff`;
+- `ticket.message.ai`;
+- internal notes;
+- raw audit metadata;
+- authorization changes;
+- credentials/secrets;
+- unrelated lifecycle/internal events.
 
-The bridge must never construct Mongo writes itself.
+Each projection record contains only deterministic redacted fields:
+- support event ID and sequence;
+- ticket display number / opaque ticket reference;
+- safe customer display label;
+- normalized text/caption;
+- approved attachment descriptors;
+- timestamp;
+- optional safe routing/status label.
 
-V1 does not expose lifecycle commands such as close/take/transfer from Bitrix. Those can be designed later after reply transport is proven.
+### 6.1 Event-bound content capabilities
 
-## 7. Actor authorization
+If body/file retrieval is separate from the projection page, the projection record carries an **opaque, unguessable, short-lived capability**.
 
-Bitrix membership alone is not sufficient authorization.
+The capability is server-bound to:
+- integration = Bitrix;
+- integration principal;
+- support event ID;
+- ticket ID;
+- content class;
+- expiry.
 
-Maintain an explicit mapping in support configuration, for example:
+The content endpoint accepts only that capability and verifies all bindings. It does not accept an arbitrary ticket/message ID.
+
+A compromised bridge credential therefore cannot enumerate unrelated ticket history.
+
+## 7. Outbound support -> Bitrix durable protocol
+
+Bridge local storage uses transactional durable state.
+
+Unique job key:
+`support_event_id + projection_kind + portal_id + chat_id`.
+
+For every projection page:
+
+1. fetch projection page from support-bot;
+2. in one local DB transaction:
+   - insert missing projection jobs under the unique key;
+   - persist candidate/new support cursor;
+3. commit;
+4. only after commit may the bridge request the next support page;
+5. Bitrix worker sends jobs asynchronously;
+6. successful send stores `portal_id + chat_id + bitrix_message_id` mapping;
+7. retryable failures use bounded exponential backoff;
+8. permanent or ambiguous sends enter quarantine.
+
+Cursor MUST NOT advance if jobs cannot be durably persisted.
+
+Bitrix outage therefore grows only the bridge's bounded spool and never backpressures the Telegram core.
+
+## 8. Exact Bitrix fetch acknowledgement protocol
+
+Bridge stores explicit fetch state.
+
+Persisted entities:
+- `last_confirmed_offset`;
+- fetched page/batch record with returned event IDs and `nextOffset`;
+- per-event durable job records;
+- page state: `fetched -> durable -> ack_pending -> acknowledged`.
+
+Protocol:
+
+1. Call `Event.get` using `last_confirmed_offset` (or no offset for first fetch).
+2. Validate response shape and monotonicity.
+3. In one local transaction:
+   - persist every returned event under unique key `portal_id + bot_id + event_id`;
+   - persist the returned `nextOffset`;
+   - mark the page `durable`.
+4. Only after that transaction commits, the next `Event.get` call may send the prior `nextOffset`; this is the remote confirmation action.
+5. Before the confirming call, mark page `ack_pending`.
+6. If confirming call returns a valid response, persist local `last_confirmed_offset` and mark prior page `acknowledged`.
+7. If the confirming call times out/has ambiguous outcome, do **not** invent a new local confirmed offset. Retry using the same offset and rely on event-ID uniqueness to suppress any refetched page/events.
+8. Event processing is independent from fetch acknowledgement once events are durably stored.
+
+Thus crash before local durability cannot acknowledge the page; crash after durability may cause safe refetch, not loss.
+
+## 9. Complete inbound Bitrix acceptance predicate
+
+A fetched event may become a support reply command only if ALL conditions pass:
+
+- exact configured portal identity/base URL;
+- exact configured `botId`;
+- exact configured support `dialogId/chatId`;
+- event type is the approved bot-addressed message-add event;
+- event recipient/addressing semantics identify the registered regular bot;
+- sender/author ID exists and is active/acceptable by policy;
+- sender is currently mapped to a canonical MOST staff identity;
+- event references/replies to a known bot projection message;
+- correlation key lookup uses `portal_id + chat_id + bitrix_message_id`;
+- correlated ticket is active/replyable;
+- external event ID has not already been accepted;
+- message/file sizes and content types pass policy.
+
+Fail closed for:
+- DMs;
+- another group;
+- another portal;
+- another bot;
+- unaddressed messages;
+- forwarded/spoofed/ambiguous context;
+- unknown reply target;
+- unknown/deprovisioned actor;
+- incomplete event structures.
+
+Visible `#T123` text is never routing authority.
+
+## 10. Staff identity mapping
+
+Bitrix roles/membership are not sufficient authorization.
+
+Support configuration maintains explicit mapping:
 
 ```yaml
 integration_principals:
   - integration: bitrix
+    portal_id: "nwmost.bitrix24.example"
     external_actor_id: "42"
     canonical_staff_id: "123456789"
 ```
 
-Only mapped Bitrix actors may send a user-visible reply.
+Authorization is evaluated **at processing time**, not only at fetch time. Mapping changes are audited and immediately affect queued work.
 
-Unknown actors may interact with the Bitrix bot but their attempted reply is rejected, logged without message body leakage, and may receive a short "not authorized" response.
+## 11. Canonical durable reply/outbox prerequisite
 
-This preserves the current staff authorization boundary and avoids trusting Bitrix role names.
+Inbound Bitrix replies MUST NOT call a direct Telegram send path.
 
-## 8. Message correlation
+Before Bitrix inbound replies can be activated, support-bot must expose a canonical durable staff-reply command path.
 
-Never use free-form parsing of `#T123` as the authority for routing a reply.
+Unique command key:
+`integration + portal_id + external_event_id`.
 
-Outbound:
-- support event has a stable `event_id` and `ticket_id`;
-- bridge posts the formatted message to Bitrix;
-- bridge stores the returned Bitrix message ID mapped to that ticket/event.
+### 11.1 Atomic authoritative transaction
 
-Inbound:
-- operator replies to the bot's Bitrix message and addresses the bot;
-- bridge resolves the Bitrix `replyId` through its mapping;
-- the resulting ticket_id is sent to the support ingress endpoint.
+One authoritative Mongo transaction MUST atomically:
 
-If there is no valid reply mapping, fail closed and ask the operator to reply to a ticket message.
+- create/find the command receipt;
+- record canonical staff identity and target ticket;
+- append authoritative ticket/history/audit intent;
+- create exactly one Telegram delivery-outbox record;
+- set command state to accepted/queued.
 
-A visible ticket number is for humans only.
+Or persist none of them.
 
-## 9. Delivery semantics and durable spool
+A repeated request with the same unique key returns the existing recorded state/result and MUST NOT invoke reply creation again.
 
-Bitrix must never add latency or availability dependency to Telegram support.
+### 11.2 Delivery worker
 
-### support -> Bitrix
+Only a durable Telegram delivery worker crosses the external Telegram API boundary.
 
-1. bridge reads a page from the authoritative support replay feed;
-2. in one local durable transaction it stores delivery jobs and the new support cursor;
-3. the Bitrix worker sends jobs asynchronously;
-4. successful sends store Bitrix message IDs;
-5. clearly retryable failures use bounded exponential backoff;
-6. malformed/permanent failures go to quarantine.
+States:
+- `accepted`;
+- `queued`;
+- `sending` with lease/fencing token;
+- `delivered`;
+- `failed_safe`;
+- `ambiguous`.
 
-The support cursor advances after the jobs are durably spooled, not after Bitrix accepts them. Therefore a Bitrix outage cannot block support-bot.
+Rules:
+- known non-send may retry under bounded policy;
+- confirmed send -> `delivered`;
+- timeout/crash after send request but before confirmed durable outcome -> `ambiguous`;
+- `ambiguous` is never auto-replayed;
+- explicit operator resolution is required and audited;
+- stale workers cannot advance a newer lease.
 
-### Bitrix -> support
+This is required even if PR #10 provides history idempotence; history dedupe alone does not make Telegram external send exactly once.
 
-Use `imbot.v2.Event.get` in fetch mode.
+## 12. Correlation model
 
-For every fetched page:
-1. persist each external event and intended next offset locally;
-2. only after durable local persistence may the bridge confirm/advance the Bitrix offset;
-3. process persisted events asynchronously against support-bot;
-4. deduplicate by Bitrix event ID;
-5. only authorized reply events become support reply commands.
+Outbound mapping:
+`portal_id + chat_id + bitrix_message_id -> support_event_id + ticket_id`.
 
-This avoids losing a Bitrix reply merely because the bridge crashes after fetching it.
+Inbound reply must resolve through this mapping.
 
-## 10. Ambiguous external sends
+Mapping rows are unique and immutable except explicit reconciliation metadata.
 
-Neither Telegram nor Bitrix provides a general exactly-once send primitive.
+No free-form ticket-number parsing is authoritative.
 
-The system therefore does not claim exactly-once external delivery.
+## 13. Secure attachment flow
 
-For user-visible replies from Bitrix, duplicate delivery to a customer is more harmful than delayed manual recovery. The support ingress implementation must:
-- use a durable command receipt keyed by external event ID;
-- distinguish `accepted`, `sending`, `delivered`, `failed-safe`, and `ambiguous`;
-- automatically retry only when non-delivery is known;
-- quarantine an ambiguous crash/network outcome after the irreversible user-send boundary rather than blindly replaying it.
+V1 optional attachments: text, images/photos, ordinary documents.
 
-PR #10 (`feat/idempotent-ticket-history`) is compatible with and useful for message-history deduplication, but the integration command receipt remains required because persistence idempotence alone does not make an external Telegram send exactly once.
+### 13.1 support -> Bitrix
 
-For support -> Bitrix projection, an ambiguous send is lower risk. Prefer quarantine/inspection over unlimited blind replay.
+1. projection event exposes event-bound file capability;
+2. bridge streams bytes from private support integration endpoint;
+3. server and bridge enforce maximum bytes before/during streaming;
+4. bridge stores temporary retry copy only on quota-controlled bridge storage;
+5. bridge uploads with `imbot.v2.File.upload` to exact configured `dialogId`;
+6. temporary data expires/deletes by retention policy.
 
-## 11. Files
+### 13.2 Bitrix -> support
 
-V1 should support the operationally important set:
-- text;
-- photos/images;
-- ordinary documents.
+1. accepted authenticated event provides file ID/descriptor;
+2. descriptor must belong to expected portal/chat/event context;
+3. bridge calls `imbot.v2.File.download` with registered bot credentials;
+4. returned download URL is treated as a one-time capability;
+5. downloader allows HTTPS only;
+6. hostname must match configured Bitrix portal / explicitly documented allowed Bitrix redirect hosts;
+7. redirect count is bounded;
+8. DNS resolution is revalidated against private/link-local/loopback/reserved-address deny rules unless explicitly required for on-prem portal configuration;
+9. credentials/authorization headers are never forwarded to an unrelated host;
+10. streaming byte cap is enforced regardless of Content-Length;
+11. filename is normalized; path traversal/control characters are stripped;
+12. MIME/extension policy is checked;
+13. support-bot receives bytes/stream + verified metadata, never an arbitrary URL to fetch.
 
-The bridge retrieves only files referenced by integration events and streams them; it does not crawl historical media.
+Arbitrary URLs from message text/attachments are never fetched.
 
-Enforce:
-- size limits;
-- MIME/extension policy;
-- bounded download/upload timeouts;
-- no executable interpretation;
-- no permanent duplicate file store unless needed for retry spool.
+Deployment policy must define executable blocking, file size, retention, optional malware scanning and quarantine before file support activation.
 
-Unsupported media is represented in Bitrix by a safe text notice.
+## 14. Resource isolation and bounded spool
 
-## 12. Data minimization
+Bridge must not exhaust resources required by support-bot/MongoDB.
 
-Send to Bitrix only what support staff need:
-- ticket number;
-- safe customer display label;
-- message content;
-- supported attachments;
-- minimal status marker if useful.
-
-Do not send:
-- Telegram bot token;
-- Mongo identifiers unless they are opaque integration refs;
-- unrelated customer profile data;
-- credentials/secrets found in internal configuration;
-- CRM enrichment by default.
-
-Normal logs contain IDs, event types, sizes, result codes and retry state, not full ticket bodies.
-
-## 13. Network/deployment isolation
-
-Recommended deployment:
-- separate `bitrix-bridge` container/process;
-- no public listening port;
-- private connection only to support-bot integration API;
-- outbound HTTPS allowed only as required for the configured Bitrix portal;
-- secrets injected via protected runtime configuration, never committed;
-- bridge health/readiness separate from support-bot health.
-
-Stopping/restarting the bridge must not restart support-bot.
-
-The integration API remains disabled by default.
-
-## 14. Failure behavior
-
-| Failure | Required behavior |
-|---|---|
-| Bitrix outage | Telegram support continues; local outbound spool grows; alert |
-| Bitrix credential revoked | Telegram support continues; bridge marks auth failure and stops retry storm |
-| bridge stopped/crashed | Telegram support continues; resume from durable cursors |
-| support-bot unavailable | Bitrix bridge waits/retries; Bitrix portal itself unaffected |
-| duplicate support event | no duplicate local job |
-| duplicate Bitrix event | no duplicate support command |
-| unauthorized Bitrix actor | reject, audit metadata only |
-| unknown reply mapping | fail closed; do not guess ticket ID |
-| malformed/oversized file | quarantine/notice; no core crash |
-| queue/disk pressure | pause bridge consumption and alert; never backpressure core |
-| event gap/cursor inconsistency | stop affected direction and require reconciliation |
-
-## 15. Observability
-
-Bridge metrics/status should include:
-- last support seq consumed;
-- last Bitrix offset persisted;
-- pending outbound jobs;
-- pending inbound jobs;
-- retry count;
-- quarantine count;
-- oldest pending age;
-- last successful Bitrix API call;
-- auth status.
-
-No ticket body is required in health output.
-
-## 16. Rollout
-
-1. Architecture approval.
-2. Implement internal integration API behind a disabled feature flag.
-3. Implement bridge with fake Bitrix adapter and failure-injection tests.
-4. Connect a test Bitrix bot/chat with `imbot` scope only.
-5. Outbound shadow mode: support -> Bitrix only.
-6. Enable inbound replies for an explicit small actor allowlist.
-7. Add files.
-8. Run retry/crash/auth-revocation/load tests.
-9. Independent security/reliability review.
-10. Enable in the production support chat by separate activation decision.
-
-No rollout step changes the authoritative Telegram support path.
-
-## 17. Rollback/removal
-
-Rollback is intentionally simple:
-1. disable bridge;
-2. disable integration API;
-3. revoke/delete the Bitrix webhook credential;
-4. remove/unregister the Bitrix bot.
-
-No ticket migration or database rollback is required. Historical support records stay in support-bot. Bridge mapping/spool data may be archived or deleted after reconciliation.
-
-## 18. Acceptance criteria for implementation
-
-Implementation is acceptable only if tests demonstrate:
-- Bitrix completely unavailable while Telegram ticket/reply flows remain healthy;
-- deleting Bitrix credentials cannot corrupt or block core state;
-- duplicate events do not produce duplicate authoritative history writes;
-- an unauthorized Bitrix user cannot reply to a customer;
-- replies without valid message correlation are rejected;
-- cursors survive bridge restart;
-- queue growth is bounded/observable;
-- no public bridge listener is required;
-- only the `imbot` Bitrix scope is needed;
-- integration can be removed without ticket migration;
-- ambiguous post-send failures do not trigger blind user-visible replay.
-
-## 19. Future tasks after architecture approval
-
-Create implementation tasks only after this document receives an independent APPROVE:
-
-- B24-01: generic internal integration API + auth/principal mapping;
-- B24-02: durable standalone bridge skeleton and local spool;
-- B24-03: Bitrix `imbot.v2` registration/fetch/send adapter with least privilege;
-- B24-04: support -> Bitrix text projection and correlation;
-- B24-05: Bitrix -> support authorized reply ingress and command receipts;
-- B24-06: image/document transport;
-- B24-07: failure injection, security tests, observability and operator runbook;
-- B24-08: shadow rollout and separate production activation gate.
-
-
-## 20. Mandatory security and reliability refinements after independent review
-
-This section is normative and supersedes any earlier ambiguous wording.
-
-### 20.1 Bridge read access is projection-specific, not generic replay access
-
-The Bitrix bridge credential MUST NOT grant access to the generic privileged event replay API or arbitrary TicketMessage retrieval.
-
-Implement a dedicated server-side Bitrix projection endpoint whose policy is fixed by support-bot configuration:
-
-- allow only explicitly projectable event types, initially `ticket.message.user` and selected safe ticket-status notices;
-- deny `ticket.message.staff`, `ticket.message.ai`, internal notes, audit metadata, authorization events, and unrelated lifecycle data unless separately approved;
-- apply deterministic server-side redaction/projection before content leaves support-bot;
-- return only fields required for the Bitrix UI;
-- use opaque, unguessable, event-bound message capabilities;
-- bind each message capability to `integration=bitrix + event_id + ticket_id + allowed content class`;
-- expire capabilities quickly and reject reuse outside their bound event where practical;
-- never accept a caller-supplied ticket ID or arbitrary message ID as authority for reads.
-
-A compromised bridge credential therefore cannot enumerate support history.
-
-### 20.2 Complete inbound Bitrix acceptance predicate
-
-A Bitrix reply is accepted only when ALL of these match configured values:
-
-- exact portal origin/base URL;
-- exact registered `botId`;
-- exact dedicated support `dialogId/chatId`;
-- event type is an allowed bot-addressed message event;
-- event is delivered to the registered regular bot according to Bitrix bot-addressing semantics;
-- sender/author ID is present and current;
-- sender is mapped to a canonical MOST staff identity at processing time;
-- replied-to Bitrix message mapping exists;
-- mapping key is scoped as `portal_id + chat_id + bitrix_message_id`;
-- mapped ticket is still replyable;
-- external event ID has not already been accepted.
-
-Events from DMs, any other group, another portal, another bot, forwarded/spoofed context, unknown reply targets, or incomplete event structures fail closed.
-
-Authorization is re-evaluated when the durable inbound job is processed, not merely when fetched, so deprovisioning or mapping changes take effect promptly.
-
-### 20.3 Durable reply-command protocol and irreversible Telegram boundary
-
-Inbound Bitrix replies MUST NOT call the current direct Telegram-send path synchronously.
-
-Before inbound Bitrix replies can be enabled, the core MUST expose a canonical durable staff-reply command path shared by integration ingress. Its persistence invariant is:
-
-1. atomically create/find a unique command receipt keyed by `integration + portal + external_event_id`;
-2. atomically persist canonical reply intent, authoritative history/audit intent, and a durable user-delivery outbox record, or persist none of them;
-3. commit before any external Telegram send;
-4. a retry with the same key returns the recorded command state/result and MUST NOT invoke reply creation again;
-5. a delivery worker alone crosses the Telegram API boundary;
-6. after a confirmed Telegram response, mark delivery `delivered`;
-7. a known non-send may retry under bounded policy;
-8. a crash/timeout after the send request but before durable confirmation becomes `ambiguous` and is never automatically replayed;
-9. resolving `ambiguous` requires an explicit audited operator action.
-
-Receipt/outbox state transitions use CAS/fencing so stale workers cannot advance newer attempts.
-
-This is a prerequisite for B24 inbound activation, not an optional optimization.
-
-### 20.4 Verified Bitrix fetch semantics
-
-Architecture relies only on documented `imbot.v2.Event.get` fetch mode semantics:
-
-- scope required for bot events: `imbot`;
-- bot must be registered with `eventMode=fetch`;
-- `offset` confirms all events with IDs lower than the supplied value;
-- response provides `events`, `nextOffset`, and `hasMore`;
-- the next call uses the persisted `nextOffset`;
-- user-wide `ONIMV2*` events require `withUserEvents=true` plus the broader `im` scope and a subscription; V1 MUST keep `withUserEvents=false` and MUST NOT request `im`;
-- regular bots receive events addressed to that bot (for example by mention) and do not receive all traffic in the chat;
-- only the application that registered a bot may fetch that bot's events.
-
-Bridge protocol:
-
-1. call `Event.get` using the last durably confirmed offset;
-2. durably store the returned event batch and candidate `nextOffset`;
-3. only after that local transaction commits may the bridge issue the next fetch using that `nextOffset`, thereby confirming the prior batch;
-4. process stored events asynchronously;
-5. duplicate stored/fetched events are suppressed by a unique key including portal, bot and Bitrix event ID.
-
-Implementation must include a compatibility test against the target Bitrix portal and record the detected Chatbots 2.0 revision before production activation.
-
-### 20.5 Outbound support -> Bitrix transactional invariant
-
-Local bridge storage MUST enforce:
-
-- unique key on `support_event_id + projection_kind + target_portal + target_chat`;
-- atomic transaction that inserts all jobs for a replay page and advances the support cursor;
-- cursor never advances if job persistence fails;
-- retries never create a second job for the same key.
-
-If local spool state is lost or an event gap is detected, normal processing stops. Reconciliation compares the authoritative support sequence with stored mappings. Historical re-projection requires an explicit operator-approved range and must use the same unique keys.
-
-### 20.6 Hard resource isolation
-
-The bridge must be unable to exhaust resources required by support-bot or MongoDB.
-
-Production deployment MUST include:
-
-- separate quota-controlled persistent volume for bridge spool/quarantine;
-- explicit maximum spool bytes and job count;
-- high-water and critical-water thresholds;
+Mandatory production limits:
+- separate quota-controlled persistent volume for spool/quarantine;
+- reserved free-space threshold;
+- max spool bytes;
+- max job count;
+- high-water and critical-water marks;
 - CPU quota/weight;
 - memory limit;
 - PID limit;
 - file-descriptor limit;
 - bounded worker concurrency;
-- bounded HTTP response/body sizes;
-- request/connect/read timeouts;
-- retry-rate caps and circuit breaking.
+- bounded outbound connections;
+- integration API rate limits;
+- request/body/download byte limits;
+- connect/read/total timeouts;
+- Bitrix API rate limiting/backoff/circuit breaker.
 
-At high-water, bridge pauses external consumption before disk exhaustion. At critical-water it stops projection/fetch, alerts, and preserves the core.
+Behavior:
+- at high-water: pause new projection/fetch intake and alert;
+- at critical-water: stop bridge external intake, preserve durable state, alert;
+- never backpressure or stop Telegram support;
+- projection loss/drop is allowed only by explicit operator decision because Bitrix is non-authoritative, and is recorded for reconciliation.
 
-Dropping/quarantining projection data is allowed only under a documented operator policy because Bitrix is non-authoritative. Such loss MUST be visible in status and reconciliation records and MUST never backpressure Telegram support.
+## 15. Reconciliation protocol
 
-### 20.7 Secure attachment flows
+Authoritative sources:
+- support side: support-bot projection sequence/event IDs and authoritative ticket/outbox records;
+- Bitrix side: durable fetched event IDs plus bridge mappings; Bitrix itself is not ticket authority.
 
-V1 attachment support is implemented only through authenticated platform APIs and event-bound identifiers.
+### 15.1 Support projection gap/lost spool
 
-Support -> Bitrix:
-- support-bot issues an opaque one-time/short-lived file capability bound to the projectable support event;
-- bridge streams that content from the private support integration endpoint with strict byte limit;
-- bridge sends it through `imbot.v2.File.upload` to the configured `dialogId`;
-- temporary retry storage is on the quota-controlled bridge volume and is deleted by retention policy.
+1. stop outbound direction;
+2. record gap start/end or last known event sequence;
+3. query support-bot for projection range using integration-specific API;
+4. compare expected projection event IDs against local jobs/mappings;
+5. recreate only missing local jobs under the same unique keys;
+6. never resend mappings already marked successful;
+7. ambiguous external-send rows require operator decision;
+8. operator approves reconciliation range/action;
+9. completion requires contiguous projection cursor and zero unexplained gaps;
+10. audit reconciliation result.
 
-Bitrix -> support:
-- inbound event must identify an allowed file belonging to the authenticated configured portal/chat/event;
-- bridge calls `imbot.v2.File.download` with its registered `botId/botToken` and that file ID;
-- returned download URL is treated as a one-time capability;
-- bridge validates HTTPS, host against the configured Bitrix portal/official redirect policy, redirect count, resolved-address policy, content length and streaming byte cap before fetching;
-- arbitrary URLs from message text/attachments are never fetched;
-- support-bot ingress receives bytes/stream plus verified metadata, never a caller-controlled URL to fetch itself.
+### 15.2 Bitrix fetch gap/state loss
 
-No attachment path may perform arbitrary SSRF.
+1. stop inbound direction;
+2. preserve current local confirmed offset and fetched-event records;
+3. retry same documented offset where possible;
+4. deduplicate any returned events by `portal + bot + event_id`;
+5. if Bitrix retention/API no longer permits retrieval of a missing range, mark a permanent external-source gap;
+6. do not synthesize replies;
+7. require operator acknowledgement and audit before moving to a new safe offset.
 
-Allowed MIME/extensions, executable blocking policy, maximum decoded/upload size, quarantine behavior, retention, and optional malware scanning are deployment policy and must be explicit before file support activation.
+### 15.3 Mapping loss/orphans
 
-### 20.8 Credential model
+Rebuild only from durable support projection jobs and stored Bitrix send results where unambiguous.
 
-The Bitrix side uses a dedicated inbound-webhook credential owned by a dedicated integration/service user where practical, with only `imbot` scope, plus a distinct random botToken for the registered bot.
+Unknown/ambiguous external sends are never assumed successful or blindly resent.
 
-The support side uses a separate Bitrix-bridge credential that is:
+## 16. Quarantine and manual recovery
 
-- integration-specific;
-- audience/endpoint restricted;
-- revocable independently;
-- rotatable;
-- never accepted by generic administrative APIs.
+Quarantine is access-controlled operator state.
 
-Private loopback/container networking is mandatory; mutual authentication or an equivalent service identity is preferred where supported.
+Each item records only bounded diagnostics:
+- immutable source IDs;
+- reason class/error code;
+- timestamps;
+- attempt count;
+- state;
+- no unnecessary message body.
 
-No secrets are written to normal logs or bridge mapping records.
+Allowed actions:
+- discard;
+- retry-safe;
+- reconcile;
+- resolve-ambiguous.
 
-### 20.9 Deterministic projection and audit policy
+All actions are audited. Ambiguous user-visible Telegram sends cannot use generic retry.
 
-Server-enforced Bitrix projection defines exact fields for each event class. V1 customer-message projection may include only:
-- ticket display number;
-- configured safe customer display label;
-- customer text/caption after size/control-character normalization;
-- approved attachment metadata/content;
-- timestamp;
-- visible routing/status label if explicitly configured.
+## 17. Credential model
 
-Internal notes, staff-only draft text, hidden audit metadata, credentials, raw database IDs, and unrelated profile fields are excluded.
+### Bitrix
+- dedicated webhook credential;
+- only `imbot` scope;
+- dedicated service/integration user where practical;
+- separate random botToken;
+- rotate/revoke independently;
+- secrets never committed/logged.
 
-Security/audit records retain identifiers only:
-- portal ID/base;
+### support-bot internal
+- dedicated Bitrix-bridge credential;
+- integration-specific audience;
+- accepted only by Bitrix integration endpoints;
+- independently revocable/rotatable;
+- private loopback/container network;
+- mTLS or equivalent service identity preferred where available.
+
+Generic admin APIs must not accept this credential.
+
+## 18. Data minimization and logging
+
+Only project operationally needed customer support content.
+
+Do not project:
+- internal notes;
+- AI/staff drafts;
+- raw audit metadata;
+- unrelated customer profile data;
+- database internals;
+- secrets/credentials.
+
+Security audit identifiers may include:
+- portal ID;
 - bot ID;
-- chat/dialog ID;
-- Bitrix event/message IDs;
-- support event/ticket IDs;
-- external actor ID and mapped canonical staff ID;
+- chat ID;
+- external event/message ID;
+- support event/ticket ID;
+- external actor ID;
+- mapped staff ID;
 - authorization/correlation decision;
-- command-receipt/delivery state;
-- reason/error code.
+- command/outbox state;
+- error code.
 
-Normal audit/logging does not copy message bodies.
+Normal logs do not contain full ticket bodies.
 
-### 20.10 Quarantine and ambiguous recovery
+## 19. Failure behavior
 
-Quarantine is access-controlled operator state, not an automatic retry bucket.
+| Failure | Required behavior |
+|---|---|
+| Bitrix unavailable | Telegram support healthy; bridge bounded spool/backoff |
+| Bitrix auth revoked | core healthy; bridge opens auth circuit/alerts |
+| bridge down | core healthy; resume durable cursors |
+| support-bot temporarily down | Bitrix bridge waits; Bitrix portal unaffected |
+| duplicate support projection | unique job suppresses duplicate |
+| duplicate Bitrix event | unique event/command receipt suppresses duplicate |
+| wrong chat/portal/bot | reject |
+| unauthorized actor | reject and audit IDs only |
+| unknown reply mapping | reject; never guess ticket |
+| ambiguous Telegram send | quarantine/manual audited resolution |
+| spool pressure | pause bridge before core resource pressure |
+| event gap | stop affected direction and reconcile |
+| malicious file reference | reject/quarantine; no arbitrary fetch |
 
-Each item has:
-- reason class;
-- immutable source identifiers;
-- first/last attempt timestamps;
-- bounded diagnostic metadata;
-- retention deadline;
-- explicit actions such as discard, retry-safe, reconcile, or resolve-ambiguous.
+## 20. Observability
 
-Actions are audited. `ambiguous` user-visible deliveries cannot use generic retry.
+Bridge status/metrics:
+- support projection cursor;
+- Bitrix last confirmed offset;
+- fetched/durable/ack-pending page count;
+- pending outbound/inbound jobs;
+- retry/quarantine counts;
+- oldest pending age;
+- spool bytes/jobs vs quota;
+- last successful Bitrix API call;
+- auth/circuit status;
+- reconciliation-required flag.
 
-### 20.11 Additional mandatory tests
+No message bodies in health output.
 
-Implementation tests MUST include:
-- bridge credential attempts to enumerate unrelated support events/messages;
-- valid mapped employee replying from wrong Bitrix DM/group;
-- same numeric Bitrix message ID in another chat/portal;
-- unexpected bot ID and portal origin;
-- mapping revoked after fetch but before processing;
-- duplicate `Event.get` batches;
-- crash injection before/after every inbound receipt/outbox transition;
-- crash/timeouts around Telegram send producing safe `ambiguous` state;
-- spool disk/high-water exhaustion while core Telegram path remains healthy;
-- malformed and oversized event bodies;
-- malicious attachment URLs, redirects, DNS/address tricks and mismatched file/chat IDs;
-- Bitrix auth revocation and API throttling;
-- support replay gap and operator-approved reconciliation;
-- regular-bot behavior proving no `im` scope and no `withUserEvents`.
+## 21. Rollout gates
 
-## 21. Bitrix24 API compatibility appendix
+1. Architecture independent APPROVE.
+2. B24-01: integration-specific projection API + staff principal mapping + canonical durable reply/outbox prerequisite.
+3. B24-02: standalone bridge + transactional spool/cursors + resource isolation.
+4. B24-03: `imbot.v2` adapter + API compatibility/live contract proof.
+5. B24-04: support -> Bitrix text projection/correlation in shadow mode.
+6. B24-05: Bitrix -> support replies for explicit actor allowlist.
+7. B24-06: optional files after file-security tests.
+8. B24-07: failure injection, reconciliation, observability, operator runbook, independent security/reliability review.
+9. B24-08: separate production activation decision.
 
-The design targets Chatbots 2.0 only.
+No implementation task may enable inbound replies before B24-01 durable command/outbox invariants exist.
 
-Required methods:
-- `imbot.v2.Bot.register` — register `type=bot`, `eventMode=fetch`;
-- `imbot.v2.Event.get` — bot-event polling with explicit offset confirmation;
-- `imbot.v2.Chat.Message.send` — post/reply as the bot using configured `dialogId`;
-- `imbot.v2.File.upload` — optional outbound file send;
-- `imbot.v2.File.download` — optional authenticated download capability.
+## 22. Required implementation tests
 
-V1 MUST NOT use `withUserEvents=true`, `im.v2.Event.subscribe`, generic `im` scope, supervisor bot type, or arbitrary message-read APIs.
+Must prove:
+- complete Bitrix outage does not affect Telegram ticket/reply path;
+- bridge credential cannot enumerate unrelated support content;
+- mapped employee from wrong Bitrix DM/group is rejected;
+- same numeric message ID in another chat/portal cannot collide;
+- wrong portal/bot/event context is rejected;
+- actor mapping revoked after fetch but before processing is rejected;
+- duplicate Bitrix pages/events are idempotent;
+- crash injection around every command/outbox transition is safe;
+- ambiguous post-Telegram-send state is not blindly replayed;
+- support projection cursor/job transaction survives crash;
+- Bitrix ack-pending ambiguous call safely refetches/dedupes;
+- spool high-water/critical-water leaves core healthy;
+- malicious URL/redirect/DNS/file cases cannot cause SSRF;
+- auth revocation/throttling opens bounded retry/circuit behavior;
+- gap reconciliation is auditable and does not duplicate confirmed sends;
+- V1 works with `imbot` scope only and `withUserEvents=false`.
 
-Before implementation begins, B24-03 must pin the exact request/response fields from the official API and add compatibility fixtures. Before activation it must run a live contract test against the actual portal because `imbot.v2` is versioned/evolving.
+## 23. Rollback/removal
 
-## 22. Review-gate effect
+Removal:
+1. stop/disable bridge;
+2. disable Bitrix integration endpoints/credential;
+3. revoke/delete Bitrix webhook credential;
+4. unregister/remove Bitrix bot.
 
-Independent review findings in this section are blocking architecture requirements.
+No ticket migration or authoritative database rollback is required.
 
-No B24 implementation task may enable inbound customer replies until sections 20.1-20.11 are implemented and independently verified.
+Historical support data remains entirely in support-bot.
 
-Future-task decomposition remains B24-01 through B24-08, but B24-01 must include the durable canonical reply-command/outbox prerequisite and B24-03 must include the live Bitrix API compatibility proof.
+## 24. Future task list after architecture approval
+
+After independent APPROVE, record only these as future tasks (no implementation yet):
+
+- B24-01 — integration projection API, principal mapping, canonical reply/outbox;
+- B24-02 — durable standalone bridge, cursors/spool, quotas;
+- B24-03 — Bitrix imbot.v2 adapter and live compatibility proof;
+- B24-04 — outbound text projection and correlation;
+- B24-05 — authorized inbound replies and command receipts;
+- B24-06 — secure image/document transport;
+- B24-07 — failure/reconciliation/security tests, metrics, runbook;
+- B24-08 — shadow rollout and separate activation gate.
