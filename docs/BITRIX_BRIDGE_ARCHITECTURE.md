@@ -213,18 +213,41 @@ Server behavior:
 6. create an opaque, unguessable `page_token` bound to:
    - integration identity;
    - checkpoint version;
+   - immutable pending-page ID;
    - `scan_from_seq`;
    - `scan_to_seq`;
    - projection policy version;
-   - expiry;
-7. persist the pending page descriptor server-side;
+   - token generation;
+7. persist the immutable pending page descriptor server-side;
 8. return projectable records plus `page_token`, `scan_from_seq`, `scan_to_seq`, and current authoritative high-watermark.
 
 The bridge cannot request an earlier range or arbitrary history.
 
-`projection/ack` accepts only the currently pending `page_token`. On valid ack, support-bot atomically advances `last_scanned_seq = scan_to_seq` and clears the pending page.
+### 6.2.1 Pending page token state machine
 
-If the bridge crashes after receiving a page but before ack, the same page is returned again. Bridge-side unique job keys make this safe.
+The **pending page descriptor itself does not expire while it is the current unacknowledged page**. Only bearer tokens used to acknowledge it have bounded validity.
+
+If the bridge presents an expired page token to `projection/next` or `projection/ack`, support-bot does not change the pending page or checkpoint. Instead, after authenticating the same integration principal, it may atomically mint a new token generation for the **same immutable pending-page ID, same scan_from_seq, same scan_to_seq, same projection policy version**.
+
+Reissue rules:
+- reissue never rescans or changes page membership;
+- old expired generations become invalid for new acknowledgements;
+- `projection/ack` is idempotent by pending-page ID;
+- if an acknowledgement for that page already committed, replaying any token for the same page returns the recorded acknowledged result and never advances twice;
+- if token state is corrupted or the immutable pending page cannot be reconstructed exactly, the server returns `PROJECTION_RECONCILIATION_REQUIRED` and does not advance the checkpoint;
+- revoking the integration credential invalidates token reissue and ack.
+
+`projection/ack` on the current valid token atomically:
+1. verifies the immutable pending-page ID and current checkpoint version;
+2. sets `last_scanned_seq = scan_to_seq`;
+3. records the acknowledged pending-page ID/result;
+4. clears current pending-page state.
+
+If the bridge crashes after receiving a page but before local commit, the same immutable page is returned/reissued.
+If it crashes after local commit but before ack, the same immutable page is returned/reissued and bridge unique job keys suppress duplicates.
+If ack outcome is ambiguous, retrying the same pending-page acknowledgement returns either the same still-pending page or the already-recorded idempotent acknowledged result.
+
+Failure-injection tests MUST cover token expiry/reissue before local commit, after local commit before ack, during ambiguous ack, and after acknowledged-result replay.
 
 Filtered sequence gaps are normal because the cursor represents **scanned authoritative sequence**, not count of returned projection rows.
 
@@ -468,13 +491,17 @@ V1 optional attachments: text, images/photos, ordinary documents.
 4. returned download URL is treated as a one-time capability;
 5. downloader allows HTTPS only;
 6. hostname must match configured Bitrix portal / explicitly documented allowed Bitrix redirect hosts;
-7. redirect count is bounded;
-8. DNS resolution is revalidated against private/link-local/loopback/reserved-address deny rules unless explicitly required for on-prem portal configuration;
-9. credentials/authorization headers are never forwarded to an unrelated host;
-10. streaming byte cap is enforced regardless of Content-Length;
-11. filename is normalized; path traversal/control characters are stripped;
-12. MIME/extension policy is checked;
-13. support-bot receives bytes/stream + verified metadata, never an arbitrary URL to fetch.
+7. redirects are handled manually, not by an unconstrained HTTP client's automatic redirect logic, and redirect count is bounded;
+8. for the current URL, a controlled resolver obtains the address set; prohibited private/link-local/loopback/reserved destinations are rejected unless explicitly configured for an on-prem portal;
+9. the outbound TCP connection is made **only to one of the already validated IP addresses** (or through an equivalently constrained egress proxy that enforces the same destination set); the HTTP client MUST NOT perform an unchecked second DNS resolution;
+10. TLS hostname/SNI/certificate validation remains against the expected Bitrix hostname while connecting to the pinned validated IP;
+11. every redirect repeats hostname allowlist validation, controlled resolution, prohibited-address checks, IP pinning, and TLS-hostname validation before connecting;
+12. dual-stack A/AAAA results are all policy-checked and connection fallback may use only validated addresses;
+13. credentials/authorization headers are stripped on any host change and are never forwarded to an unrelated host;
+14. streaming byte cap is enforced regardless of Content-Length;
+15. filename is normalized; path traversal/control characters are stripped;
+16. MIME/extension policy is checked;
+17. support-bot receives bytes/stream + verified metadata, never an arbitrary URL to fetch.
 
 Arbitrary URLs from message text/attachments are never fetched.
 
@@ -672,7 +699,7 @@ Must prove:
 - support projection cursor/job transaction survives crash;
 - Bitrix ack-pending ambiguous call safely refetches/dedupes;
 - spool high-water/critical-water leaves core healthy;
-- malicious URL/redirect/DNS/file cases cannot cause SSRF;
+- malicious URL/redirect/DNS/file cases cannot cause SSRF, including DNS rebinding, dual-stack address switching, proxy re-resolution and validation/connect TOCTOU;
 - auth revocation/throttling opens bounded retry/circuit behavior;
 - gap reconciliation is auditable and does not duplicate confirmed sends;
 - V1 works with `imbot` scope only and `withUserEvents=false`.
