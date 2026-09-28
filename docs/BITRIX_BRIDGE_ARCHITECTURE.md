@@ -374,3 +374,239 @@ Create implementation tasks only after this document receives an independent APP
 - B24-06: image/document transport;
 - B24-07: failure injection, security tests, observability and operator runbook;
 - B24-08: shadow rollout and separate production activation gate.
+
+
+## 20. Mandatory security and reliability refinements after independent review
+
+This section is normative and supersedes any earlier ambiguous wording.
+
+### 20.1 Bridge read access is projection-specific, not generic replay access
+
+The Bitrix bridge credential MUST NOT grant access to the generic privileged event replay API or arbitrary TicketMessage retrieval.
+
+Implement a dedicated server-side Bitrix projection endpoint whose policy is fixed by support-bot configuration:
+
+- allow only explicitly projectable event types, initially `ticket.message.user` and selected safe ticket-status notices;
+- deny `ticket.message.staff`, `ticket.message.ai`, internal notes, audit metadata, authorization events, and unrelated lifecycle data unless separately approved;
+- apply deterministic server-side redaction/projection before content leaves support-bot;
+- return only fields required for the Bitrix UI;
+- use opaque, unguessable, event-bound message capabilities;
+- bind each message capability to `integration=bitrix + event_id + ticket_id + allowed content class`;
+- expire capabilities quickly and reject reuse outside their bound event where practical;
+- never accept a caller-supplied ticket ID or arbitrary message ID as authority for reads.
+
+A compromised bridge credential therefore cannot enumerate support history.
+
+### 20.2 Complete inbound Bitrix acceptance predicate
+
+A Bitrix reply is accepted only when ALL of these match configured values:
+
+- exact portal origin/base URL;
+- exact registered `botId`;
+- exact dedicated support `dialogId/chatId`;
+- event type is an allowed bot-addressed message event;
+- event is delivered to the registered regular bot according to Bitrix bot-addressing semantics;
+- sender/author ID is present and current;
+- sender is mapped to a canonical MOST staff identity at processing time;
+- replied-to Bitrix message mapping exists;
+- mapping key is scoped as `portal_id + chat_id + bitrix_message_id`;
+- mapped ticket is still replyable;
+- external event ID has not already been accepted.
+
+Events from DMs, any other group, another portal, another bot, forwarded/spoofed context, unknown reply targets, or incomplete event structures fail closed.
+
+Authorization is re-evaluated when the durable inbound job is processed, not merely when fetched, so deprovisioning or mapping changes take effect promptly.
+
+### 20.3 Durable reply-command protocol and irreversible Telegram boundary
+
+Inbound Bitrix replies MUST NOT call the current direct Telegram-send path synchronously.
+
+Before inbound Bitrix replies can be enabled, the core MUST expose a canonical durable staff-reply command path shared by integration ingress. Its persistence invariant is:
+
+1. atomically create/find a unique command receipt keyed by `integration + portal + external_event_id`;
+2. atomically persist canonical reply intent, authoritative history/audit intent, and a durable user-delivery outbox record, or persist none of them;
+3. commit before any external Telegram send;
+4. a retry with the same key returns the recorded command state/result and MUST NOT invoke reply creation again;
+5. a delivery worker alone crosses the Telegram API boundary;
+6. after a confirmed Telegram response, mark delivery `delivered`;
+7. a known non-send may retry under bounded policy;
+8. a crash/timeout after the send request but before durable confirmation becomes `ambiguous` and is never automatically replayed;
+9. resolving `ambiguous` requires an explicit audited operator action.
+
+Receipt/outbox state transitions use CAS/fencing so stale workers cannot advance newer attempts.
+
+This is a prerequisite for B24 inbound activation, not an optional optimization.
+
+### 20.4 Verified Bitrix fetch semantics
+
+Architecture relies only on documented `imbot.v2.Event.get` fetch mode semantics:
+
+- scope required for bot events: `imbot`;
+- bot must be registered with `eventMode=fetch`;
+- `offset` confirms all events with IDs lower than the supplied value;
+- response provides `events`, `nextOffset`, and `hasMore`;
+- the next call uses the persisted `nextOffset`;
+- user-wide `ONIMV2*` events require `withUserEvents=true` plus the broader `im` scope and a subscription; V1 MUST keep `withUserEvents=false` and MUST NOT request `im`;
+- regular bots receive events addressed to that bot (for example by mention) and do not receive all traffic in the chat;
+- only the application that registered a bot may fetch that bot's events.
+
+Bridge protocol:
+
+1. call `Event.get` using the last durably confirmed offset;
+2. durably store the returned event batch and candidate `nextOffset`;
+3. only after that local transaction commits may the bridge issue the next fetch using that `nextOffset`, thereby confirming the prior batch;
+4. process stored events asynchronously;
+5. duplicate stored/fetched events are suppressed by a unique key including portal, bot and Bitrix event ID.
+
+Implementation must include a compatibility test against the target Bitrix portal and record the detected Chatbots 2.0 revision before production activation.
+
+### 20.5 Outbound support -> Bitrix transactional invariant
+
+Local bridge storage MUST enforce:
+
+- unique key on `support_event_id + projection_kind + target_portal + target_chat`;
+- atomic transaction that inserts all jobs for a replay page and advances the support cursor;
+- cursor never advances if job persistence fails;
+- retries never create a second job for the same key.
+
+If local spool state is lost or an event gap is detected, normal processing stops. Reconciliation compares the authoritative support sequence with stored mappings. Historical re-projection requires an explicit operator-approved range and must use the same unique keys.
+
+### 20.6 Hard resource isolation
+
+The bridge must be unable to exhaust resources required by support-bot or MongoDB.
+
+Production deployment MUST include:
+
+- separate quota-controlled persistent volume for bridge spool/quarantine;
+- explicit maximum spool bytes and job count;
+- high-water and critical-water thresholds;
+- CPU quota/weight;
+- memory limit;
+- PID limit;
+- file-descriptor limit;
+- bounded worker concurrency;
+- bounded HTTP response/body sizes;
+- request/connect/read timeouts;
+- retry-rate caps and circuit breaking.
+
+At high-water, bridge pauses external consumption before disk exhaustion. At critical-water it stops projection/fetch, alerts, and preserves the core.
+
+Dropping/quarantining projection data is allowed only under a documented operator policy because Bitrix is non-authoritative. Such loss MUST be visible in status and reconciliation records and MUST never backpressure Telegram support.
+
+### 20.7 Secure attachment flows
+
+V1 attachment support is implemented only through authenticated platform APIs and event-bound identifiers.
+
+Support -> Bitrix:
+- support-bot issues an opaque one-time/short-lived file capability bound to the projectable support event;
+- bridge streams that content from the private support integration endpoint with strict byte limit;
+- bridge sends it through `imbot.v2.File.upload` to the configured `dialogId`;
+- temporary retry storage is on the quota-controlled bridge volume and is deleted by retention policy.
+
+Bitrix -> support:
+- inbound event must identify an allowed file belonging to the authenticated configured portal/chat/event;
+- bridge calls `imbot.v2.File.download` with its registered `botId/botToken` and that file ID;
+- returned download URL is treated as a one-time capability;
+- bridge validates HTTPS, host against the configured Bitrix portal/official redirect policy, redirect count, resolved-address policy, content length and streaming byte cap before fetching;
+- arbitrary URLs from message text/attachments are never fetched;
+- support-bot ingress receives bytes/stream plus verified metadata, never a caller-controlled URL to fetch itself.
+
+No attachment path may perform arbitrary SSRF.
+
+Allowed MIME/extensions, executable blocking policy, maximum decoded/upload size, quarantine behavior, retention, and optional malware scanning are deployment policy and must be explicit before file support activation.
+
+### 20.8 Credential model
+
+The Bitrix side uses a dedicated inbound-webhook credential owned by a dedicated integration/service user where practical, with only `imbot` scope, plus a distinct random botToken for the registered bot.
+
+The support side uses a separate Bitrix-bridge credential that is:
+
+- integration-specific;
+- audience/endpoint restricted;
+- revocable independently;
+- rotatable;
+- never accepted by generic administrative APIs.
+
+Private loopback/container networking is mandatory; mutual authentication or an equivalent service identity is preferred where supported.
+
+No secrets are written to normal logs or bridge mapping records.
+
+### 20.9 Deterministic projection and audit policy
+
+Server-enforced Bitrix projection defines exact fields for each event class. V1 customer-message projection may include only:
+- ticket display number;
+- configured safe customer display label;
+- customer text/caption after size/control-character normalization;
+- approved attachment metadata/content;
+- timestamp;
+- visible routing/status label if explicitly configured.
+
+Internal notes, staff-only draft text, hidden audit metadata, credentials, raw database IDs, and unrelated profile fields are excluded.
+
+Security/audit records retain identifiers only:
+- portal ID/base;
+- bot ID;
+- chat/dialog ID;
+- Bitrix event/message IDs;
+- support event/ticket IDs;
+- external actor ID and mapped canonical staff ID;
+- authorization/correlation decision;
+- command-receipt/delivery state;
+- reason/error code.
+
+Normal audit/logging does not copy message bodies.
+
+### 20.10 Quarantine and ambiguous recovery
+
+Quarantine is access-controlled operator state, not an automatic retry bucket.
+
+Each item has:
+- reason class;
+- immutable source identifiers;
+- first/last attempt timestamps;
+- bounded diagnostic metadata;
+- retention deadline;
+- explicit actions such as discard, retry-safe, reconcile, or resolve-ambiguous.
+
+Actions are audited. `ambiguous` user-visible deliveries cannot use generic retry.
+
+### 20.11 Additional mandatory tests
+
+Implementation tests MUST include:
+- bridge credential attempts to enumerate unrelated support events/messages;
+- valid mapped employee replying from wrong Bitrix DM/group;
+- same numeric Bitrix message ID in another chat/portal;
+- unexpected bot ID and portal origin;
+- mapping revoked after fetch but before processing;
+- duplicate `Event.get` batches;
+- crash injection before/after every inbound receipt/outbox transition;
+- crash/timeouts around Telegram send producing safe `ambiguous` state;
+- spool disk/high-water exhaustion while core Telegram path remains healthy;
+- malformed and oversized event bodies;
+- malicious attachment URLs, redirects, DNS/address tricks and mismatched file/chat IDs;
+- Bitrix auth revocation and API throttling;
+- support replay gap and operator-approved reconciliation;
+- regular-bot behavior proving no `im` scope and no `withUserEvents`.
+
+## 21. Bitrix24 API compatibility appendix
+
+The design targets Chatbots 2.0 only.
+
+Required methods:
+- `imbot.v2.Bot.register` — register `type=bot`, `eventMode=fetch`;
+- `imbot.v2.Event.get` — bot-event polling with explicit offset confirmation;
+- `imbot.v2.Chat.Message.send` — post/reply as the bot using configured `dialogId`;
+- `imbot.v2.File.upload` — optional outbound file send;
+- `imbot.v2.File.download` — optional authenticated download capability.
+
+V1 MUST NOT use `withUserEvents=true`, `im.v2.Event.subscribe`, generic `im` scope, supervisor bot type, or arbitrary message-read APIs.
+
+Before implementation begins, B24-03 must pin the exact request/response fields from the official API and add compatibility fixtures. Before activation it must run a live contract test against the actual portal because `imbot.v2` is versioned/evolving.
+
+## 22. Review-gate effect
+
+Independent review findings in this section are blocking architecture requirements.
+
+No B24 implementation task may enable inbound customer replies until sections 20.1-20.11 are implemented and independently verified.
+
+Future-task decomposition remains B24-01 through B24-08, but B24-01 must include the durable canonical reply-command/outbox prerequisite and B24-03 must include the live Bitrix API compatibility proof.
