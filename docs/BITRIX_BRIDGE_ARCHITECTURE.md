@@ -72,15 +72,37 @@ Trusted authoritative component. It owns all business decisions.
 
 It MUST NOT synchronously depend on Bitrix availability.
 
+
 ### 3.2 bitrix-bridge trust level
 
-Lower-trust replaceable adapter.
+The bridge is a **narrowly trusted staff-reply relay**, not an untrusted parser.
 
-It may persist only integration state:
-- support projection cursor;
+Reason: Bitrix fetch events are authenticated to the bridge by the Bitrix bot credential, but Bitrix does not provide a per-event signature/provenance artifact that support-bot can independently verify after relay. Therefore support-bot cannot cryptographically prove that a claimed Bitrix actor/chat/event field was not fabricated by a compromised bridge.
+
+This trust is explicit and deliberately bounded.
+
+A compromised bridge/bridge credential MAY be able to impersonate one of the configured Bitrix integration principals for the limited operation "send a staff reply" to a ticket for which the bridge possesses a valid core-issued reply capability.
+
+A compromised bridge MUST NOT be able to:
+- enumerate historical ticket content;
+- choose arbitrary ticket IDs;
+- change lifecycle/owner/queue/priority;
+- write MongoDB;
+- obtain generic support APIs;
+- reply to tickets never projected to this integration;
+- bypass current core ticket-state checks;
+- bypass per-integration/principal rate limits;
+- execute infrastructure actions.
+
+Support-bot still independently enforces every control it can enforce: integration credential, current actor mapping, opaque reply capability validity, ticket state, command idempotency, attachment policy, rate limits and audit.
+
+This bounded trust/blast-radius model is a required security acceptance at the architecture gate. If future requirements demand cryptographically independent proof of each Bitrix actor action, this bridge model is insufficient and must be replaced with a different identity/authentication design.
+
+The bridge may persist only integration state:
+- support projection cursor/page state;
 - Bitrix fetch cursor/state;
 - projection jobs;
-- correlation mappings;
+- correlation mappings and core-issued reply capabilities;
 - processed Bitrix event IDs;
 - retry/quarantine state.
 
@@ -141,23 +163,34 @@ No generic message-read API is required for a regular bot.
 
 Before production activation, B24-03 MUST run a live contract test against the target portal and record the detected API revision/request-response fixtures.
 
-## 6. Server-enforced Bitrix projection API
 
-The bridge MUST NOT receive a credential that can call the generic support event replay API or arbitrary TicketMessage reads.
+## 6. Server-enforced forward-only Bitrix projection API
 
-Support-bot exposes a dedicated, feature-gated Bitrix projection endpoint over private networking.
+The bridge MUST NOT receive a credential that can call generic support replay/history APIs and MUST NOT choose a numeric `since` cursor.
 
-Example logical API:
+Support-bot owns a per-integration **server-side projection checkpoint** and exposes only a forward-only protocol over private networking.
 
-`GET /integrations/bitrix/v1/projection?since=<seq>&limit=<n>`
+Logical API:
 
-The server, not the bridge, decides which events are projectable.
+- `POST /integrations/bitrix/v1/projection/next`
+- `POST /integrations/bitrix/v1/projection/ack`
+- exceptional operator-only reconciliation endpoint using a short-lived reconciliation capability.
 
-Initial allowlist:
+### 6.1 Authoritative projection ordering
+
+The underlying support event log has an immutable monotonically increasing global `seq`.
+
+For Bitrix projection, the server checkpoint means:
+
+`last_scanned_seq` = highest authoritative support sequence that this integration has durably acknowledged as scanned, whether or not every scanned event was projectable.
+
+Filtering is deterministic and versioned by `projection_policy_version`.
+
+Initial projectable allowlist:
 - `ticket.message.user`;
 - explicitly approved safe ticket-status notices.
 
-Explicitly excluded by default:
+Excluded by default:
 - `ticket.message.staff`;
 - `ticket.message.ai`;
 - internal notes;
@@ -166,30 +199,81 @@ Explicitly excluded by default:
 - credentials/secrets;
 - unrelated lifecycle/internal events.
 
-Each projection record contains only deterministic redacted fields:
-- support event ID and sequence;
-- ticket display number / opaque ticket reference;
-- safe customer display label;
-- normalized text/caption;
-- approved attachment descriptors;
-- timestamp;
-- optional safe routing/status label.
+### 6.2 Forward-only page protocol
 
-### 6.1 Event-bound content capabilities
+`projection/next` takes no caller-selected historical sequence.
 
-If body/file retrieval is separate from the projection page, the projection record carries an **opaque, unguessable, short-lived capability**.
+Server behavior:
 
-The capability is server-bound to:
-- integration = Bitrix;
-- integration principal;
+1. read the integration's current server-side checkpoint;
+2. if an unacknowledged page already exists, return that same page;
+3. otherwise scan the authoritative event log strictly after `last_scanned_seq`;
+4. build a deterministic bounded page up to a fixed `scan_to_seq`;
+5. include only projectable records from that scanned interval;
+6. create an opaque, unguessable `page_token` bound to:
+   - integration identity;
+   - checkpoint version;
+   - `scan_from_seq`;
+   - `scan_to_seq`;
+   - projection policy version;
+   - expiry;
+7. persist the pending page descriptor server-side;
+8. return projectable records plus `page_token`, `scan_from_seq`, `scan_to_seq`, and current authoritative high-watermark.
+
+The bridge cannot request an earlier range or arbitrary history.
+
+`projection/ack` accepts only the currently pending `page_token`. On valid ack, support-bot atomically advances `last_scanned_seq = scan_to_seq` and clears the pending page.
+
+If the bridge crashes after receiving a page but before ack, the same page is returned again. Bridge-side unique job keys make this safe.
+
+Filtered sequence gaps are normal because the cursor represents **scanned authoritative sequence**, not count of returned projection rows.
+
+### 6.3 Retention and gap behavior
+
+If the server-side checkpoint is older than retained authoritative projection source data, `projection/next` returns an explicit `PROJECTION_GAP` error with the last available boundary. It MUST NOT silently jump the cursor.
+
+The bridge stops that direction and enters reconciliation-required state.
+
+A bridge credential cannot clear this state or select a replacement range.
+
+### 6.4 Projection payload/data boundary
+
+Projection records contain only deterministic server-redacted fields:
 - support event ID;
-- ticket ID;
-- content class;
-- expiry.
+- opaque ticket display/reference data needed for UI;
+- safe customer display label;
+- normalized text/caption only for the current forward page;
+- approved attachment descriptors/capabilities;
+- timestamp;
+- optional safe routing/status label;
+- opaque core-issued `reply_capability`.
 
-The content endpoint accepts only that capability and verifies all bindings. It does not accept an arbitrary ticket/message ID.
+The ordinary bridge credential cannot rewind to enumerate old customer text.
 
-A compromised bridge credential therefore cannot enumerate unrelated ticket history.
+`reply_capability` is opaque, unguessable, and server-bound to:
+- integration = Bitrix;
+- projected ticket ID;
+- source projection event/message;
+- allowed operation = staff_reply;
+- target integration/chat identity;
+- capability version/expiry policy.
+
+The bridge must present this capability for an inbound reply. It cannot replace it with a caller-selected ticket ID.
+
+### 6.5 Exceptional reconciliation capability
+
+Historical range access is available only through an explicit operator-approved action that mints a short-lived, auditable reconciliation capability bound to:
+- integration = Bitrix;
+- exact `from_seq` and `to_seq`;
+- purpose/reason;
+- issuer/operator;
+- expiry;
+- allowed projection policy version.
+
+The bridge's normal credential alone cannot mint, widen, or reuse it outside that range.
+
+Reconciliation pages remain server-redacted/projectable only.
+
 
 ## 7. Outbound support -> Bitrix durable protocol
 
@@ -198,22 +282,27 @@ Bridge local storage uses transactional durable state.
 Unique job key:
 `support_event_id + projection_kind + portal_id + chat_id`.
 
-For every projection page:
+For every support projection page:
 
-1. fetch projection page from support-bot;
-2. in one local DB transaction:
-   - insert missing projection jobs under the unique key;
-   - persist candidate/new support cursor;
-3. commit;
-4. only after commit may the bridge request the next support page;
-5. Bitrix worker sends jobs asynchronously;
-6. successful send stores `portal_id + chat_id + bitrix_message_id` mapping;
-7. retryable failures use bounded exponential backoff;
-8. permanent or ambiguous sends enter quarantine.
+1. call server-side `projection/next`;
+2. validate page token and bounds;
+3. in one local DB transaction:
+   - insert all missing projection jobs under unique keys;
+   - persist the received page token and scanned range;
+4. commit;
+5. call `projection/ack` with that exact page token;
+6. persist local acknowledgement state after server ack succeeds;
+7. only then request the next page;
+8. Bitrix send workers process durable jobs asynchronously;
+9. successful sends store scoped Bitrix mapping plus the associated core-issued `reply_capability`;
+10. retryable failures use bounded backoff;
+11. permanent/ambiguous sends enter quarantine.
 
-Cursor MUST NOT advance if jobs cannot be durably persisted.
+A crash before local job commit cannot advance the server checkpoint.
+A crash after local commit but before support ack returns the same page and unique job keys suppress duplicates.
+A crash after server ack but before local ack recording is recovered by asking for the next page and reconciling local page state; jobs were already durable before server ack.
 
-Bitrix outage therefore grows only the bridge's bounded spool and never backpressures the Telegram core.
+Bitrix outage therefore grows only the bridge's bounded spool and never backpressures Telegram core.
 
 ## 8. Exact Bitrix fetch acknowledgement protocol
 
@@ -241,33 +330,48 @@ Protocol:
 
 Thus crash before local durability cannot acknowledge the page; crash after durability may cause safe refetch, not loss.
 
+
 ## 9. Complete inbound Bitrix acceptance predicate
 
-A fetched event may become a support reply command only if ALL conditions pass:
+The bridge is the trusted Bitrix event attestation relay within the bounded trust model of section 3.2. It must validate Bitrix event context before submission, and support-bot revalidates all controls that do not require direct access to Bitrix's authenticated fetch session.
 
-- exact configured portal identity/base URL;
+A fetched event may become a support reply command only if ALL bridge-side checks pass:
+
+- exact configured portal/base URL used for the authenticated Bitrix API session;
 - exact configured `botId`;
 - exact configured support `dialogId/chatId`;
-- event type is the approved bot-addressed message-add event;
-- event recipient/addressing semantics identify the registered regular bot;
-- sender/author ID exists and is active/acceptable by policy;
-- sender is currently mapped to a canonical MOST staff identity;
-- event references/replies to a known bot projection message;
-- correlation key lookup uses `portal_id + chat_id + bitrix_message_id`;
-- correlated ticket is active/replyable;
-- external event ID has not already been accepted;
-- message/file sizes and content types pass policy.
+- approved bot-addressed message-add event type;
+- event is addressed to the registered regular bot;
+- sender/author ID exists;
+- message is a reply to a known bridge-posted projection message;
+- Bitrix event/message identifiers are well-formed;
+- content/files pass local prechecks.
 
-Fail closed for:
-- DMs;
-- another group;
-- another portal;
-- another bot;
-- unaddressed messages;
-- forwarded/spoofed/ambiguous context;
-- unknown reply target;
-- unknown/deprovisioned actor;
-- incomplete event structures.
+The bridge submits:
+- integration identity;
+- external event ID;
+- claimed external actor ID;
+- scoped portal/chat/bot identifiers;
+- the opaque core-issued `reply_capability` stored with the replied-to projection mapping;
+- content/verified attachment payload.
+
+Support-bot then independently requires ALL of:
+
+- valid dedicated Bitrix-bridge credential;
+- current actor mapping for the claimed actor;
+- valid unexpired `reply_capability`;
+- capability integration/chat binding matches the configured integration;
+- capability resolves server-side to a currently replyable projected ticket;
+- ticket is active/replyable;
+- unique external command key has not created a second command;
+- per-integration and per-principal rate/admission limits pass;
+- content/attachments pass authoritative limits.
+
+The support endpoint does not accept a caller-selected ticket ID as routing authority.
+
+Because the bridge can fabricate the claimed actor if compromised, the residual accepted blast radius is explicit: a compromised bridge can attempt staff replies only using reply capabilities it previously received for legitimately projected tickets, subject to current mapping, ticket state, rate limits and idempotency. It cannot broaden itself to arbitrary tickets or other core mutations.
+
+Fail closed for unknown/expired capability, inactive mapping, wrong integration binding, inactive ticket, duplicate/conflicting command, oversized content, or failed bridge-side Bitrix context validation.
 
 Visible `#T123` text is never routing authority.
 
@@ -556,7 +660,8 @@ No implementation task may enable inbound replies before B24-01 durable command/
 
 Must prove:
 - complete Bitrix outage does not affect Telegram ticket/reply path;
-- bridge credential cannot enumerate unrelated support content;
+- bridge credential cannot rewind the forward-only projection cursor or enumerate unrelated/historical support content;
+- only operator-approved bounded reconciliation capability can access a specified historical projection range;
 - mapped employee from wrong Bitrix DM/group is rejected;
 - same numeric message ID in another chat/portal cannot collide;
 - wrong portal/bot/event context is rejected;
