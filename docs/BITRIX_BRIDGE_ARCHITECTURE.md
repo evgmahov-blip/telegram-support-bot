@@ -518,29 +518,44 @@ V1 optional attachments: text, images/photos, ordinary documents.
 5. bridge uploads with `imbot.v2.File.upload` to exact configured `dialogId`;
 6. temporary data expires/deletes by retention policy.
 
+
 ### 13.2 Bitrix -> support
 
-1. accepted authenticated event provides file ID/descriptor;
-2. descriptor must belong to expected portal/chat/event context;
-3. bridge calls `imbot.v2.File.download` with registered bot credentials;
-4. returned download URL is treated as a one-time capability;
-5. downloader allows HTTPS only;
-6. hostname must match configured Bitrix portal / explicitly documented allowed Bitrix redirect hosts;
-7. redirects are handled manually, not by an unconstrained HTTP client's automatic redirect logic, and redirect count is bounded;
-8. for the current URL, a controlled resolver obtains the address set; prohibited private/link-local/loopback/reserved destinations are rejected unless explicitly configured for an on-prem portal;
-9. the outbound TCP connection is made **only to one of the already validated IP addresses** (or through an equivalently constrained egress proxy that enforces the same destination set); the HTTP client MUST NOT perform an unchecked second DNS resolution;
-10. TLS hostname/SNI/certificate validation remains against the expected Bitrix hostname while connecting to the pinned validated IP;
-11. every redirect repeats hostname allowlist validation, controlled resolution, prohibited-address checks, IP pinning, and TLS-hostname validation before connecting;
-12. dual-stack A/AAAA results are all policy-checked and connection fallback may use only validated addresses;
-13. credentials/authorization headers are stripped on any host change and are never forwarded to an unrelated host;
-16. streaming byte cap is enforced regardless of Content-Length;
-17. filename is normalized; path traversal/control characters are stripped;
-18. MIME/extension policy is checked;
-19. support-bot receives bytes/stream + verified metadata, never an arbitrary URL to fetch.
+1. accepted authenticated event provides a Bitrix file ID/descriptor;
+2. descriptor must belong to the expected configured portal/chat/event context;
+3. bridge calls `imbot.v2.File.download` with the registered bot credentials;
+4. returned download URL is treated as a one-time capability, never as a generally trusted URL;
+5. downloader accepts HTTPS only;
+6. approved download destinations are configured as exact **normalized origins**: `https://hostname:port`;
+7. cloud default policy allowlists only the configured Bitrix portal origin on TCP 443; any additional redirect origin or non-default/on-prem port requires explicit separate configuration;
+8. initial download URL and every redirect are canonicalized before use; URLs containing userinfo/credentials, malformed or ambiguous authority syntax, invalid ports, or a normalized origin not on the exact allowlist are rejected;
+9. an explicit port on an allowlisted hostname is rejected unless that exact `scheme + hostname + port` origin is separately allowlisted; implicit HTTPS port resolves to 443 and must match an approved origin;
+10. redirects are handled manually, not by unconstrained automatic redirect logic, and redirect count is bounded;
+11. for each approved origin, a controlled resolver obtains A/AAAA addresses;
+12. prohibited private/link-local/loopback/reserved addresses are rejected unless the exact on-prem origin/network is explicitly configured by policy;
+13. the outbound TCP connection is made only to one of the validated addresses (or through an equivalently constrained egress proxy); the HTTP stack must not perform unchecked re-resolution;
+14. TLS SNI/hostname and certificate verification remain bound to the approved hostname while connecting to the pinned validated IP;
+15. every redirect repeats origin canonicalization, exact origin allowlist check, controlled resolution, IP policy, IP pinning and TLS-hostname validation before connection;
+16. dual-stack fallback may use only addresses from the validated set;
+17. authorization headers/credentials are stripped on any origin change and never forwarded to an unrelated origin;
+18. streaming byte cap is enforced even if Content-Length is absent or false;
+19. filename is normalized and path traversal/control characters are removed;
+20. MIME/extension policy is checked;
+21. support-bot receives bytes/stream plus verified metadata, never an arbitrary URL to fetch.
 
-Arbitrary URLs from message text/attachments are never fetched.
+Arbitrary URLs from message text or attachments are never fetched.
 
-Deployment policy must define executable blocking, file size, retention, optional malware scanning and quarantine before file support activation.
+Deployment policy must define executable blocking, file-size limits, retention, optional malware scanning and quarantine before file support activation.
+
+Mandatory SSRF tests cover:
+- allowlisted hostname with disallowed explicit non-default port;
+- redirect changing only the port;
+- userinfo/authority canonicalization tricks;
+- DNS rebinding;
+- A/AAAA switching;
+- redirect to private/link-local/loopback/reserved addresses;
+- proxy/client automatic re-resolution;
+- validation/connect TOCTOU.
 
 ## 14. Resource isolation and bounded spool
 
