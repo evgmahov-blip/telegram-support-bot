@@ -269,19 +269,51 @@ Projection records contain only deterministic server-redacted fields:
 - approved attachment descriptors/capabilities;
 - timestamp;
 - optional safe routing/status label;
-- opaque core-issued `reply_capability`.
+- opaque core-issued `projection_handle` that contains no message body and authorizes only later reply-capability issuance for this exact projected support event/ticket/chat.
 
 The ordinary bridge credential cannot rewind to enumerate old customer text.
 
-`reply_capability` is opaque, unguessable, and server-bound to:
+`projection_handle` is opaque, unguessable, and server-bound to:
 - integration = Bitrix;
 - projected ticket ID;
 - source projection event/message;
-- allowed operation = staff_reply;
-- target integration/chat identity;
-- capability version/expiry policy.
+- target configured integration/chat identity;
+- allowed operation = issue_or_refresh_staff_reply_capability.
 
-The bridge must present this capability for an inbound reply. It cannot replace it with a caller-selected ticket ID.
+It exposes no generic read ability and cannot be exchanged for another ticket.
+
+### 6.4.1 Reply-capability issuance and renewal
+
+A short-lived `reply_capability` is **not** minted when the projection page is created.
+
+After the bridge has successfully posted that projection to the configured Bitrix chat and durably stored the immutable mapping `projection_handle + portal_id + chat_id + bitrix_message_id`, it calls a dedicated support endpoint to issue a reply capability.
+
+The request may contain only:
+- the opaque `projection_handle`;
+- the already configured integration identity;
+- the exact configured portal/chat;
+- the Bitrix message ID for audit/correlation.
+
+Support-bot resolves ticket/event server-side from the projection handle. The caller cannot supply or change ticket routing.
+
+Issued `reply_capability` is bound to:
+- the immutable projection handle/event/ticket;
+- integration = Bitrix;
+- configured portal/chat;
+- allowed operation = staff_reply;
+- capability generation and expiry.
+
+If the capability expires before an operator reply, the bridge may request a fresh generation **only with the same projection_handle and same durable successful Bitrix mapping**. Refresh:
+- never exposes message content/history;
+- never changes ticket/event/chat binding;
+- is idempotent for the requested/current generation state;
+- checks that the ticket is still replyable;
+- is audited;
+- may be rate-limited/revoked independently.
+
+Thus Bitrix outages or delayed spool delivery do not consume reply-capability lifetime before the message is actually visible, while a compromised bridge still cannot select arbitrary tickets beyond projection handles it legitimately received.
+
+For an inbound reply, the bridge must present the current valid reply capability associated with the replied-to Bitrix mapping.
 
 ### 6.5 Exceptional reconciliation capability
 
@@ -317,9 +349,12 @@ For every support projection page:
 6. persist local acknowledgement state after server ack succeeds;
 7. only then request the next page;
 8. Bitrix send workers process durable jobs asynchronously;
-9. successful sends store scoped Bitrix mapping plus the associated core-issued `reply_capability`;
-10. retryable failures use bounded backoff;
-11. permanent/ambiguous sends enter quarantine.
+9. successful sends durably store scoped Bitrix mapping plus the associated core-issued `projection_handle`;
+10. after that durable success, request/record a current `reply_capability` for the same immutable mapping;
+11. retryable failures use bounded backoff;
+12. permanent/ambiguous sends enter quarantine.
+
+If capability issuance fails after the Bitrix message was posted, the mapping remains durable and enters a bounded `capability_pending` state; the bridge retries capability issuance without reposting the Bitrix message. The Bitrix message is not considered reply-ready until a valid capability is stored.
 
 A crash before local job commit cannot advance the server checkpoint.
 A crash after local commit but before support ack returns the same page and unique job keys suppress duplicates.
@@ -498,10 +533,10 @@ V1 optional attachments: text, images/photos, ordinary documents.
 11. every redirect repeats hostname allowlist validation, controlled resolution, prohibited-address checks, IP pinning, and TLS-hostname validation before connecting;
 12. dual-stack A/AAAA results are all policy-checked and connection fallback may use only validated addresses;
 13. credentials/authorization headers are stripped on any host change and are never forwarded to an unrelated host;
-14. streaming byte cap is enforced regardless of Content-Length;
-15. filename is normalized; path traversal/control characters are stripped;
-16. MIME/extension policy is checked;
-17. support-bot receives bytes/stream + verified metadata, never an arbitrary URL to fetch.
+16. streaming byte cap is enforced regardless of Content-Length;
+17. filename is normalized; path traversal/control characters are stripped;
+18. MIME/extension policy is checked;
+19. support-bot receives bytes/stream + verified metadata, never an arbitrary URL to fetch.
 
 Arbitrary URLs from message text/attachments are never fetched.
 
@@ -699,7 +734,8 @@ Must prove:
 - support projection cursor/job transaction survives crash;
 - Bitrix ack-pending ambiguous call safely refetches/dedupes;
 - spool high-water/critical-water leaves core healthy;
-- malicious URL/redirect/DNS/file cases cannot cause SSRF, including DNS rebinding, dual-stack address switching, proxy re-resolution and validation/connect TOCTOU;
+- malicious URL/redirect/DNS/file cases cannot cause SSRF, including allowlisted-host non-default ports, redirect port changes, DNS rebinding, dual-stack address switching, proxy re-resolution and validation/connect TOCTOU;
+- projection delayed beyond normal reply-capability TTL becomes reply-ready through mapping-bound capability issuance/refresh without reposting or changing ticket routing;
 - auth revocation/throttling opens bounded retry/circuit behavior;
 - gap reconciliation is auditable and does not duplicate confirmed sends;
 - V1 works with `imbot` scope only and `withUserEvents=false`.
