@@ -106,7 +106,11 @@ api_enabled: true
 api_token: "use-a-long-random-secret"
 ```
 
-`GET /events?since=<seq>&limit=<n>` requires `Authorization: Bearer <api_token>` and returns events in ascending sequence order plus `next_since`. The default port is `8080`; Docker publishes it on host `127.0.0.1` only. Existing historical analytics rows created before event sequencing do not have `seq` and therefore are not part of replay.
+`GET /events?since=<seq>&limit=<n>` requires `Authorization: Bearer <api_token>` and returns events in ascending sequence order plus `next_since` and `has_more`. The events API uses port `8081`; the legacy web addon remains on `8080`. Docker publishes enabled endpoints on host loopback only. Historical analytics rows are backfilled in bounded startup batches with stable event IDs and sequence numbers; see `docs/EVENTS.md` for cursor and migration semantics.
+
+Durable push delivery is an explicit per-subscriber opt-in (`durable: true`). It reads the persisted event stream, resumes from a stored cursor, and is at-least-once; receivers must deduplicate by event ID. Entries without `durable: true` retain the legacy compatibility path and are not replayed after restart. This is event delivery only: there is no ticket-to-AOR feature.
+
+Telegram ingress receipt idempotence is tracked separately in open PR #10 and is not part of the VM3902 candidate. Do not represent that dependency as merged or reproduce its mechanism here.
 
 ## AI contract
 

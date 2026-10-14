@@ -1,0 +1,20 @@
+[Unit]
+Description=MOST Telegram support bot candidate stack
+Requires=docker.service tg-support-firewall.service tg-support-dns.service
+After=network-online.target docker.service tg-support-firewall.service tg-support-dns.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/most-support-bot
+ExecStartPre=/usr/bin/docker network inspect tg_support_bot_internal
+ExecStartPre=/usr/bin/docker compose --project-name most-support-bot --file deploy/vm3902/compose.yaml config --quiet
+ExecStart=/usr/bin/docker compose --project-name most-support-bot --file deploy/vm3902/compose.yaml up --abort-on-container-failure
+ExecStop=/usr/bin/docker compose --project-name most-support-bot --file deploy/vm3902/compose.yaml stop
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=300
+TimeoutStopSec=90
+
+[Install]
+WantedBy=multi-user.target

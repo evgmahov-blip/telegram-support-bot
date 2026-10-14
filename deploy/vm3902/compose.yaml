@@ -1,0 +1,73 @@
+name: most-support-bot
+
+services:
+  supportbot:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: most-support-bot:vm3902-candidate
+    restart: "no"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    volumes:
+      - ./config.yaml:/bot/config/config.yaml:ro
+    ports:
+      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:8081:8081"
+    environment:
+      MONGO_URI: ${MONGO_URI:?set the least-privilege Mongo application URI}
+      API_HOST: 0.0.0.0
+      MONGO_COLLECTION: most_support_tickets
+    dns:
+      - 172.31.109.1
+    networks:
+      tg_support_bot_internal:
+        ipv4_address: 172.31.109.3
+      most_mongo: {}
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+
+  mongodb:
+    image: mongo:8.0
+    restart: "no"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:?set Mongo bootstrap username}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?set Mongo bootstrap password}
+      MONGO_APP_USERNAME: ${MONGO_APP_USERNAME:?set Mongo application username}
+      MONGO_APP_PASSWORD: ${MONGO_APP_PASSWORD:?set Mongo application password}
+      MONGO_APP_DATABASE: ${MONGO_APP_DATABASE:-support}
+    volumes:
+      - most_mongodb_data:/data/db
+      - ../../docker/mongo-init.js:/docker-entrypoint-initdb.d/10-create-app-user.js:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          mongosh --quiet
+          --username "$$MONGO_INITDB_ROOT_USERNAME"
+          --password "$$MONGO_INITDB_ROOT_PASSWORD"
+          --authenticationDatabase admin
+          --eval "db.adminCommand('ping').ok" | grep 1
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      most_mongo: {}
+    security_opt:
+      - no-new-privileges:true
+
+networks:
+  tg_support_bot_internal:
+    external: true
+    name: tg_support_bot_internal
+  most_mongo:
+    internal: true
+
+volumes:
+  most_mongodb_data:
+    name: most-support-bot_mongodb_data

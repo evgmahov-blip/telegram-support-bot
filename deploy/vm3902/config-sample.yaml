@@ -1,0 +1,51 @@
+# Tracked, non-secret VM3902 runtime template. Copy this file to the ignored
+# config.yaml next to it, set mode 0600, and replace only YOUR_BOT_TOKEN via
+# the approved secret path. Never reuse a token from another bot.
+# Expected read-only getMe id before activation: 8932572525.
+bot_token: 'YOUR_BOT_TOKEN'
+owner_id: '79813552'
+staffchat_id: '-1003918239593'
+staffchat_type: 'telegram'
+staffchat_parse_mode: 'MarkdownV2'
+spam_cant_msg: 5
+spam_time: 300000
+
+# Privacy and staff authorization: the verified owner is the sole admin.
+allow_private: false
+direct_reply: false
+anonymous_tickets: true
+anonymous_replies: true
+show_user_ticket: false
+auto_close_tickets: false
+allow_broadcast: false
+enable_csat: false
+staff_roles:
+  - telegram_id: '79813552'
+    role: 'admin'
+
+# AI and automatic delivery/integrations remain off.
+use_llm: false
+auto_triage: false
+staff_assist: false
+translate_enabled: false
+signal_enabled: false
+slack_enabled: false
+discord_enabled: false
+autoreply: []
+autoreply_confirmation: false
+show_auto_replied: false
+webhooks: []
+
+# Both endpoints are disabled. If separately approved later, Compose exposes
+# only these container ports through host loopback.
+web_server: false
+web_server_port: 8080
+api_enabled: false
+api_token: ''
+api_port: 8081
+api_host: '127.0.0.1'
+
+# ERROR is redacted and emitted on stderr. The optional debug.log write fails
+# harmlessly because both the root filesystem and config mount are read-only.
+log_level: 'ERROR'
+dev_mode: false

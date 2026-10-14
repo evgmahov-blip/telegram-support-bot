@@ -1,5 +1,5 @@
 # Build stage
-FROM node:22-alpine AS builder
+FROM node:24.15.0-alpine3.22@sha256:b689d4005875ae167178471a7a622ec2909459a3bbb32277260be1971af7a99f AS builder
 
 WORKDIR /bot
 
@@ -19,7 +19,7 @@ COPY ./tsconfig.json /bot/tsconfig.json
 RUN npm run build
 
 # Production stage
-FROM node:22-alpine AS production
+FROM node:24.15.0-alpine3.22@sha256:b689d4005875ae167178471a7a622ec2909459a3bbb32277260be1971af7a99f AS production
 
 WORKDIR /bot
 

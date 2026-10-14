@@ -28,6 +28,8 @@ Ticket message bodies are not copied into event metadata. Full conversation hist
 
 `GET /healthz` is intentionally unauthenticated and returns only `{ "ok": true }`. `/events` requires Bearer authentication and is rate-limited.
 
-The existing push-webhook subsystem is still a legacy delivery path and does not yet share `event_id`/`seq` with replay. Do not use it for cross-channel deduplication until webhook delivery is moved behind the persisted event log.
+Webhook delivery is disabled when `webhooks: []`. A subscriber opts into durable delivery only with `durable: true`; it then consumes this persisted stream with a stored cursor and receives `event_id`/`seq`. Delivery is at-least-once, so receivers must deduplicate by `X-TSB-Event-ID` (or payload `event_id`). Non-durable entries retain the legacy compatibility path and are not replayed after restart. Webhooks do not create or synchronize AOR tickets.
+
+Telegram ingress receipt idempotence is a separate concern handled by open PR #10. It is not included in the VM3902 deployment candidate and no duplicate ingress mechanism is implied here.
 
 In-process event appends are serialized before sequence allocation, so callers observe replay order matching append call order within one bot instance. The unique sequence index and retry loop still arbitrate concurrent writers across instances.
