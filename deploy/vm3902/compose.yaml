@@ -45,13 +45,14 @@ services:
       - ../../docker/mongo-init.js:/docker-entrypoint-initdb.d/10-create-app-user.js:ro
     healthcheck:
       test:
-        - CMD-SHELL
+        - CMD
+        - mongosh
+        - --quiet
+        - --eval
         - >-
-          mongosh --quiet
-          --username "$$MONGO_INITDB_ROOT_USERNAME"
-          --password "$$MONGO_INITDB_ROOT_PASSWORD"
-          --authenticationDatabase admin
-          --eval "db.adminCommand('ping').ok" | grep 1
+          const admin = db.getSiblingDB('admin');
+          if (!admin.auth({ user: process.env.MONGO_INITDB_ROOT_USERNAME, pwd: process.env.MONGO_INITDB_ROOT_PASSWORD })) quit(1);
+          quit(admin.runCommand({ ping: 1 }).ok === 1 ? 0 : 1);
       interval: 10s
       timeout: 5s
       retries: 10

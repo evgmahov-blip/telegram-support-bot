@@ -11,6 +11,7 @@ This directory is a reviewed-candidate input for the owner-authorized replacemen
 - The bot is dual-homed only between the external `tg_support_bot_internal` network and the internal Mongo network. Mongo has no published port. The only host publications are loopback `8080` and `8081`, for currently disabled features.
 - The old bot owns `172.31.109.3`; the candidate must not start until the old poller is stopped and that address is released. Existing DNS is `172.31.109.1`. Do not add proxy variables, listeners, networks or direct-egress paths.
 - Containers have no autonomous Docker restart policy. The foreground Compose process is supervised by systemd only after firewall/DNS prerequisites, preventing Docker daemon startup from bypassing the reboot gate.
+- The Mongo healthcheck uses exec-form `mongosh` with a literal JavaScript expression. That expression reads the bootstrap credentials from `process.env` inside `mongosh`, authenticates against `admin`, and reports healthy only after a successful ping; credentials are never placed in the probe's command-line arguments.
 
 `log_level: ERROR` is compatible with the read-only root filesystem and read-only config mount: errors are redacted and emitted to container stderr; the optional `config/debug.log` append fails harmlessly and never crashes the process.
 

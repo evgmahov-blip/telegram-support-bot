@@ -66,6 +66,63 @@ describe('VM3902 deployment packaging', () => {
     expect((compose.match(/restart: "no"/g) || [])).toHaveLength(2);
   });
 
+  test('keeps Mongo healthcheck credentials out of argv and requires authenticated ping', () => {
+    const compose = YAML.parse(read('deploy/vm3902/compose.yaml'));
+    const healthcheck = compose.services.mongodb.healthcheck.test;
+
+    expect(healthcheck.slice(0, 4)).toEqual(['CMD', 'mongosh', '--quiet', '--eval']);
+    expect(healthcheck).toHaveLength(5);
+
+    const javascript = healthcheck[4];
+    expect(javascript).toContain('process.env.MONGO_INITDB_ROOT_USERNAME');
+    expect(javascript).toContain('process.env.MONGO_INITDB_ROOT_PASSWORD');
+    expect(javascript).toContain("db.getSiblingDB('admin')");
+    expect(javascript).toContain('admin.auth(');
+    expect(javascript).toContain('admin.runCommand({ ping: 1 })');
+    expect(javascript).not.toMatch(/\$(?:\$)?\{?MONGO_INITDB_ROOT_(?:USERNAME|PASSWORD)\}?/);
+    expect(healthcheck.slice(0, 4).join(' ')).not.toMatch(/--username|--password|mongodb:\/\//);
+
+    const credentials = {
+      MONGO_INITDB_ROOT_USERNAME: 'health user $HOME',
+      MONGO_INITDB_ROOT_PASSWORD: 'dummy "quoted" $(not-a-command) ; &',
+    };
+    const execute = new Function('db', 'process', 'quit', javascript);
+    const runProbe = (authResult: boolean, pingResult: number) => {
+      const auth = jest.fn(() => authResult);
+      const runCommand = jest.fn(() => ({ok: pingResult}));
+      let exitCode: number | undefined;
+      const quit = jest.fn((code: number) => {
+        exitCode = code;
+        throw new Error(`mongosh quit ${code}`);
+      });
+
+      expect(() => execute(
+        {getSiblingDB: jest.fn(() => ({auth, runCommand}))},
+        {env: credentials},
+        quit,
+      )).toThrow(`mongosh quit ${authResult && pingResult === 1 ? 0 : 1}`);
+
+      return {auth, runCommand, exitCode};
+    };
+
+    const healthy = runProbe(true, 1);
+
+    expect(healthy.auth).toHaveBeenCalledWith({
+      user: credentials.MONGO_INITDB_ROOT_USERNAME,
+      pwd: credentials.MONGO_INITDB_ROOT_PASSWORD,
+    });
+    expect(healthy.runCommand).toHaveBeenCalledWith({ping: 1});
+    expect(healthy.exitCode).toBe(0);
+
+    const rejectedAuth = runProbe(false, 1);
+    expect(rejectedAuth.runCommand).not.toHaveBeenCalled();
+    expect(rejectedAuth.exitCode).toBe(1);
+
+    const failedPing = runProbe(true, 0);
+    expect(failedPing.runCommand).toHaveBeenCalledWith({ping: 1});
+    expect(failedPing.exitCode).toBe(1);
+  });
+
   test('pins Node 24 and leaves restart supervision behind systemd prerequisites', () => {
     const dockerfile = read('Dockerfile');
     const unit = read('deploy/vm3902/most-support-bot.service');
