@@ -208,7 +208,13 @@ describe('edited messages (#147)', () => {
       'telegram',
       'Ticket #T000012 from [Alice](tg://user?id=42) edited their message:\n\ncorrected text',
     );
-    expect(mockPersistTicketMessage).toHaveBeenCalledWith(12, 'user', '42', '[edited their message] corrected text');
+    expect(mockPersistTicketMessage).toHaveBeenCalledWith(
+      12,
+      'user',
+      '42',
+      '[edited their message] corrected text',
+      'telegram:edited:42:update:1',
+    );
     expect(mockRecordAnalyticsEventBestEffort).toHaveBeenCalledWith('ticket.message.user', 12, '42');
   });
 

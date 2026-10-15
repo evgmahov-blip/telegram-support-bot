@@ -251,6 +251,7 @@ describe('Files Module', () => {
         'staff',
         'agent1',
         '[file:document]',
+        'telegram:message:staff123:update:1',
       );
       expect(mockRecordAnalyticsEventBestEffort).toHaveBeenCalledWith(
         'ticket.message.staff',

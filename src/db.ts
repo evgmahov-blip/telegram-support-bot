@@ -74,6 +74,7 @@ export interface ITicketMessage extends mongoose.Document {
   sender: 'user' | 'staff' | 'ai';
   sender_id: string;
   text: string;
+  source_id?: string;
   timestamp: Date;
 }
 
@@ -82,9 +83,17 @@ const TicketMessageSchema = new mongoose.Schema<ITicketMessage>({
   sender: { type: String, enum: ['user', 'staff', 'ai'], required: true },
   sender_id: { type: String, default: '' },
   text: { type: String, required: true },
+  source_id: { type: String, required: false },
   timestamp: { type: Date, default: Date.now },
 });
 TicketMessageSchema.index({ ticketId: 1, timestamp: -1 });
+TicketMessageSchema.index(
+  { ticketId: 1, source_id: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { source_id: { $exists: true } },
+  },
+);
 
 const TicketMessage = mongoose.model('TicketMessage', TicketMessageSchema);
 
@@ -645,11 +654,37 @@ export async function persistTicketMessage(
   sender: 'user' | 'staff' | 'ai',
   sender_id: string,
   text: string,
+  source_id?: string,
 ): Promise<void> {
-  const msg = new TicketMessage({ ticketId, sender, sender_id, text });
   try {
+    if (source_id) {
+      await TicketMessage.updateOne(
+        { ticketId, source_id },
+        {
+          $setOnInsert: {
+            ticketId,
+            sender,
+            sender_id,
+            text,
+            source_id,
+            timestamp: new Date(),
+          },
+        },
+        { upsert: true },
+      );
+      return;
+    }
+
+    const msg = new TicketMessage({ ticketId, sender, sender_id, text });
     await msg.save();
   } catch (err) {
+    // Concurrent retries can race the unique source-id upsert. The losing
+    // writer is the same logical ingress message, so duplicate-key is success.
+    const mongoError = err as { code?: number };
+    if (source_id && mongoError?.code === 11000) {
+      return;
+    }
+
     log.error('DB persistTicketMessage error:', err);
     throw err;
   }

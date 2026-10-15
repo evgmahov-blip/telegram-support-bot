@@ -4,6 +4,7 @@ const mockReply = jest.fn();
 const mockAdd = jest.fn();
 const mockGetTicketByUserId = jest.fn();
 const mockAddIdAndName = jest.fn();
+const mockPersistTicketMessage = jest.fn().mockResolvedValue(undefined);
 const mockLogError = jest.fn();
 
 jest.mock('../src/middleware', () => ({
@@ -18,7 +19,7 @@ jest.mock('../src/db', () => ({
   getTicketByUserId: mockGetTicketByUserId,
   addIdAndName: mockAddIdAndName,
   addTicketMessage: jest.fn().mockResolvedValue(undefined),
-  persistTicketMessage: jest.fn().mockResolvedValue(undefined),
+  persistTicketMessage: mockPersistTicketMessage,
   recordAnalyticsEvent: jest.fn().mockResolvedValue(undefined),
   recordAnalyticsEventBestEffort: jest.fn(),
 }));
@@ -178,6 +179,13 @@ describe('Users Module', () => {
       expect(cache.userId).toBe('user123');
       expect(cache.ticketStatus['user123']).toBe(true);
       expect(cache.ticketSent['user123']).toBe(0);
+      expect(mockPersistTicketMessage).toHaveBeenCalledWith(
+        1001,
+        'user',
+        'user123',
+        'I need help with my account',
+        'telegram:message:chat123:update:1',
+      );
       
       // Should send confirmation message
       expect(mockSendMessage).toHaveBeenCalledWith(
@@ -269,6 +277,13 @@ describe('Users Module', () => {
       await users.chat(ctx, { id: 'chat123' });
 
       expect(cache.ticketSent['user123']).toBe(2);
+      expect(mockPersistTicketMessage).toHaveBeenCalledWith(
+        1002,
+        'user',
+        'user123',
+        'Help me again',
+        'telegram:message:chat123:update:1',
+      );
       
       // Should only send to staff (no confirmation for repeated messages)
       expect(mockSendMessage).toHaveBeenCalledWith(

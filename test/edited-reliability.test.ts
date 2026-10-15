@@ -45,14 +45,17 @@ import { handleEditedMessage } from '../src/edited';
 
 function createContext(group = ''): any {
   return {
+    messenger: 'telegram',
+    update_id: 902,
     editedMessage: {
+      message_id: 77,
       text: 'updated text',
       from: {
         id: 'user123',
         first_name: 'John',
       },
     },
-    chat: { type: 'private' },
+    chat: { id: 'user123', type: 'private' },
     session: {
       admin: false,
       groupCategory: 'general',
@@ -85,6 +88,7 @@ describe('edited message reliability', () => {
       'user',
       'user123',
       '[edited] updated text',
+      'telegram:edited:user123:update:902',
     );
     expect(mockSendMessage).not.toHaveBeenCalled();
     expect(mockPersistCorrelation).not.toHaveBeenCalled();
