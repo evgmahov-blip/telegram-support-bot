@@ -118,6 +118,12 @@ async function transitionTicketAfterDelivery(
 /** Handles replies written in the closed staff group. */
 async function chat(ctx: Context) {
   if (!ctx.session.admin) return;
+  if (cache.config.staffchat_id && String(ctx.chat.id) !== String(cache.config.staffchat_id)) return;
+  const configuredThread = cache.config.staffchat_thread_id;
+  if (configuredThread && ctx.message?.message_thread_id !== configuredThread) {
+    await middleware.reply(ctx, 'Ответы на тикеты принимаются только в настроенной теме поддержки.');
+    return;
+  }
 
   const senderId = ctx.from.id.toString();
   if (!team.canPerformAction(senderId, 'reply')) {
@@ -167,7 +173,7 @@ async function chat(ctx: Context) {
   const staffMessage = ctx.message.text || '';
   const deliveryKey = `telegram:${ctx.update_id || ctx.message.message_id}:ticket:${ticketId}`;
 
-  const isPromptReply = /^(Ответ для|🔒 Заметка для) #T\d+/.test(replyText);
+  const isPromptReply = /(ответ|заметка) для #T\d+/i.test(replyText);
   if (isPromptReply && ticket.pending_reply_prompt_id !== correlatedMessageId) {
     await middleware.reply(ctx, 'Эта подсказка отменена, истекла или заменена. Нажмите кнопку в актуальной карточке.');
     return;
@@ -181,7 +187,7 @@ async function chat(ctx: Context) {
       await middleware.reply(ctx, 'Запрос ответа истёк или принадлежит другому сотруднику. Нажмите «Ответить» снова.');
       return;
     }
-    if (replyText.startsWith('🔒 Заметка')) {
+    if (/🔒\s*заметка для #T\d+/i.test(replyText)) {
       const current = await db.getTicketById(ticketId, null);
       if (!current || current.status === 'closed' || !team.canManageTicket(senderId, current.assigned_to)) {
         await middleware.reply(ctx, 'Владелец или состояние тикета изменились; заметка не сохранена.');
@@ -201,6 +207,7 @@ async function chat(ctx: Context) {
     }
     const noteText = staffMessage.replace(/^!(?:note|internal)\s+/i, '');
     await team.addInternalNoteCommand(ctx, ticketId, noteText);
+    await refreshStaffCard(ticketId);
     return;
   }
 

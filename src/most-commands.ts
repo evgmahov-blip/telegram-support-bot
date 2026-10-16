@@ -9,6 +9,7 @@ import * as ticketAudit from './ticket-audit';
 import * as staff from './staff';
 import * as middleware from './middleware';
 import { resolveTicketFromReply } from './ticket-resolution';
+import { refreshStaffCard } from './ticket-ui';
 
 async function resolveRepliedTicket(ctx: Context): Promise<ISupportee | null> {
   const resolved = await resolveTicketFromReply(ctx, null);
@@ -53,6 +54,7 @@ export async function takeCommand(ctx: Context): Promise<void> {
   const ticket = await requireRepliedTicket(ctx);
   if (!ticket) return;
   await team.takeTicketCommand(ctx, ticket.ticketId);
+  await refreshStaffCard(ticket.ticketId);
 }
 
 export async function transferCommand(ctx: Context): Promise<void> {
@@ -66,6 +68,7 @@ export async function transferCommand(ctx: Context): Promise<void> {
   const ticket = await requireRepliedTicket(ctx);
   if (!ticket) return;
   await team.transferTicketCommand(ctx, targetId, ticket.ticketId);
+  await refreshStaffCard(ticket.ticketId);
 }
 
 export async function waitingCommand(ctx: Context): Promise<void> {
@@ -73,6 +76,7 @@ export async function waitingCommand(ctx: Context): Promise<void> {
   const ticket = await requireRepliedTicket(ctx);
   if (!ticket) return;
   await team.waitingUserCommand(ctx, ticket.ticketId);
+  await refreshStaffCard(ticket.ticketId);
 }
 
 /**
@@ -177,6 +181,7 @@ export async function priorityCommand(ctx: Context): Promise<void> {
     from: ticket.priority || TicketPriority.NORMAL,
     to: priority,
   });
+  await refreshStaffCard(ticket.ticketId);
 }
 
 /** Add an internal-only note to an active manageable ticket. */
@@ -208,6 +213,7 @@ export async function noteCommand(ctx: Context): Promise<void> {
     ctx,
     `Internal note added to #T${ticket.ticketId.toString().padStart(6, '0')}.`,
   );
+  await refreshStaffCard(ticket.ticketId);
 }
 
 /** Show internal notes only to staff who may manage the ticket. */

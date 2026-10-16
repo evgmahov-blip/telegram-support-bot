@@ -51,7 +51,10 @@ export async function closeTicketLifecycle(
   }
   const userId = ticket.userid;
   delete cache.ticketIDs[userId]; delete cache.ticketStatus[userId]; delete cache.ticketSent[userId];
-  db.recordAnalyticsEventBestEffort('ticket.closed', ticket.ticketId, actorId, options.metadata || {});
+  try {
+    Promise.resolve(db.recordAnalyticsEventBestEffort('ticket.closed', ticket.ticketId, actorId, options.metadata || {}))
+      .catch(log.error);
+  } catch (err) { log.error(err); }
   Promise.resolve(webhooks.webhooks.ticketClosed(ticket.ticketId, userId)).catch(log.error);
   let notificationFailed = false;
   try { if (options.notifyUser !== false) {

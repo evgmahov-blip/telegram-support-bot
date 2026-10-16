@@ -473,13 +473,13 @@ export async function getTicketByUserId (
   return result as ISupportee | null;
 };
 
-export async function listUserTickets(userId: string, page: number, pageSize = 6): Promise<ISupportee[]> {
+export async function listUserTickets(userId: string, page: number, pageSize = 6, pageOffsetSize = pageSize): Promise<ISupportee[]> {
   return await Supportee.find({ userid: userId }).sort({ updated_at: -1, ticketId: -1 })
-    .skip(Math.max(0, page) * pageSize).limit(pageSize).lean<ISupportee[]>();
+    .skip(Math.max(0, page) * pageOffsetSize).limit(pageSize).lean<ISupportee[]>();
 }
 
 export async function listStaffTickets(
-  view: 'new' | 'mine' | 'active' | 'closed', actorId: string, page: number, pageSize = 6,
+  view: 'new' | 'mine' | 'active' | 'closed', actorId: string, page: number, pageSize = 6, pageOffsetSize = pageSize,
 ): Promise<ISupportee[]> {
   const query: Record<string, unknown> = view === 'new'
     ? { status: { $in: ['open', 'waiting_user'] }, assigned_to: null }
@@ -489,7 +489,7 @@ export async function listStaffTickets(
         ? { status: 'closed' }
         : { status: { $in: ['open', 'waiting_user'] } };
   return await Supportee.find(query).sort({ updated_at: -1, ticketId: -1 })
-    .skip(Math.max(0, page) * pageSize).limit(pageSize).lean<ISupportee[]>();
+    .skip(Math.max(0, page) * pageOffsetSize).limit(pageSize).lean<ISupportee[]>();
 }
 
 export async function claimStaffCard(ticketId: number, claim: string) {
@@ -847,7 +847,7 @@ export async function getLatestTicketMessage(ticketId: number): Promise<ITicketM
   return await TicketMessage.findOne({ ticketId }).sort({ timestamp: -1 }).lean<ITicketMessage | null>();
 }
 
-export async function getTicketTimelinePage(ticketId: number, page: number, pageSize: number, includeNotes: boolean) {
+export async function getTicketTimelinePage(ticketId: number, page: number, pageSize: number, includeNotes: boolean, pageOffsetSize = pageSize) {
   const clientMessageFilter = {
     ticketId,
     sender: { $in: ['user', 'staff'] },
@@ -870,7 +870,7 @@ export async function getTicketTimelinePage(ticketId: number, page: number, page
     { $match: { ticketId } },
     { $project: { at: '$timestamp', kind: { $literal: 'note' }, actor: '$author_id', text: 1, metadata: { $literal: {} } } },
   ] } });
-  pipeline.push({ $sort: { at: 1, _id: 1 } }, { $skip: Math.max(0, page) * pageSize }, { $limit: pageSize });
+  pipeline.push({ $sort: { at: 1, _id: 1 } }, { $skip: Math.max(0, page) * pageOffsetSize }, { $limit: pageSize });
   return await TicketMessage.aggregate(pipeline);
 }
 

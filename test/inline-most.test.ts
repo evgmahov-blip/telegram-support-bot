@@ -68,12 +68,12 @@ describe('MOST inline callbacks', () => {
     expect(mockUnassignTicketCommand).not.toHaveBeenCalled();
   });
 
-  it('keeps supported assignment callbacks working', async () => {
+  it('fails closed for historical assignment callbacks without durable binding', async () => {
     const ctx = makeCtx('assign:agent-2:42');
 
     await callbackQuery(ctx);
 
-    expect(mockAssignTicketCommand).toHaveBeenCalledWith(ctx, 'agent-2', 42);
-    expect(ctx.answerCbQuery).toHaveBeenCalledWith('Ticket assigned!', true);
+    expect(mockAssignTicketCommand).not.toHaveBeenCalled();
+    expect(ctx.answerCbQuery).toHaveBeenCalledWith(expect.stringContaining('старая кнопка отключена'), true);
   });
 });

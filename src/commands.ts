@@ -366,6 +366,7 @@ const assignCommand = async (ctx: Context): Promise<void> => {
   }
 
   await team.assignTicketCommand(ctx, args.trim(), parseInt(resolved.ticketIdStr));
+  await refreshStaffCard(parseInt(resolved.ticketIdStr));
 };
 
 /**
@@ -387,6 +388,7 @@ const unassignCommand = async (ctx: Context): Promise<void> => {
   }
 
   await team.unassignTicketCommand(ctx, parseInt(resolved.ticketIdStr));
+  await refreshStaffCard(parseInt(resolved.ticketIdStr));
 };
 
 /**
@@ -467,6 +469,7 @@ const priorityCommand = async (ctx: Context): Promise<void> => {
   }
 
   await team.setPriorityCommand(ctx, parseInt(resolved.ticketIdStr, 10), args as import('./interfaces').TicketPriority);
+  await refreshStaffCard(parseInt(resolved.ticketIdStr, 10));
 };
 
 /**
@@ -535,6 +538,7 @@ const noteCommand = async (ctx: Context): Promise<void> => {
   }
 
   await team.addInternalNoteCommand(ctx, parseInt(resolved.ticketIdStr), args);
+  await refreshStaffCard(parseInt(resolved.ticketIdStr));
 };
 
 /**

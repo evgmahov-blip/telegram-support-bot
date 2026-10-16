@@ -98,27 +98,10 @@ async function callbackQuery(ctx: Context) {
 
   if (await ticketUi.handleCallback(ctx)) return;
 
-  if (data && data.startsWith('assign:')) {
-    const parts = data.split(':');
-    const staffId = parts[1];
-    const ticketId = parseInt(parts[2]);
-
-    if (!team.canPerformAction(ctx.callbackQuery.from.id.toString(), 'assign')) {
-      await ctx.answerCbQuery('You cannot assign tickets.', true);
-      return;
-    }
-
-    await team.assignTicketCommand(ctx, staffId, ticketId);
-    await ctx.answerCbQuery('Ticket assigned!', true);
-    return;
-  }
-
-  if (data && data.startsWith('unassign:')) {
-    const parts = data.split(':');
-    const ticketId = parseInt(parts[1]);
-
-    await team.unassignTicketCommand(ctx, ticketId);
-    await ctx.answerCbQuery('Ticket unassigned.', true);
+  if (data && (data.startsWith('assign:') || data.startsWith('unassign:'))) {
+    // Historical buttons carry trusted-looking identifiers but no durable binding
+    // or race token. Keep slash commands as compatibility paths and fail closed.
+    await ctx.answerCbQuery('Эта старая кнопка отключена. Используйте актуальную карточку тикета.', true);
     return;
   }
 

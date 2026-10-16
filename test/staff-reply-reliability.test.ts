@@ -11,6 +11,11 @@ const mockTicketRepliedWebhook = jest.fn();
 const mockTicketClosedWebhook = jest.fn();
 const mockSendCSATSurvey = jest.fn();
 const mockLogError = jest.fn();
+const mockClearReplyPrompt = jest.fn();
+const mockGetTicketById = jest.fn();
+const mockAddInternalNote = jest.fn();
+const mockReserveStaffReply = jest.fn();
+const mockMarkStaffReplyDelivered = jest.fn();
 
 jest.mock('../src/cache', () => ({
   __esModule: true,
@@ -21,6 +26,8 @@ jest.mock('../src/cache', () => ({
       forward_replies_to_parent: false,
       auto_close_tickets: false,
       staffchat_type: 'telegram',
+      staffchat_id: 'staff123',
+      staffchat_thread_id: 7,
       language: {
         dear: 'Dear',
         regards: 'Regards',
@@ -46,18 +53,21 @@ jest.mock('../src/middleware', () => ({
 
 jest.mock('../src/db', () => ({
   getTicketByInternalId: mockGetTicketByInternalId,
-  getTicketById: jest.fn(),
+  getTicketById: mockGetTicketById,
   getTicketByUserId: jest.fn(),
   persistTicketMessage: mockPersistTicketMessage,
   setFirstResponseAt: mockSetFirstResponseAt,
   recordAnalyticsEventBestEffort: mockRecordEventBestEffort,
   transitionTicketStatus: mockTransitionTicketStatus,
+  clearReplyPrompt: mockClearReplyPrompt,
+  reserveStaffReply: mockReserveStaffReply,
+  markStaffReplyDelivered: mockMarkStaffReplyDelivered,
 }));
 
 jest.mock('../src/team', () => ({
   canPerformAction: mockCanPerformAction,
   canManageTicket: mockCanManageTicket,
-  addInternalNoteCommand: jest.fn(),
+  addInternalNoteCommand: mockAddInternalNote,
 }));
 
 jest.mock('../src/webhooks', () => ({
@@ -92,6 +102,7 @@ function createContext(): any {
       id: 'staff123',
     },
     message: {
+      message_thread_id: 7,
       text: 'We fixed it',
       from: {
         first_name: 'Engineer Name',
@@ -129,11 +140,81 @@ describe('staff reply delivery reliability', () => {
     mockCanPerformAction.mockReturnValue(true);
     mockCanManageTicket.mockReturnValue(true);
     mockGetTicketByInternalId.mockResolvedValue(openTicket());
+    mockGetTicketById.mockResolvedValue(openTicket());
     mockPersistTicketMessage.mockResolvedValue(undefined);
     mockSetFirstResponseAt.mockResolvedValue(undefined);
     mockTransitionTicketStatus.mockResolvedValue(null);
     mockSendCSATSurvey.mockResolvedValue(undefined);
     mockSendMessage.mockResolvedValue('sent');
+    mockReserveStaffReply.mockResolvedValue(null);
+    mockMarkStaffReplyDelivered.mockResolvedValue(undefined);
+  });
+
+  it('accepts a durable prompt owned by the replying engineer and clears it after delivery', async () => {
+    mockGetTicketByInternalId.mockResolvedValue({ ...openTicket(), assigned_to: 'agent1',
+      pending_reply_prompt_id: 700, pending_reply_staff_id: 'agent1', pending_reply_expires_at: new Date(Date.now() + 60_000) });
+    const context = createContext(); context.message.reply_to_message.text = 'Engineer, ответ для #T42: ответьте на это сообщение.';
+    await chat(context);
+    expect(mockSendMessage).toHaveBeenCalledWith('user123', 'telegram', expect.anything());
+    expect(mockClearReplyPrompt).toHaveBeenCalledWith(42, 'agent1');
+  });
+
+  it('does not let another engineer cancel or use an active prompt', async () => {
+    mockGetTicketByInternalId.mockResolvedValue({ ...openTicket(), assigned_to: 'agent1',
+      pending_reply_prompt_id: 700, pending_reply_staff_id: 'agent1', pending_reply_expires_at: new Date(Date.now() + 60_000) });
+    const context = createContext(); context.from.id = 'agent2';
+    context.message.reply_to_message.text = 'Engineer, ответ для #T42: ответьте на это сообщение.';
+    await chat(context);
+    expect(mockClearReplyPrompt).not.toHaveBeenCalled();
+    expect(mockSendMessage).not.toHaveBeenCalledWith('user123', expect.anything(), expect.anything());
+  });
+
+  it('expires a prompt without delivering its text', async () => {
+    mockGetTicketByInternalId.mockResolvedValue({ ...openTicket(), assigned_to: 'agent1',
+      pending_reply_prompt_id: 700, pending_reply_staff_id: 'agent1', pending_reply_expires_at: new Date(Date.now() - 1) });
+    const context = createContext(); context.message.reply_to_message.text = 'Engineer, ответ для #T42: ответьте на это сообщение.';
+    await chat(context);
+    expect(mockClearReplyPrompt).toHaveBeenCalledWith(42, 'agent1');
+    expect(mockSendMessage).not.toHaveBeenCalledWith('user123', expect.anything(), expect.anything());
+  });
+
+  it('stores a note prompt staff-only and never sends note text to the client', async () => {
+    const prompted = { ...openTicket(), assigned_to: 'agent1', pending_reply_prompt_id: 700,
+      pending_reply_staff_id: 'agent1', pending_reply_expires_at: new Date(Date.now() + 60_000) };
+    mockGetTicketByInternalId.mockResolvedValue(prompted); mockGetTicketById.mockResolvedValue(prompted);
+    const context = createContext(); context.message.text = 'private note';
+    context.message.reply_to_message.text = 'Engineer, 🔒 заметка для #T42: ответьте на это сообщение.';
+    await chat(context);
+    expect(mockAddInternalNote).toHaveBeenCalledWith(context, 42, 'private note');
+    expect(mockSendMessage).not.toHaveBeenCalledWith('user123', expect.anything(), expect.stringContaining('private note'));
+  });
+
+  it('rejects a prompt reply from the wrong configured topic', async () => {
+    const context = createContext(); context.message.message_thread_id = 8;
+    await chat(context);
+    expect(mockPersistTicketMessage).not.toHaveBeenCalled();
+    expect(mockSendMessage).not.toHaveBeenCalledWith('user123', expect.anything(), expect.anything());
+    expect(mockReply).toHaveBeenCalledWith(context, expect.stringContaining('настроенной теме'));
+  });
+
+  it('reuses the same delivery reservation when a failed send is retried with the same update', async () => {
+    const reservation = { delivered_at: null };
+    mockReserveStaffReply.mockResolvedValue(reservation);
+    mockSendMessage.mockRejectedValueOnce(new Error('temporary Telegram failure')).mockResolvedValueOnce('sent');
+    const context = createContext(); context.update_id = 12345; context.message.message_id = 91;
+    await expect(chat(context)).rejects.toThrow('temporary Telegram failure');
+    await expect(chat(context)).resolves.toBeUndefined();
+    expect(mockReserveStaffReply).toHaveBeenNthCalledWith(1, 42, 'agent1', 'We fixed it', 'telegram:12345:ticket:42');
+    expect(mockReserveStaffReply).toHaveBeenNthCalledWith(2, 42, 'agent1', 'We fixed it', 'telegram:12345:ticket:42');
+    expect(mockMarkStaffReplyDelivered).toHaveBeenCalledTimes(1);
+  });
+
+  it('short-circuits a retry whose reservation is already delivered', async () => {
+    mockReserveStaffReply.mockResolvedValue({ delivered_at: new Date() });
+    const context = createContext(); context.update_id = 12346;
+    await chat(context);
+    expect(mockSendMessage).not.toHaveBeenCalledWith('user123', expect.anything(), expect.anything());
+    expect(mockMarkStaffReplyDelivered).not.toHaveBeenCalled();
   });
 
   it('fails before delivery when immutable history cannot be persisted', async () => {
