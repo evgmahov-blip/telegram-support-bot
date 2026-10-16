@@ -188,7 +188,8 @@ class TelegramAddon implements Addon {
   };
 
   catch(handler: (error: Error, ctx?: Context) => void): void {
-    (this.bot.catch as any)((err: Error, gCtx: BotContext | undefined) => handler(err, gCtx as unknown as Context | undefined));
+    (this.bot.catch as any)((botError: { error: Error; ctx: BotContext }) =>
+      handler(botError.error, botError.ctx as unknown as Context));
   }
 
   hears(trigger: string | string[] | RegExp, callback: (ctx: Context) => void): void {

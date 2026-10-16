@@ -173,12 +173,6 @@ async function chat(ctx: Context) {
   const staffMessage = ctx.message.text || '';
   const deliveryKey = `telegram:${ctx.update_id || ctx.message.message_id}:ticket:${ticketId}`;
 
-  const isPromptReply = /(ответ|заметка) для #T\d+/i.test(replyText);
-  if (isPromptReply && ticket.pending_reply_prompt_id !== correlatedMessageId) {
-    await middleware.reply(ctx, 'Эта подсказка отменена, истекла или заменена. Нажмите кнопку в актуальной карточке.');
-    return;
-  }
-
   // Prompts are durable ticket state, so restart does not lose the selected ticket.
   if (ticket.pending_reply_prompt_id === correlatedMessageId) {
     if (ticket.pending_reply_staff_id !== senderId || !ticket.pending_reply_expires_at || new Date(ticket.pending_reply_expires_at).getTime() < Date.now()) {
@@ -187,13 +181,18 @@ async function chat(ctx: Context) {
       await middleware.reply(ctx, 'Запрос ответа истёк или принадлежит другому сотруднику. Нажмите «Ответить» снова.');
       return;
     }
-    if (/🔒\s*заметка для #T\d+/i.test(replyText)) {
+    if (ticket.pending_reply_kind !== 'reply' && ticket.pending_reply_kind !== 'note') {
+      await db.clearReplyPrompt(ticketId, senderId);
+      await middleware.reply(ctx, 'Тип подсказки не распознан. Нажмите «Ответить» или «Заметка» снова.');
+      return;
+    }
+    if (ticket.pending_reply_kind === 'note') {
       const current = await db.getTicketById(ticketId, null);
       if (!current || current.status === 'closed' || !team.canManageTicket(senderId, current.assigned_to)) {
         await middleware.reply(ctx, 'Владелец или состояние тикета изменились; заметка не сохранена.');
         return;
       }
-      await team.addInternalNoteCommand(ctx, ticketId, staffMessage);
+      await team.addInternalNoteCommand(ctx, ticketId, staffMessage, deliveryKey);
       await db.clearReplyPrompt(ticketId, senderId);
       await refreshStaffCard(ticketId);
       return;

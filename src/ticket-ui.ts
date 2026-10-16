@@ -58,11 +58,19 @@ export async function refreshStaffCard(ticketId: number): Promise<void> {
     if (typeof db.getTicketById !== 'function') return;
     let ticket = await db.getTicketById(ticketId, null);
     if (!ticket) return;
-    const text = await cardText(ticket);
-    const opts = { parse_mode: 'HTML', reply_markup: staffButtons(ticket) };
     if (ticket.staff_card_message_id && ticket.staff_card_chat_id) {
+      const cardChatId = ticket.staff_card_chat_id;
+      const cardMessageId = ticket.staff_card_message_id;
       try {
-      await TelegramAddon.getInstance().editMessage(ticket.staff_card_chat_id, ticket.staff_card_message_id, text, opts);
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const text = await cardText(ticket);
+        const opts = { parse_mode: 'HTML', reply_markup: staffButtons(ticket) };
+        await TelegramAddon.getInstance().editMessage(cardChatId, cardMessageId, text, opts);
+        const current = await db.getTicketById(ticketId, null);
+        if (!current || +new Date(current.updated_at) <= +new Date(ticket.updated_at)) return;
+        ticket = current;
+      }
+      log.error(`Карточка #T${ticketId} изменилась во время повторного обновления.`);
       return;
       } catch (err) {
         const description = String((err as { description?: string }).description || err);
@@ -71,11 +79,13 @@ export async function refreshStaffCard(ticketId: number): Promise<void> {
           log.error(`Не удалось обновить карточку #T${ticketId}:`, err);
           return; // Ambiguous failure: never risk a duplicate canonical card.
         }
-        const cleared = await db.clearStaffCardBinding(ticketId, String(ticket.staff_card_chat_id), ticket.staff_card_message_id);
+        const cleared = await db.clearStaffCardBinding(ticketId, String(cardChatId), cardMessageId);
         if (!cleared) return; // Another worker already repaired or replaced it.
         ticket = cleared;
       }
     }
+    const text = await cardText(ticket);
+    const opts = { parse_mode: 'HTML', reply_markup: staffButtons(ticket) };
     if (typeof db.claimStaffCard !== 'function') return;
     const claim = randomUUID();
     const claimed = await db.claimStaffCard(ticketId, claim);
@@ -315,7 +325,8 @@ export async function handleCallback(ctx: Context): Promise<boolean> {
       { parse_mode: 'HTML', reply_markup: { force_reply: true, selective: true }, reply_parameters: { message_id: qmsg!.message_id },
         message_thread_id: cache.config.staffchat_thread_id || undefined });
     if (!prompt) { await ctx.answerCbQuery('Не удалось создать подсказку ответа.', true); return true; }
-    const bound = await db.setReplyPrompt(id, actor, Number(prompt), new Date(Date.now()+PROMPT_MS), team.getStaffRole(actor)==='agent'?actor:undefined);
+    const bound = await db.setReplyPrompt(id, actor, Number(prompt), new Date(Date.now()+PROMPT_MS), action,
+      team.getStaffRole(actor)==='agent'?actor:undefined);
     if (!bound) {
       await TelegramAddon.getInstance().editMessage(cache.config.staffchat_id, Number(prompt), 'Эта подсказка отменена: владелец или состояние тикета изменились.').catch(log.error);
       await ctx.answerCbQuery('Владелец или состояние тикета изменились.', true); return true;

@@ -43,6 +43,7 @@ export interface ISupportee extends mongoose.Document {
   pending_reply_prompt_id: number | null;
   pending_reply_staff_id: string | null;
   pending_reply_expires_at: Date | null;
+  pending_reply_kind: 'reply' | 'note' | null;
   staff_card_claim: string | null;
   staff_card_claimed_at: Date | null;
   pending_action_token: string | null;
@@ -74,6 +75,7 @@ export const SupporteeSchema = new mongoose.Schema<ISupportee>({
   pending_reply_prompt_id: { type: Number, default: null },
   pending_reply_staff_id: { type: String, default: null },
   pending_reply_expires_at: { type: Date, default: null },
+  pending_reply_kind: { type: String, enum: ['reply', 'note'], default: null },
   staff_card_claim: { type: String, default: null },
   staff_card_claimed_at: { type: Date, default: null },
   pending_action_token: { type: String, default: null },
@@ -169,6 +171,7 @@ export interface IInternalNote extends mongoose.Document {
   author_id: string;
   text: string;
   timestamp: Date;
+  delivery_key?: string | null;
 }
 
 const InternalNoteSchema = new mongoose.Schema<IInternalNote>({
@@ -176,8 +179,13 @@ const InternalNoteSchema = new mongoose.Schema<IInternalNote>({
   author_id: { type: String, required: true },
   text: { type: String, required: true },
   timestamp: { type: Date, default: Date.now },
+  delivery_key: { type: String, required: false },
 });
 InternalNoteSchema.index({ ticketId: 1, timestamp: -1 });
+InternalNoteSchema.index(
+  { delivery_key: 1 },
+  { unique: true, partialFilterExpression: { delivery_key: { $type: 'string' } } },
+);
 
 const InternalNote = mongoose.model('InternalNote', InternalNoteSchema);
 
@@ -523,12 +531,20 @@ export async function clearStaffCardBinding(ticketId: number, chatId: string, me
   );
 }
 
-export async function setReplyPrompt(ticketId: number, staffId: string, promptId: number, expiresAt: Date, expectedOwner?: string) {
+export async function setReplyPrompt(ticketId: number, staffId: string, promptId: number, expiresAt: Date,
+  kind: 'reply' | 'note', expectedOwner?: string) {
   const query: Record<string, unknown> = { ticketId, status: { $in: ['open', 'waiting_user'] } };
   if (expectedOwner !== undefined) query.assigned_to = expectedOwner;
   return await Supportee.findOneAndUpdate(
     query,
-    { $set: { pending_reply_staff_id: staffId, pending_reply_prompt_id: promptId, pending_reply_expires_at: expiresAt }, $addToSet: { internalIds: promptId } },
+    [{ $set: {
+      internalIds: { $setUnion: [
+        { $filter: { input: { $ifNull: ['$internalIds', []] }, as: 'id', cond: { $ne: ['$$id', '$pending_reply_prompt_id'] } } },
+        [promptId],
+      ] },
+      pending_reply_staff_id: staffId, pending_reply_prompt_id: promptId,
+      pending_reply_expires_at: expiresAt, pending_reply_kind: kind,
+    } }],
     { new: true },
   );
 }
@@ -549,9 +565,10 @@ export async function consumePendingTicketAction(ticketId: number, type: string,
 export async function clearReplyPrompt(ticketId: number, staffId?: string) {
   const query: Record<string, unknown> = { ticketId };
   if (staffId) query.pending_reply_staff_id = staffId;
-  return await Supportee.findOneAndUpdate(query, { $set: {
-    pending_reply_staff_id: null, pending_reply_prompt_id: null, pending_reply_expires_at: null,
-  } }, { new: true });
+  return await Supportee.findOneAndUpdate(query, [{ $set: {
+    internalIds: { $filter: { input: { $ifNull: ['$internalIds', []] }, as: 'id', cond: { $ne: ['$$id', '$pending_reply_prompt_id'] } } },
+    pending_reply_staff_id: null, pending_reply_prompt_id: null, pending_reply_expires_at: null, pending_reply_kind: null,
+  } }], { new: true });
 }
 
 /** Persist a single-use menu intent on the user's existing ticket; no second ticket store. */
@@ -1035,12 +1052,17 @@ export async function addInternalNote(
   ticketId: number,
   author_id: string,
   text: string,
-): Promise<void> {
+  deliveryKey?: string,
+): Promise<boolean> {
   try {
-    const note = new InternalNote({ ticketId, author_id, text });
+    if (deliveryKey && await InternalNote.findOne({ delivery_key: deliveryKey })) return false;
+    const note = new InternalNote({ ticketId, author_id, text, delivery_key: deliveryKey });
     await note.save();
+    return true;
   } catch (err) {
+    if (deliveryKey && (err as { code?: number }).code === 11000) return false;
     log.error('DB addInternalNote error:', err);
+    throw err;
   }
 }
 

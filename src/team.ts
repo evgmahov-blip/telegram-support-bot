@@ -268,8 +268,9 @@ export async function unmuteTicketCommand(ctx: Context, ticketId: number): Promi
 /**
  * Adds an internal note to a ticket (not forwarded to user).
  */
-export async function addInternalNoteCommand(ctx: Context, ticketId: number, text: string): Promise<void> {
-    await db.addInternalNote(ticketId, ctx.from.id.toString(), text);
+export async function addInternalNoteCommand(ctx: Context, ticketId: number, text: string, deliveryKey?: string): Promise<void> {
+    const created = await db.addInternalNote(ticketId, ctx.from.id.toString(), text, deliveryKey);
+    if (created === false) return;
 
     // Show note in staff chat
     const esc = middleware.strictEscape;
@@ -280,7 +281,7 @@ export async function addInternalNoteCommand(ctx: Context, ticketId: number, tex
         { parse_mode: cache.config.parse_mode },
     ).catch(log.error);
 
-    await db.recordAnalyticsEvent('ticket.note_added', ticketId, ctx.from.id.toString());
+    db.recordAnalyticsEventBestEffort('ticket.note_added', ticketId, ctx.from.id.toString());
 }
 
 /**

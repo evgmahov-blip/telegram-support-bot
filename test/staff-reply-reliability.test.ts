@@ -152,8 +152,9 @@ describe('staff reply delivery reliability', () => {
 
   it('accepts a durable prompt owned by the replying engineer and clears it after delivery', async () => {
     mockGetTicketByInternalId.mockResolvedValue({ ...openTicket(), assigned_to: 'agent1',
-      pending_reply_prompt_id: 700, pending_reply_staff_id: 'agent1', pending_reply_expires_at: new Date(Date.now() + 60_000) });
-    const context = createContext(); context.message.reply_to_message.text = 'Engineer, ответ для #T42: ответьте на это сообщение.';
+      pending_reply_prompt_id: 700, pending_reply_staff_id: 'agent1', pending_reply_kind: 'reply',
+      pending_reply_expires_at: new Date(Date.now() + 60_000) });
+    const context = createContext(); context.message.reply_to_message.text = 'Prompt wording changed completely.';
     await chat(context);
     expect(mockSendMessage).toHaveBeenCalledWith('user123', 'telegram', expect.anything());
     expect(mockClearReplyPrompt).toHaveBeenCalledWith(42, 'agent1');
@@ -180,13 +181,32 @@ describe('staff reply delivery reliability', () => {
 
   it('stores a note prompt staff-only and never sends note text to the client', async () => {
     const prompted = { ...openTicket(), assigned_to: 'agent1', pending_reply_prompt_id: 700,
-      pending_reply_staff_id: 'agent1', pending_reply_expires_at: new Date(Date.now() + 60_000) };
+      pending_reply_staff_id: 'agent1', pending_reply_kind: 'note', pending_reply_expires_at: new Date(Date.now() + 60_000) };
     mockGetTicketByInternalId.mockResolvedValue(prompted); mockGetTicketById.mockResolvedValue(prompted);
-    const context = createContext(); context.message.text = 'private note';
-    context.message.reply_to_message.text = 'Engineer, 🔒 заметка для #T42: ответьте на это сообщение.';
+    const context = createContext(); context.update_id = 54321; context.message.text = 'private note';
+    context.message.reply_to_message.text = 'Prompt wording changed completely.';
     await chat(context);
-    expect(mockAddInternalNote).toHaveBeenCalledWith(context, 42, 'private note');
+    expect(mockAddInternalNote).toHaveBeenCalledWith(context, 42, 'private note', 'telegram:54321:ticket:42');
     expect(mockSendMessage).not.toHaveBeenCalledWith('user123', expect.anything(), expect.stringContaining('private note'));
+  });
+
+  it('fails a legacy prompt without durable kind closed and never sends its text to the client', async () => {
+    mockGetTicketByInternalId.mockResolvedValue({ ...openTicket(), assigned_to: 'agent1', pending_reply_prompt_id: 700,
+      pending_reply_staff_id: 'agent1', pending_reply_expires_at: new Date(Date.now() + 60_000) });
+    const context = createContext(); context.message.text = 'must remain internal';
+    await chat(context);
+    expect(mockReply).toHaveBeenCalledWith(context, 'Тип подсказки не распознан. Нажмите «Ответить» или «Заметка» снова.');
+    expect(mockClearReplyPrompt).toHaveBeenCalledWith(42, 'agent1');
+    expect(mockSendMessage).not.toHaveBeenCalledWith('user123', expect.anything(), expect.anything());
+  });
+
+  it('never sends a reply to a canceled or replaced note prompt to the client', async () => {
+    mockGetTicketByInternalId.mockResolvedValue(null);
+    const context = createContext(); context.message.text = 'old private note';
+    context.message.reply_to_message.text = 'Prompt wording changed completely.';
+    await chat(context);
+    expect(mockSendMessage).not.toHaveBeenCalledWith('user123', expect.anything(), expect.anything());
+    expect(mockPersistTicketMessage).not.toHaveBeenCalled();
   });
 
   it('rejects a prompt reply from the wrong configured topic', async () => {

@@ -17,7 +17,7 @@ describe('ticket ownership', () => {
     jest.clearAllMocks();
   });
 
-  it('takes only an active unowned ticket or the same agent ticket', async () => {
+  it('takes only an active unowned ticket so success means ownership changed', async () => {
     const ticket = { ticketId: 10, assigned_to: 'agent-1', status: 'open' };
     mockFindOneAndUpdate.mockResolvedValue(ticket);
 
@@ -28,10 +28,7 @@ describe('ticket ownership', () => {
       {
         ticketId: 10,
         status: { $in: ['open', 'waiting_user'] },
-        $or: [
-          { assigned_to: null },
-          { assigned_to: 'agent-1' },
-        ],
+        assigned_to: null,
       },
       { $set: { assigned_to: 'agent-1' } },
       { new: true },

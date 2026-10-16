@@ -49,6 +49,7 @@ jest.mock('../src/cache', () => ({
 
 import cache from '../src/cache';
 import * as middleware from '../src/middleware';
+import * as log from '../src/logger';
 import { registerCommonHandlers } from '../src/handlers';
 import { bindTelegramCompatibility } from '../src/addons/telegram';
 
@@ -99,15 +100,28 @@ describe('callback query completion semantics', () => {
     expect(settled).toBe(true);
   });
 
-  it('propagates inline callback failures to the ingress guard', async () => {
+  it('answers inline callback failures with a clear alert instead of leaving a spinner', async () => {
     const error = new Error('assignment failed');
     mockInlineCallbackQuery.mockRejectedValueOnce(error);
     const callback = registerCallbackHandler();
 
+    const answerCbQuery = jest.fn().mockResolvedValue(undefined);
     await expect(callback({
       callbackQuery: { data: 'assign:42' },
-      answerCbQuery: jest.fn(),
-    })).rejects.toBe(error);
+      answerCbQuery,
+    })).resolves.toBeUndefined();
+    expect(answerCbQuery).toHaveBeenCalledWith('Не удалось выполнить действие. Обновите карточку и повторите.', true);
+  });
+
+  it('handles grammY BotError cause shape when the failure alert itself cannot be answered', async () => {
+    mockInlineCallbackQuery.mockRejectedValueOnce(new Error('action failed'));
+    const telegramCause = { error_code: 400, description: 'query is too old' };
+    const callback = registerCallbackHandler();
+    await expect(callback({
+      callbackQuery: { data: 'tc:take:7' },
+      answerCbQuery: jest.fn().mockRejectedValue({ error: telegramCause }),
+    })).resolves.toBeUndefined();
+    expect(log.error).toHaveBeenCalledWith('Could not answer failed callback query:', telegramCause);
   });
 
   it('runs a registered callback with a raw grammY-shaped context', async () => {

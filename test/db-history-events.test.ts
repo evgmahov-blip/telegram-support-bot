@@ -31,7 +31,13 @@ AnalyticsEventModel.updateOne = mockEventUpdateOne;
 AnalyticsEventModel.bulkWrite = mockEventBulkWrite;
 AnalyticsEventModel.collection = { name: 'analyticsevents' };
 
-const InternalNoteModel: any = jest.fn();
+const mockNoteSave = jest.fn().mockResolvedValue(undefined);
+const mockNoteFindOne = jest.fn();
+const InternalNoteModel: any = jest.fn(function (this: any, data: any) {
+  Object.assign(this, data);
+  this.save = mockNoteSave;
+});
+InternalNoteModel.findOne = mockNoteFindOne;
 InternalNoteModel.collection = { name: 'internalnotes' };
 
 const SupporteeModel: any = {
@@ -81,6 +87,15 @@ describe('append-only ticket history and event log', () => {
     capturedEvents.length = 0;
     mockEventFindOne.mockImplementation(() => latestSeq(0));
     mockEventSave.mockResolvedValue(undefined);
+    mockNoteFindOne.mockResolvedValue(null);
+    mockNoteSave.mockResolvedValue(undefined);
+  });
+
+  it('deduplicates an internal note by Telegram delivery key', async () => {
+    await expect(db.addInternalNote(7, '42', 'secret', 'telegram:9:ticket:7')).resolves.toBe(true);
+    mockNoteFindOne.mockResolvedValueOnce({ delivery_key: 'telegram:9:ticket:7' });
+    await expect(db.addInternalNote(7, '42', 'secret', 'telegram:9:ticket:7')).resolves.toBe(false);
+    expect(mockNoteSave).toHaveBeenCalledTimes(1);
   });
 
   it('appends a ticket message without pruning older messages', async () => {

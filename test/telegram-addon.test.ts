@@ -10,6 +10,7 @@ const mockApi = {
 const mockBotUse = jest.fn();
 const mockBotStart = jest.fn().mockResolvedValue(undefined);
 const mockBotStop = jest.fn().mockResolvedValue(undefined);
+const mockBotCatch = jest.fn();
 const mockClaimTelegramUpdate = jest.fn().mockResolvedValue('claim-default');
 const mockCompleteTelegramUpdate = jest.fn().mockResolvedValue(undefined);
 const mockReleaseTelegramUpdate = jest.fn().mockResolvedValue(undefined);
@@ -23,7 +24,7 @@ jest.mock('grammy', () => ({
     command: jest.fn(),
     on: jest.fn(),
     hears: jest.fn(),
-    catch: jest.fn(),
+    catch: mockBotCatch,
     start: mockBotStart,
     stop: mockBotStop,
   })),
@@ -238,5 +239,15 @@ describe('TelegramAddon', () => {
 
     expect(answerCallbackQuery).toHaveBeenCalledWith({ text: 'result', show_alert: showAlert });
     await addon.stop();
+  });
+
+  it('unwraps grammY BotError into the registered error and context', () => {
+    const handler = jest.fn();
+    addon.catch(handler);
+    const cause = new Error('handler failed');
+    const rawContext = { callbackQuery: { id: 'q' } };
+    const grammyCatch = mockBotCatch.mock.calls[0][0];
+    grammyCatch({ error: cause, ctx: rawContext });
+    expect(handler).toHaveBeenCalledWith(cause, rawContext);
   });
 });

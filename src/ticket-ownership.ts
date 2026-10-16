@@ -3,8 +3,8 @@ import { ISupportee, Supportee } from './db';
 const ACTIVE_STATUSES: Array<'open' | 'waiting_user'> = ['open', 'waiting_user'];
 
 /**
- * Atomically take an unowned active ticket. Taking a ticket already owned by
- * the same agent is idempotent; a ticket owned by somebody else is untouched.
+ * Atomically take an unowned active ticket. A successful result always means
+ * ownership really changed, so callers may safely emit one ticket.taken event.
  */
 export async function takeTicket(
   ticketId: number,
@@ -14,10 +14,7 @@ export async function takeTicket(
     {
       ticketId,
       status: { $in: ACTIVE_STATUSES },
-      $or: [
-        { assigned_to: null },
-        { assigned_to: agentId },
-      ],
+      assigned_to: null,
     },
     { $set: { assigned_to: agentId } },
     { new: true },

@@ -151,16 +151,26 @@ export function registerCommonHandlers(addon: Addon, keys?: string[][]) {
 
   // Register event handlers for callback queries and file types.
   addon.on('callback_query', async (ctx: Context) => {
-    // Handle CSAT rating callbacks
-    if (ctx.callbackQuery.data && ctx.callbackQuery.data.startsWith('csat:')) {
-      const parts = ctx.callbackQuery.data.split(':');
-      const ticketId = parseInt(parts[1], 10);
-      const rating = parseInt(parts[2], 10);
-      await analytics.handleCSATCallback(ticketId, rating);
-      await ctx.answerCbQuery(cache.config.language.csatThankYou || 'Thank you!');
-      return;
+    try {
+      // Handle CSAT rating callbacks
+      if (ctx.callbackQuery.data && ctx.callbackQuery.data.startsWith('csat:')) {
+        const parts = ctx.callbackQuery.data.split(':');
+        const ticketId = parseInt(parts[1], 10);
+        const rating = parseInt(parts[2], 10);
+        await analytics.handleCSATCallback(ticketId, rating);
+        await ctx.answerCbQuery(cache.config.language.csatThankYou || 'Thank you!');
+        return;
+      }
+      await inline.callbackQuery(ctx);
+    } catch (err) {
+      log.error('Callback query failed:', err);
+      try {
+        await ctx.answerCbQuery('Не удалось выполнить действие. Обновите карточку и повторите.', true);
+      } catch (answerErr) {
+        const cause = (answerErr as { error?: unknown }).error || answerErr;
+        log.error('Could not answer failed callback query:', cause);
+      }
     }
-    await inline.callbackQuery(ctx);
   });
   addon.on([':photo'], (ctx: Context) => files.fileHandler('photo', addon, ctx));
   addon.on([':video'], (ctx: Context) => files.fileHandler('video', addon, ctx));

@@ -23,7 +23,8 @@ jest.mock('../src/ticket-ownership', () => ({ takeTicket: jest.fn(), transferTic
 jest.mock('../src/addons/telegram', () => ({ __esModule: true, default: { getInstance: () => ({ editMessage: edit }) } }));
 jest.mock('../src/cache', () => ({ __esModule: true, default: { config: {
   staffchat_id: '-100', staffchat_type: 'telegram', staffchat_thread_id: 7, language: { helpCommandText: 'help' },
-}, staffMembers: new Map([['42',{ telegram_id:'42', name:'Иван', role:'agent' }]]) } }));
+}, staffMembers: new Map([['42',{ telegram_id:'42', name:'Иван', role:'agent' }],
+  ['43',{ telegram_id:'43', name:'Пётр', role:'agent' }]]) } }));
 
 import { handleCallback, refreshStaffCard } from '../src/ticket-ui';
 import { Context, Messenger } from '../src/interfaces';
@@ -86,12 +87,37 @@ describe('raw ticket card callbacks', () => {
     await handleCallback(ctx('tc:reply:7'));
     expect(send).toHaveBeenCalledWith('-100', 'telegram', expect.stringContaining('tg://user?id=42'),
       expect.objectContaining({ parse_mode: 'HTML', reply_markup: { force_reply: true, selective: true } }));
+    expect(db.setReplyPrompt).toHaveBeenCalledWith(7, '42', 88, expect.any(Date), 'reply', '42');
+  });
+
+  it('uses real numeric staff role checks and rejects an unknown actor exactly', async () => {
+    await handleCallback(ctx('tc:reply:7', -100, 7, 55, 43));
+    expect(answer).toHaveBeenCalledWith('Сначала возьмите активный тикет.', true);
+    expect(send).not.toHaveBeenCalled();
   });
 
   it('edits a persisted card after restart without sending a duplicate', async () => {
     await refreshStaffCard(7);
     expect(edit).toHaveBeenCalledWith('-100', 55, expect.stringContaining('#T000007'), expect.anything());
     expect(send).not.toHaveBeenCalled();
+  });
+
+  it('re-reads and retries a card edit when updated_at advances concurrently', async () => {
+    const old = { ...ticket, updated_at: new Date('2026-01-01T00:00:00Z') };
+    const fresh = { ...old, status: 'waiting_user', updated_at: new Date('2026-01-01T00:00:01Z') };
+    getTicket.mockResolvedValueOnce(old).mockResolvedValueOnce(fresh).mockResolvedValueOnce(fresh);
+    await refreshStaffCard(7);
+    expect(edit).toHaveBeenCalledTimes(2);
+    expect(edit.mock.calls[1][2]).toContain('Ждём клиента');
+  });
+
+  it('does not emit a second taken event when ownership CAS reports no change', async () => {
+    const ownership = jest.requireMock('../src/ticket-ownership');
+    ownership.takeTicket.mockResolvedValueOnce(null);
+    await handleCallback(ctx('tc:take:7'));
+    const db = jest.requireMock('../src/db');
+    expect(db.recordAnalyticsEventBestEffort).not.toHaveBeenCalledWith('ticket.taken', 7, '42', expect.anything());
+    expect(answer).toHaveBeenCalledWith('Тикет уже взят или неактивен.', true);
   });
 
   it('edits staff list pages and hides next on the last page', async () => {
