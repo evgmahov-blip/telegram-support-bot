@@ -20,9 +20,10 @@ jest.mock('../src/db', () => ({
     ticketId: 1001,
     userid: 'user123',
     messenger: 'telegram',
-    status: 'closed',
+    status: 'open',
     category: null,
   }),
+  getTicketByInternalId: jest.fn().mockResolvedValue(null),
   getTicketByUserId: jest.fn().mockResolvedValue(null),
   transitionTicketStatus: mockTransitionTicketStatus,
   banUser: mockBanUser,
@@ -31,6 +32,10 @@ jest.mock('../src/db', () => ({
   recordAnalyticsEvent: jest.fn().mockResolvedValue(undefined),
   getInternalNotes: jest.fn().mockResolvedValue([]),
   getConversationHistory: jest.fn().mockResolvedValue([]),
+}));
+
+jest.mock('../src/ticket-state', () => ({
+  transitionTicketStateFrom: mockTransitionTicketStatus,
 }));
 
 jest.mock('../src/cache', () => ({
@@ -60,6 +65,8 @@ jest.mock('../src/cache', () => ({
 
 jest.mock('../src/team', () => ({
   canPerformAction: jest.fn().mockReturnValue(true),
+  getStaffRole: jest.fn().mockReturnValue('agent'),
+  canManageTicket: jest.fn().mockReturnValue(true),
 }));
 
 jest.mock('../src/workflows', () => ({
@@ -224,7 +231,12 @@ describe('Commands Module', () => {
 
       await commands.closeCommand(ctx);
 
-      expect(mockTransitionTicketStatus).toHaveBeenCalledWith(1001, 'closed');
+      expect(mockTransitionTicketStatus).toHaveBeenCalledWith(
+        1001,
+        ['open', 'waiting_user'],
+        'closed',
+        'user123',
+      );
     });
   });
 
