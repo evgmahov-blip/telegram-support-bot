@@ -63,7 +63,7 @@ async function autoReply(ctx: Context): Promise<boolean> {
   if (autoreply && autoreply.length > 0 && autoreply[0]?.question) {
     for (const autoReplyItem of autoreply) {
       if (messageText.includes(autoReplyItem.question)) {
-        reply(ctx, createAutoReplyMessage(autoReplyItem.answer, ctx));
+        await reply(ctx, createAutoReplyMessage(autoReplyItem.answer, ctx));
         return true;
       }
     }

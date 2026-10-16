@@ -160,6 +160,15 @@ describe('Users Module', () => {
       getFile: () => {},
     });
 
+    it('propagates configured auto-reply send failures', async () => {
+      const error = new Error('guest reply failed');
+      mockReply.mockRejectedValueOnce(error);
+
+      await expect(users.chat(createMockContext('hello'), { id: 'chat123' })).rejects.toBe(error);
+      expect(mockReply).toHaveBeenCalledTimes(1);
+      expect(mockSendMessage).not.toHaveBeenCalled();
+    });
+
     it('should process new ticket for first-time user', async () => {
       const ctx = createMockContext('I need help with my account');
       const mockTicket = {

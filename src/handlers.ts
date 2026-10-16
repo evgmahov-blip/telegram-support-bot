@@ -73,14 +73,14 @@ export function registerCommonHandlers(addon: Addon, keys?: string[][]) {
   addon.command('ticket', (ctx: Context) => commands.ticketCommand(ctx));
   addon.command('broadcast', (ctx: Context) => commands.broadcastCommand(ctx));
 
-  addon.command('id', (ctx: Context) =>
-    middleware.reply(ctx, `User ID: ${ctx.from.id}\nGroup ID: ${ctx.chat.id}`, {
+  addon.command('id', async (ctx: Context) =>
+    await middleware.reply(ctx, `User ID: ${ctx.from.id}\nGroup ID: ${ctx.chat.id}`, {
       parse_mode: cache.config.parse_mode,
     })
   );
 
-  addon.command('faq', (ctx: Context) =>
-    middleware.reply(ctx, cache.config.language.faqCommandText, {
+  addon.command('faq', async (ctx: Context) =>
+    await middleware.reply(ctx, cache.config.language.faqCommandText, {
       parse_mode: cache.config.parse_mode,
     })
   );

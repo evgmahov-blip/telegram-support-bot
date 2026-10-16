@@ -12,6 +12,14 @@ import * as log from '../../logger'
 
 type BotContext = GrammyContext & SessionFlavor<SessionData>;
 
+export function bindTelegramCompatibility(ctx: BotContext): Context {
+  const typedCtx = ctx as unknown as Context;
+  typedCtx.messenger = Messenger.TELEGRAM;
+  typedCtx.answerCbQuery = (text?: string, showAlert = false) =>
+    ctx.answerCallbackQuery({ text, show_alert: showAlert }).then(() => undefined);
+  return typedCtx;
+}
+
 class TelegramAddon implements Addon {
   public bot: Bot<BotContext>;
   public botInfo: Record<string, unknown> = {};
@@ -101,6 +109,7 @@ class TelegramAddon implements Addon {
         && /can't parse entities/i.test(telegramError.description || '');
       if (!isEntityParseError) throw err;
 
+      log.info(`Retrying Telegram message to ${chatId} as plain text after entity parse error: ${telegramError.description || 'unknown description'}`);
       const plainOptions = { ...options };
       delete plainOptions.parse_mode;
       delete plainOptions.entities;
@@ -212,10 +221,7 @@ class TelegramAddon implements Addon {
 
     this.bot.use(this.initSession());
     this.bot.use(async (ctx: BotContext, next) => {
-      const typedCtx = ctx as unknown as Context;
-      typedCtx.messenger = Messenger.TELEGRAM;
-      typedCtx.answerCbQuery = (text?: string, showAlert = false) =>
-        ctx.answerCallbackQuery({ text, show_alert: showAlert }).then(() => undefined);
+      const typedCtx = bindTelegramCompatibility(ctx);
 
       if (cache.config.dev_mode) {
         await middleware.reply(

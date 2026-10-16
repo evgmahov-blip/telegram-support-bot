@@ -247,5 +247,5 @@ export async function showStatsCommand(ctx: Context): Promise<void> {
         stats += `⭐ CSAT score: ${avgCSAT}/5.0\n`;
     }
 
-    middleware.reply(ctx, stats, { parse_mode: cache.config.parse_mode });
+    await middleware.reply(ctx, stats, { parse_mode: cache.config.parse_mode });
 }

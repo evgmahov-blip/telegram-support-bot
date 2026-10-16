@@ -50,6 +50,7 @@ jest.mock('../src/cache', () => ({
 import cache from '../src/cache';
 import * as middleware from '../src/middleware';
 import { registerCommonHandlers } from '../src/handlers';
+import { bindTelegramCompatibility } from '../src/addons/telegram';
 
 function registerCallbackHandler(): (ctx: any) => Promise<void> {
   let callbackHandler!: (ctx: any) => Promise<void>;
@@ -107,6 +108,27 @@ describe('callback query completion semantics', () => {
       callbackQuery: { data: 'assign:42' },
       answerCbQuery: jest.fn(),
     })).rejects.toBe(error);
+  });
+
+  it('runs a registered callback with a raw grammY-shaped context', async () => {
+    mockInlineCallbackQuery.mockImplementationOnce(async (ctx) => {
+      await ctx.answerCbQuery('This action is no longer available.', true);
+    });
+    const callback = registerCallbackHandler();
+    const answerCallbackQuery = jest.fn().mockResolvedValue(true);
+    const rawContext: any = {
+      callbackQuery: { data: 'unknown', from: { id: 1 } },
+      session: { mode: null, modeData: {} },
+      answerCallbackQuery,
+    };
+
+    const compatibleContext = bindTelegramCompatibility(rawContext);
+    await callback(compatibleContext);
+
+    expect(answerCallbackQuery).toHaveBeenCalledWith({
+      text: 'This action is no longer available.',
+      show_alert: true,
+    });
   });
 
   it('keeps the start command pending until both replies complete', async () => {
