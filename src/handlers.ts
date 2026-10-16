@@ -88,7 +88,7 @@ export function registerCommonHandlers(addon: Addon, keys?: string[][]) {
   addon.command('help', (ctx: Context) => commands.helpCommand(ctx));
 
   // Common "links" command with platform-specific URL handling.
-  addon.command('links', (ctx: Context) => {
+  addon.command('links', async (ctx: Context) => {
     let links = '';
     const subcategories: string[] = [];
     for (const cat of cache.config.categories) {
@@ -114,35 +114,33 @@ export function registerCommonHandlers(addon: Addon, keys?: string[][]) {
         }
       }
     }
-    middleware.reply(ctx, `${cache.config.language.links}:\n${links}`, {
+    await middleware.reply(ctx, `${cache.config.language.links}:\n${links}`, {
       parse_mode: cache.config.parse_mode,
     });
   });
 
   if (cache.config.pass_start === false) {
-    addon.command('start', (ctx: Context) => {
+    addon.command('start', async (ctx: Context) => {
       if (ctx.chat.type === 'private') {
         const hasCategories = cache.config.categories && cache.config.categories.length > 0;
         const startMarkup = !hasCategories && addon.platform === 'telegram' ? startKeyboardMarkup() : null;
         if (startMarkup) {
-          middleware.reply(ctx, cache.config.language.startCommandText, startMarkup);
+          await middleware.reply(ctx, cache.config.language.startCommandText, startMarkup);
         } else {
-          middleware.reply(ctx, cache.config.language.startCommandText);
+          await middleware.reply(ctx, cache.config.language.startCommandText);
         }
         if (hasCategories) {
           // For Telegram, use inline keyboard keys if available.
           if (addon.platform === 'telegram' && keys) {
-            setTimeout(() => {
-              middleware.reply(ctx, cache.config.language.services, inline.replyKeyboard(keys));
-            }, 500);
+            await new Promise((resolve) => setTimeout(resolve, 500));
+            await middleware.reply(ctx, cache.config.language.services, inline.replyKeyboard(keys));
           } else {
-            setTimeout(() => {
-              middleware.reply(ctx, cache.config.language.services);
-            }, 500);
+            await new Promise((resolve) => setTimeout(resolve, 500));
+            await middleware.reply(ctx, cache.config.language.services);
           }
         }
       } else {
-        middleware.reply(ctx, cache.config.language.prvChatOnly);
+        await middleware.reply(ctx, cache.config.language.prvChatOnly);
       }
     });
   }
@@ -171,11 +169,11 @@ export function registerCommonHandlers(addon: Addon, keys?: string[][]) {
   }
 
   // Register generic text handlers.
-  addon.hears(cache.config.language.back, (ctx: Context) => {
+  addon.hears(cache.config.language.back, async (ctx: Context) => {
     if (addon.platform === 'telegram' && keys) {
-      middleware.reply(ctx, cache.config.language.services, inline.replyKeyboard(keys));
+      await middleware.reply(ctx, cache.config.language.services, inline.replyKeyboard(keys));
     } else {
-      middleware.reply(ctx, cache.config.language.services, []);
+      await middleware.reply(ctx, cache.config.language.services, []);
     }
   });
 
@@ -188,7 +186,7 @@ export function registerCommonHandlers(addon: Addon, keys?: string[][]) {
     if (!ctx.session.admin || ctx.chat.type === 'private') {
       const userCommand = commands.findUserCommand(cmd);
       if (userCommand) {
-        middleware.reply(ctx, userCommand.text, { parse_mode: cache.config.parse_mode });
+        await middleware.reply(ctx, userCommand.text, { parse_mode: cache.config.parse_mode });
         return;
       }
     }

@@ -14,13 +14,13 @@ const removeKeyboard = () => ({
   reply_markup: { remove_keyboard: true },
 });
 
-const createCategoryHandler = (category: any) => (ctx: Context) => {
+const createCategoryHandler = (category: any) => async (ctx: Context) => {
   ctx.session.mode = '';
   ctx.session.modeData = {} as ModeData;
   if (category.msg !== undefined) {
-    middleware.reply(ctx, category.msg);
+    await middleware.reply(ctx, category.msg);
   } else {
-    middleware.reply(
+    await middleware.reply(
       ctx,
       `${cache.config.language.msgForwarding}\n*${category.name}*`,
       removeKeyboard()
@@ -31,10 +31,10 @@ const createCategoryHandler = (category: any) => (ctx: Context) => {
   ctx.session.groupCategory = category.name;
 };
 
-const createSubcategoryHandler = (category: any, subgroup: any, displayName: string) => (ctx: Context) => {
+const createSubcategoryHandler = (category: any, subgroup: any, displayName: string) => async (ctx: Context) => {
   ctx.session.mode = '';
   ctx.session.modeData = {} as ModeData;
-  middleware.reply(
+  await middleware.reply(
     ctx,
     `${cache.config.language.msgForwarding}\n*${displayName}*`,
     removeKeyboard()
@@ -79,10 +79,10 @@ function initInline(bot: TelegramAddon) {
 
     subKeys.push([language.back]);
 
-    bot.hears(category.name, (ctx: Context) => {
+    bot.hears(category.name, async (ctx: Context) => {
       ctx.session.mode = '';
       ctx.session.modeData = {} as ModeData;
-      middleware.reply(ctx, language.whatSubCategory, replyKeyboard(subKeys));
+      await middleware.reply(ctx, language.whatSubCategory, replyKeyboard(subKeys));
     });
   }
   return keys;

@@ -57,7 +57,7 @@ async function resolveTicketFromReply(
 /**
  * Display help text depending on whether the user is an admin.
  */
-const helpCommand = (ctx: Context): void => {
+const helpCommand = async (ctx: Context): Promise<void> => {
   const { language, parse_mode } = cache.config;
   let text = ctx.session.admin ? language.helpCommandStaffText : language.helpCommandText;
 
@@ -90,7 +90,7 @@ const helpCommand = (ctx: Context): void => {
       .join('\n');
   }
 
-  middleware.reply(ctx, text, { parse_mode });
+  await middleware.reply(ctx, text, { parse_mode });
 };
 
 /**
@@ -114,7 +114,7 @@ const clearCommand = async (ctx: Context): Promise<void> => {
   Object.keys(cache.ticketIDs).forEach(k => delete cache.ticketIDs[k]);
   Object.keys(cache.ticketStatus).forEach(key => delete cache.ticketStatus[key]);
   Object.keys(cache.ticketSent).forEach(key => delete cache.ticketSent[key]);
-  middleware.reply(ctx, 'All tickets closed.');
+  await middleware.reply(ctx, 'All tickets closed.');
 };
 
 /**
@@ -181,14 +181,14 @@ const closeCommand = async (ctx: Context): Promise<void> => {
 
   const resolved = await resolveTicketFromReply(replyText, null);
   if (!resolved) {
-    middleware.reply(ctx, 'Could not find ticket in the replied message.');
+    await middleware.reply(ctx, 'Could not find ticket in the replied message.');
     return;
   }
   const { ticket, ticketIdStr } = resolved;
 
   const closed = await db.transitionTicketStatus(ticket.ticketId, 'closed');
   if (!closed) {
-    middleware.reply(ctx, 'Ticket state changed before it could be closed.');
+    await middleware.reply(ctx, 'Ticket state changed before it could be closed.');
     return;
   }
 
@@ -258,7 +258,7 @@ const banCommand = async (ctx: Context): Promise<void> => {
 
   const resolved = await resolveTicketFromReply(replyText);
   if (!resolved) {
-    middleware.reply(ctx, 'Could not find ticket in the replied message.');
+    await middleware.reply(ctx, 'Could not find ticket in the replied message.');
     return;
   }
   const { ticket, ticketIdStr } = resolved;
@@ -283,14 +283,14 @@ const reopenCommand = async (ctx: Context): Promise<void> => {
 
   const resolved = await resolveTicketFromReply(replyText);
   if (!resolved) {
-    middleware.reply(ctx, 'Could not find ticket in the replied message.');
+    await middleware.reply(ctx, 'Could not find ticket in the replied message.');
     return;
   }
   const { ticket, ticketIdStr } = resolved;
 
   const reopened = await db.transitionTicketStatus(ticket.ticketId, 'open');
   if (!reopened) {
-    middleware.reply(ctx, 'Ticket state changed before it could be reopened.');
+    await middleware.reply(ctx, 'Ticket state changed before it could be reopened.');
     return;
   }
   await middleware.sendMessage(
@@ -312,7 +312,7 @@ const unbanCommand = async (ctx: Context): Promise<void> => {
 
   const resolved = await resolveTicketFromReply(replyText);
   if (!resolved) {
-    middleware.reply(ctx, 'Could not find ticket in the replied message.');
+    await middleware.reply(ctx, 'Could not find ticket in the replied message.');
     return;
   }
   const { ticket, ticketIdStr } = resolved;
@@ -334,25 +334,25 @@ const assignCommand = async (ctx: Context): Promise<void> => {
   if (!ctx.session.admin) return;
   const args = ctx.match?.trim();
   if (!args) {
-    middleware.reply(ctx, 'Usage: /assign <staff_telegram_id>');
+    await middleware.reply(ctx, 'Usage: /assign <staff_telegram_id>');
     return;
   }
 
   // Check permission to assign
   if (!team.canPerformAction(ctx.from.id.toString(), 'assign')) {
-    middleware.reply(ctx, 'You do not have permission to assign tickets.');
+    await middleware.reply(ctx, 'You do not have permission to assign tickets.');
     return;
   }
 
   const replyText = ctx.message.reply_to_message?.text || ctx.message.reply_to_message?.caption;
   if (!replyText) {
-    middleware.reply(ctx, 'Reply to a ticket message to assign it.');
+    await middleware.reply(ctx, 'Reply to a ticket message to assign it.');
     return;
   }
 
   const resolved = await resolveTicketFromReply(replyText);
   if (!resolved) {
-    middleware.reply(ctx, 'Could not find ticket ID in the replied message.');
+    await middleware.reply(ctx, 'Could not find ticket ID in the replied message.');
     return;
   }
 
@@ -367,13 +367,13 @@ const unassignCommand = async (ctx: Context): Promise<void> => {
 
   const replyText = ctx.message.reply_to_message?.text || ctx.message.reply_to_message?.caption;
   if (!replyText) {
-    middleware.reply(ctx, 'Reply to a ticket message to unassign it.');
+    await middleware.reply(ctx, 'Reply to a ticket message to unassign it.');
     return;
   }
 
   const resolved = await resolveTicketFromReply(replyText);
   if (!resolved) {
-    middleware.reply(ctx, 'Could not find ticket ID in the replied message.');
+    await middleware.reply(ctx, 'Could not find ticket ID in the replied message.');
     return;
   }
 
@@ -387,19 +387,19 @@ const tagCommand = async (ctx: Context): Promise<void> => {
   if (!ctx.session.admin) return;
   const args = ctx.match?.trim();
   if (!args) {
-    middleware.reply(ctx, 'Usage: /tag <tag1,tag2,...>');
+    await middleware.reply(ctx, 'Usage: /tag <tag1,tag2,...>');
     return;
   }
 
   const replyText = ctx.message.reply_to_message?.text || ctx.message.reply_to_message?.caption;
   if (!replyText) {
-    middleware.reply(ctx, 'Reply to a ticket message to add tags.');
+    await middleware.reply(ctx, 'Reply to a ticket message to add tags.');
     return;
   }
 
   const resolved = await resolveTicketFromReply(replyText);
   if (!resolved) {
-    middleware.reply(ctx, 'Could not find ticket ID in the replied message.');
+    await middleware.reply(ctx, 'Could not find ticket ID in the replied message.');
     return;
   }
 
@@ -414,19 +414,19 @@ const untagCommand = async (ctx: Context): Promise<void> => {
   if (!ctx.session.admin) return;
   const args = ctx.match?.trim();
   if (!args) {
-    middleware.reply(ctx, 'Usage: /untag <tag>');
+    await middleware.reply(ctx, 'Usage: /untag <tag>');
     return;
   }
 
   const replyText = ctx.message.reply_to_message?.text || ctx.message.reply_to_message?.caption;
   if (!replyText) {
-    middleware.reply(ctx, 'Reply to a ticket message to remove a tag.');
+    await middleware.reply(ctx, 'Reply to a ticket message to remove a tag.');
     return;
   }
 
   const resolved = await resolveTicketFromReply(replyText);
   if (!resolved) {
-    middleware.reply(ctx, 'Could not find ticket ID in the replied message.');
+    await middleware.reply(ctx, 'Could not find ticket ID in the replied message.');
     return;
   }
 
@@ -441,19 +441,19 @@ const priorityCommand = async (ctx: Context): Promise<void> => {
   const args = ctx.match?.trim().toLowerCase() ?? '';
   const validPriorities = ['low', 'normal', 'high', 'urgent'];
   if (!args || !validPriorities.includes(args)) {
-    middleware.reply(ctx, `Usage: /priority <${validPriorities.join('|')}>`);
+    await middleware.reply(ctx, `Usage: /priority <${validPriorities.join('|')}>`);
     return;
   }
 
   const replyText = ctx.message.reply_to_message?.text || ctx.message.reply_to_message?.caption;
   if (!replyText) {
-    middleware.reply(ctx, 'Reply to a ticket message to set priority.');
+    await middleware.reply(ctx, 'Reply to a ticket message to set priority.');
     return;
   }
 
   const resolved = await resolveTicketFromReply(replyText);
   if (!resolved) {
-    middleware.reply(ctx, 'Could not find ticket ID in the replied message.');
+    await middleware.reply(ctx, 'Could not find ticket ID in the replied message.');
     return;
   }
 
@@ -468,13 +468,13 @@ const muteCommand = async (ctx: Context): Promise<void> => {
 
   const replyText = ctx.message.reply_to_message?.text || ctx.message.reply_to_message?.caption;
   if (!replyText) {
-    middleware.reply(ctx, 'Reply to a ticket message to mute it.');
+    await middleware.reply(ctx, 'Reply to a ticket message to mute it.');
     return;
   }
 
   const resolved = await resolveTicketFromReply(replyText);
   if (!resolved) {
-    middleware.reply(ctx, 'Could not find ticket ID in the replied message.');
+    await middleware.reply(ctx, 'Could not find ticket ID in the replied message.');
     return;
   }
 
@@ -489,13 +489,13 @@ const unmuteCommand = async (ctx: Context): Promise<void> => {
 
   const replyText = ctx.message.reply_to_message?.text || ctx.message.reply_to_message?.caption;
   if (!replyText) {
-    middleware.reply(ctx, 'Reply to a ticket message to unmute it.');
+    await middleware.reply(ctx, 'Reply to a ticket message to unmute it.');
     return;
   }
 
   const resolved = await resolveTicketFromReply(replyText);
   if (!resolved) {
-    middleware.reply(ctx, 'Could not find ticket ID in the replied message.');
+    await middleware.reply(ctx, 'Could not find ticket ID in the replied message.');
     return;
   }
 
@@ -509,19 +509,19 @@ const noteCommand = async (ctx: Context): Promise<void> => {
   if (!ctx.session.admin) return;
   const args = ctx.match?.trim();
   if (!args) {
-    middleware.reply(ctx, 'Usage: /note <internal note text>');
+    await middleware.reply(ctx, 'Usage: /note <internal note text>');
     return;
   }
 
   const replyText = ctx.message.reply_to_message?.text || ctx.message.reply_to_message?.caption;
   if (!replyText) {
-    middleware.reply(ctx, 'Reply to a ticket message to add an internal note.');
+    await middleware.reply(ctx, 'Reply to a ticket message to add an internal note.');
     return;
   }
 
   const resolved = await resolveTicketFromReply(replyText);
   if (!resolved) {
-    middleware.reply(ctx, 'Could not find ticket ID in the replied message.');
+    await middleware.reply(ctx, 'Could not find ticket ID in the replied message.');
     return;
   }
 
@@ -536,13 +536,13 @@ const notesCommand = async (ctx: Context): Promise<void> => {
 
   const replyText = ctx.message.reply_to_message?.text || ctx.message.reply_to_message?.caption;
   if (!replyText) {
-    middleware.reply(ctx, 'Reply to a ticket message to view its internal notes.');
+    await middleware.reply(ctx, 'Reply to a ticket message to view its internal notes.');
     return;
   }
 
   const resolved = await resolveTicketFromReply(replyText);
   if (!resolved) {
-    middleware.reply(ctx, 'Could not find ticket ID in the replied message.');
+    await middleware.reply(ctx, 'Could not find ticket ID in the replied message.');
     return;
   }
 
@@ -567,7 +567,7 @@ const statsCommand = async (ctx: Context): Promise<void> => {
 
   // Check permission to view analytics
   if (!team.canPerformAction(ctx.from.id.toString(), 'view_analytics')) {
-    middleware.reply(ctx, 'You do not have permission to view analytics.');
+    await middleware.reply(ctx, 'You do not have permission to view analytics.');
     return;
   }
 
@@ -605,7 +605,7 @@ const ticketCommand = async (ctx: Context): Promise<void> => {
     }
   }
   if (!ticket) {
-    middleware.reply(ctx, 'Usage: /ticket <id> (or reply to a ticket message)');
+    await middleware.reply(ctx, 'Usage: /ticket <id> (or reply to a ticket message)');
     return;
   }
 
@@ -639,7 +639,7 @@ const ticketCommand = async (ctx: Context): Promise<void> => {
     }
   }
 
-  middleware.reply(ctx, lines.join('\n'), { parse_mode });
+  await middleware.reply(ctx, lines.join('\n'), { parse_mode });
 };
 
 /**
@@ -649,12 +649,12 @@ const broadcastCommand = async (ctx: Context): Promise<void> => {
   if (!ctx.session.admin) return;
   const { language, allow_broadcast } = cache.config;
   if (!allow_broadcast) {
-    middleware.reply(ctx, 'Broadcast is disabled. Set allow_broadcast: true in config.yaml to enable it.');
+    await middleware.reply(ctx, 'Broadcast is disabled. Set allow_broadcast: true in config.yaml to enable it.');
     return;
   }
   const text = ctx.match?.trim();
   if (!text) {
-    middleware.reply(ctx, 'Usage: /broadcast <text>');
+    await middleware.reply(ctx, 'Usage: /broadcast <text>');
     return;
   }
 
@@ -670,7 +670,7 @@ const broadcastCommand = async (ctx: Context): Promise<void> => {
     }
   }
   log.info(`Broadcast by @${ctx.from.username ?? '-'} (${ctx.from.id}) reached ${sent}/${users.length} users`);
-  middleware.reply(ctx, `${language.broadcastSent} ${sent}/${users.length}`);
+  await middleware.reply(ctx, `${language.broadcastSent} ${sent}/${users.length}`);
 };
 
 // --- Workflow Commands ---
@@ -678,10 +678,10 @@ const broadcastCommand = async (ctx: Context): Promise<void> => {
 /**
  * List canned responses: /templates
  */
-const templatesCommand = (ctx: Context): void => {
+const templatesCommand = async (ctx: Context): Promise<void> => {
   if (!ctx.session.admin) return;
   const output = workflows.listCannedResponses();
-  middleware.reply(ctx, output, { parse_mode: cache.config.parse_mode });
+  await middleware.reply(ctx, output, { parse_mode: cache.config.parse_mode });
 };
 
 export {

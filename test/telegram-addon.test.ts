@@ -61,6 +61,7 @@ describe('TelegramAddon', () => {
     mockClaimTelegramUpdate.mockResolvedValue('claim-default');
     mockCompleteTelegramUpdate.mockResolvedValue(undefined);
     mockReleaseTelegramUpdate.mockResolvedValue(undefined);
+    mockApi.sendMessage.mockResolvedValue({ message_id: 5 });
   });
 
   it('sends plain messages without a thread id by default', async () => {
@@ -103,6 +104,66 @@ describe('TelegramAddon', () => {
   it('converts legacy Markdown to HTML', async () => {
     await addon.sendMessage('555', 'hi', { parse_mode: 'Markdown' });
     expect(mockApi.sendMessage.mock.calls[0][2]).toMatchObject({ parse_mode: 'HTML' });
+  });
+
+  it('preserves valid formatted messages in a single send', async () => {
+    await addon.sendMessage('555', '*valid*', { parse_mode: 'MarkdownV2' });
+    expect(mockApi.sendMessage).toHaveBeenCalledTimes(1);
+    expect(mockApi.sendMessage).toHaveBeenCalledWith('555', '*valid*', expect.objectContaining({
+      parse_mode: 'MarkdownV2',
+    }));
+  });
+
+  it('retries entity parse 400s once as plain text while preserving non-format options', async () => {
+    const punctuation = '- # _ * [ ] ( ) ~ ` > + = | { } . !';
+    mockApi.sendMessage
+      .mockRejectedValueOnce({ error_code: 400, description: "Bad Request: can't parse entities: Character '-' is reserved" })
+      .mockResolvedValueOnce({ message_id: 12 });
+
+    await expect(addon.sendMessage('555', punctuation, {
+      parse_mode: 'MarkdownV2',
+      entities: [{ type: 'bold', offset: 0, length: 1 }],
+      reply_markup: { inline_keyboard: [] },
+      reply_parameters: { message_id: 9 },
+    })).resolves.toBe('12');
+
+    expect(mockApi.sendMessage).toHaveBeenCalledTimes(2);
+    expect(mockApi.sendMessage.mock.calls[1][2]).toEqual(expect.objectContaining({
+      reply_markup: { inline_keyboard: [] },
+      reply_parameters: { message_id: 9 },
+      disable_web_page_preview: true,
+    }));
+    expect(mockApi.sendMessage.mock.calls[1][2]).not.toHaveProperty('parse_mode');
+    expect(mockApi.sendMessage.mock.calls[1][2]).not.toHaveProperty('entities');
+  });
+
+  it('does not retry unrelated failures and propagates fallback failures', async () => {
+    const unrelated = { error_code: 400, description: 'Bad Request: chat not found' };
+    mockApi.sendMessage.mockRejectedValueOnce(unrelated);
+    await expect(addon.sendMessage('555', '#raw', { parse_mode: 'MarkdownV2' })).rejects.toBe(unrelated);
+    expect(mockApi.sendMessage).toHaveBeenCalledTimes(1);
+
+    mockApi.sendMessage.mockClear();
+    const fallbackFailure = new Error('network failed');
+    mockApi.sendMessage
+      .mockRejectedValueOnce({ error_code: 400, description: "Bad Request: can't parse entities" })
+      .mockRejectedValueOnce(fallbackFailure);
+    await expect(addon.sendMessage('555', '-raw', { parse_mode: 'MarkdownV2' })).rejects.toBe(fallbackFailure);
+    expect(mockApi.sendMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not mutate caller options during normalization or fallback', async () => {
+    const options = {
+      parse_mode: 'MarkdownV2',
+      entities: [{ type: 'bold', offset: 0, length: 1 }],
+      reply_markup: { force_reply: true },
+    };
+    const snapshot = JSON.parse(JSON.stringify(options));
+    mockApi.sendMessage
+      .mockRejectedValueOnce({ error_code: 400, description: "can't parse entities" })
+      .mockResolvedValueOnce({ message_id: 13 });
+    await addon.sendMessage('-100123', '#', options);
+    expect(options).toEqual(snapshot);
   });
 
   it('returns null on media errors', async () => {
@@ -162,5 +223,20 @@ describe('TelegramAddon', () => {
 
     await addon.stop();
     expect(mockBotStop).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([true, false])('maps callback alerts=%s onto a grammY-shaped context', async (showAlert) => {
+    addon.start();
+    const compatibility = mockBotUse.mock.calls[2][0] as (ctx: any, next: () => Promise<void>) => Promise<void>;
+    const answerCallbackQuery = jest.fn().mockResolvedValue(true);
+    const rawContext = { answerCallbackQuery };
+
+    await compatibility(rawContext, async () => {
+      expect(typeof rawContext.answerCbQuery).toBe('function');
+      await rawContext.answerCbQuery('result', showAlert);
+    });
+
+    expect(answerCallbackQuery).toHaveBeenCalledWith({ text: 'result', show_alert: showAlert });
+    await addon.stop();
   });
 });

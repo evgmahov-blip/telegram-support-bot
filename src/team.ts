@@ -71,7 +71,7 @@ export function canManageTicket(telegramId: string, assignedTo: string | null): 
 export async function takeTicketCommand(ctx: Context, ticketId: number): Promise<void> {
     const actorId = ctx.from.id.toString();
     if (!canPerformAction(actorId, 'take')) {
-        middleware.reply(ctx, 'You do not have permission to take tickets.');
+        await middleware.reply(ctx, 'You do not have permission to take tickets.');
         return;
     }
 
@@ -80,16 +80,16 @@ export async function takeTicketCommand(ctx: Context, ticketId: number): Promise
         const current = await db.getTicketById(ticketId, null);
         if (current?.assigned_to) {
             const owner = cache.staffMembers.get(current.assigned_to);
-            middleware.reply(ctx, `Ticket is already owned by ${owner?.name || current.assigned_to}.`);
+            await middleware.reply(ctx, `Ticket is already owned by ${owner?.name || current.assigned_to}.`);
         } else {
-            middleware.reply(ctx, 'Ticket is not active or its state changed.');
+            await middleware.reply(ctx, 'Ticket is not active or its state changed.');
         }
         return;
     }
 
     const actor = cache.staffMembers.get(actorId);
     const actorName = actor?.name || actorId;
-    middleware.reply(ctx, `Ticket #T${ticketId.toString().padStart(6, '0')} taken by ${actorName}.`);
+    await middleware.reply(ctx, `Ticket #T${ticketId.toString().padStart(6, '0')} taken by ${actorName}.`);
     await db.recordAnalyticsEvent('ticket.taken', ticketId, actorId, { owner: actorId });
 }
 
@@ -104,23 +104,23 @@ export async function transferTicketCommand(
 ): Promise<void> {
     const actorId = ctx.from.id.toString();
     if (!canPerformAction(actorId, 'transfer')) {
-        middleware.reply(ctx, 'You do not have permission to transfer tickets.');
+        await middleware.reply(ctx, 'You do not have permission to transfer tickets.');
         return;
     }
 
     const targetRole = getStaffRole(targetId);
     if (!targetRole) {
-        middleware.reply(ctx, `User ${targetId} is not a registered staff member.`);
+        await middleware.reply(ctx, `User ${targetId} is not a registered staff member.`);
         return;
     }
 
     const current = await db.getTicketById(ticketId, null);
     if (!current) {
-        middleware.reply(ctx, 'Ticket not found.');
+        await middleware.reply(ctx, 'Ticket not found.');
         return;
     }
     if (!canManageTicket(actorId, current.assigned_to)) {
-        middleware.reply(ctx, 'Only the ticket owner, a supervisor, or an admin can transfer it.');
+        await middleware.reply(ctx, 'Only the ticket owner, a supervisor, or an admin can transfer it.');
         return;
     }
 
@@ -128,13 +128,13 @@ export async function transferTicketCommand(
     const expectedOwner = actorRole === 'agent' ? actorId : undefined;
     const transferred = await ownership.transferTicket(ticketId, targetId, expectedOwner);
     if (!transferred) {
-        middleware.reply(ctx, 'Ticket owner or state changed before the transfer completed.');
+        await middleware.reply(ctx, 'Ticket owner or state changed before the transfer completed.');
         return;
     }
 
     const target = cache.staffMembers.get(targetId);
     const targetName = target?.name || targetId;
-    middleware.reply(ctx, `Ticket #T${ticketId.toString().padStart(6, '0')} transferred to ${targetName}.`);
+    await middleware.reply(ctx, `Ticket #T${ticketId.toString().padStart(6, '0')} transferred to ${targetName}.`);
 
     if (targetId !== actorId) {
         middleware.sendMessage(
@@ -158,27 +158,27 @@ export async function transferTicketCommand(
 export async function waitingUserCommand(ctx: Context, ticketId: number): Promise<void> {
     const actorId = ctx.from.id.toString();
     if (!canPerformAction(actorId, 'wait_user')) {
-        middleware.reply(ctx, 'You do not have permission to change ticket state.');
+        await middleware.reply(ctx, 'You do not have permission to change ticket state.');
         return;
     }
 
     const current = await db.getTicketById(ticketId, null);
     if (!current) {
-        middleware.reply(ctx, 'Ticket not found.');
+        await middleware.reply(ctx, 'Ticket not found.');
         return;
     }
     if (!canManageTicket(actorId, current.assigned_to)) {
-        middleware.reply(ctx, 'Take the ticket first, or ask a supervisor/admin to change its state.');
+        await middleware.reply(ctx, 'Take the ticket first, or ask a supervisor/admin to change its state.');
         return;
     }
 
     const updated = await db.transitionTicketStatus(ticketId, 'waiting_user');
     if (!updated) {
-        middleware.reply(ctx, 'Closed tickets cannot be moved to WAITING_USER.');
+        await middleware.reply(ctx, 'Closed tickets cannot be moved to WAITING_USER.');
         return;
     }
 
-    middleware.reply(ctx, `Ticket #T${ticketId.toString().padStart(6, '0')} → WAITING_USER.`);
+    await middleware.reply(ctx, `Ticket #T${ticketId.toString().padStart(6, '0')} → WAITING_USER.`);
     await db.recordAnalyticsEvent('ticket.waiting_user', ticketId, actorId);
 }
 
@@ -188,7 +188,7 @@ export async function waitingUserCommand(ctx: Context, ticketId: number): Promis
 export async function assignTicketCommand(ctx: Context, targetId: string, ticketId: number): Promise<void> {
     const role = getStaffRole(targetId);
     if (!role) {
-        middleware.reply(ctx, `User ${targetId} is not a registered staff member.`);
+        await middleware.reply(ctx, `User ${targetId} is not a registered staff member.`);
         return;
     }
 
@@ -196,7 +196,7 @@ export async function assignTicketCommand(ctx: Context, targetId: string, ticket
 
     const member = cache.staffMembers.get(targetId);
     const memberName = member?.name || targetId;
-    middleware.reply(ctx, `${cache.config.language.ticketAssignedTo} ${memberName}`);
+    await middleware.reply(ctx, `${cache.config.language.ticketAssignedTo} ${memberName}`);
 
     // Notify the assigned agent
     if (targetId !== ctx.from.id) {
@@ -216,7 +216,7 @@ export async function assignTicketCommand(ctx: Context, targetId: string, ticket
  */
 export async function unassignTicketCommand(ctx: Context, ticketId: number): Promise<void> {
     await db.unassignTicket(ticketId);
-    middleware.reply(ctx, cache.config.language.ticketUnassigned);
+    await middleware.reply(ctx, cache.config.language.ticketUnassigned);
 }
 
 /**
@@ -224,7 +224,7 @@ export async function unassignTicketCommand(ctx: Context, ticketId: number): Pro
  */
 export async function addTagsCommand(ctx: Context, ticketId: number, tags: string[]): Promise<void> {
     await db.addTags(ticketId, tags);
-    middleware.reply(ctx, `Tags added: ${tags.join(', ')}`);
+    await middleware.reply(ctx, `Tags added: ${tags.join(', ')}`);
 }
 
 /**
@@ -232,7 +232,7 @@ export async function addTagsCommand(ctx: Context, ticketId: number, tags: strin
  */
 export async function removeTagCommand(ctx: Context, ticketId: number, tag: string): Promise<void> {
     await db.removeTag(ticketId, tag);
-    middleware.reply(ctx, `Tag removed: ${tag}`);
+    await middleware.reply(ctx, `Tag removed: ${tag}`);
 }
 
 /**
@@ -246,7 +246,7 @@ export async function setPriorityCommand(
     await db.setPriority(ticketId, priority as any);
 
     const icons: Record<string, string> = { urgent: '🔴', high: '🟠', normal: '🟡', low: '⚪' };
-    middleware.reply(ctx, `${icons[priority]} Priority set to ${priority.toUpperCase()}`);
+    await middleware.reply(ctx, `${icons[priority]} Priority set to ${priority.toUpperCase()}`);
 }
 
 /**
@@ -254,7 +254,7 @@ export async function setPriorityCommand(
  */
 export async function muteTicketCommand(ctx: Context, ticketId: number): Promise<void> {
     cache.mutedTickets.add(ticketId.toString());
-    middleware.reply(ctx, `🔇 Ticket #T${ticketId.toString().padStart(6, '0')} muted.`);
+    await middleware.reply(ctx, `🔇 Ticket #T${ticketId.toString().padStart(6, '0')} muted.`);
 }
 
 /**
@@ -262,7 +262,7 @@ export async function muteTicketCommand(ctx: Context, ticketId: number): Promise
  */
 export async function unmuteTicketCommand(ctx: Context, ticketId: number): Promise<void> {
     cache.mutedTickets.delete(ticketId.toString());
-    middleware.reply(ctx, `🔊 Ticket #T${ticketId.toString().padStart(6, '0')} unmuted.`);
+    await middleware.reply(ctx, `🔊 Ticket #T${ticketId.toString().padStart(6, '0')} unmuted.`);
 }
 
 /**
@@ -289,7 +289,7 @@ export async function addInternalNoteCommand(ctx: Context, ticketId: number, tex
 export async function showNotesCommand(ctx: Context, ticketId: number): Promise<void> {
     const notes = await db.getInternalNotes(ticketId);
     if (notes.length === 0) {
-        middleware.reply(ctx, `No internal notes for ticket #T${ticketId.toString().padStart(6, '0')}.`);
+        await middleware.reply(ctx, `No internal notes for ticket #T${ticketId.toString().padStart(6, '0')}.`);
         return;
     }
 
@@ -301,7 +301,7 @@ export async function showNotesCommand(ctx: Context, ticketId: number): Promise<
         output += `• [${authorName}] ${esc(note.text)}\n`;
     }
 
-    middleware.reply(ctx, output.trim());
+    await middleware.reply(ctx, output.trim());
 }
 
 /**
@@ -309,7 +309,7 @@ export async function showNotesCommand(ctx: Context, ticketId: number): Promise<
  */
 export async function listStaffCommand(ctx: Context): Promise<void> {
     if (cache.staffMembers.size === 0) {
-        middleware.reply(ctx, 'No staff members configured.');
+        await middleware.reply(ctx, 'No staff members configured.');
         return;
     }
 
@@ -319,7 +319,7 @@ export async function listStaffCommand(ctx: Context): Promise<void> {
         output += `${roleIcons[member.role] || ''} ${member.name} (${member.role})\n`;
     }
 
-    middleware.reply(ctx, output.trim(), { parse_mode: cache.config.parse_mode });
+    await middleware.reply(ctx, output.trim(), { parse_mode: cache.config.parse_mode });
 }
 
 /**

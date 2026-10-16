@@ -47,6 +47,8 @@ jest.mock('../src/cache', () => ({
   },
 }));
 
+import cache from '../src/cache';
+import * as middleware from '../src/middleware';
 import { registerCommonHandlers } from '../src/handlers';
 
 function registerCallbackHandler(): (ctx: any) => Promise<void> {
@@ -105,5 +107,26 @@ describe('callback query completion semantics', () => {
       callbackQuery: { data: 'assign:42' },
       answerCbQuery: jest.fn(),
     })).rejects.toBe(error);
+  });
+
+  it('keeps the start command pending until both replies complete', async () => {
+    const commands = new Map<string, (ctx: any) => Promise<void>>();
+    const addon: any = {
+      platform: 'telegram', botInfo: { username: 'bot' },
+      command: jest.fn((name: string, callback: (ctx: any) => Promise<void>) => commands.set(name, callback)),
+      on: jest.fn(), hears: jest.fn(), catch: jest.fn(),
+    };
+    cache.config.pass_start = false;
+    cache.config.categories = [{ name: 'Support', subgroups: [] }] as any;
+    (middleware.reply as jest.Mock)
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('category reply failed'));
+
+    registerCommonHandlers(addon, [['Support']]);
+    await expect(commands.get('start')!({ chat: { type: 'private' } })).rejects.toThrow('category reply failed');
+    expect(middleware.reply).toHaveBeenCalledTimes(2);
+
+    cache.config.pass_start = true;
+    cache.config.categories = [];
   });
 });

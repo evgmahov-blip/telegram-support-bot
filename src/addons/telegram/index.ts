@@ -71,6 +71,7 @@ class TelegramAddon implements Addon {
   }
 
   private withThread(chatId: string | number, options: Record<string, unknown> = {}): Record<string, unknown> {
+    options = { ...options };
     const threadId = cache.config.staffchat_thread_id;
     if (
       threadId &&
@@ -83,16 +84,28 @@ class TelegramAddon implements Addon {
   }
 
   async sendMessage(chatId: string | number, text: string, options: Record<string, unknown> = {}): Promise<string | null> {
-    options.disable_web_page_preview = true as unknown as string;
     if (typeof chatId !== 'string' && typeof chatId !== 'number') return null;
-    options = this.withThread(chatId, options);
+    options = this.withThread(chatId, { ...options, disable_web_page_preview: true });
     const validModes = ['HTML', 'MarkdownV2'];
     if (options?.parse_mode === 'Markdown') {
       options.parse_mode = 'HTML';
     } else if (options?.parse_mode && !validModes.includes(options.parse_mode as string)) {
       delete options.parse_mode;
     }
-    const response = await this.bot.api.sendMessage(chatId.toString(), text, options);
+    let response;
+    try {
+      response = await this.bot.api.sendMessage(chatId.toString(), text, options);
+    } catch (err) {
+      const telegramError = err as { error_code?: number; description?: string };
+      const isEntityParseError = telegramError.error_code === 400
+        && /can't parse entities/i.test(telegramError.description || '');
+      if (!isEntityParseError) throw err;
+
+      const plainOptions = { ...options };
+      delete plainOptions.parse_mode;
+      delete plainOptions.entities;
+      response = await this.bot.api.sendMessage(chatId.toString(), text, plainOptions);
+    }
     return response.message_id.toString();
   }
 
@@ -201,6 +214,8 @@ class TelegramAddon implements Addon {
     this.bot.use(async (ctx: BotContext, next) => {
       const typedCtx = ctx as unknown as Context;
       typedCtx.messenger = Messenger.TELEGRAM;
+      typedCtx.answerCbQuery = (text?: string, showAlert = false) =>
+        ctx.answerCallbackQuery({ text, show_alert: showAlert }).then(() => undefined);
 
       if (cache.config.dev_mode) {
         await middleware.reply(
