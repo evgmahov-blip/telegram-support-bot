@@ -9,6 +9,8 @@ import * as analytics from './analytics';
 import * as workflows from './workflows';
 import { extractSupporteeId } from './staff';
 import * as webhooks from './webhooks';
+import { resolveTicketFromReply as resolveTicketFromContext } from './ticket-resolution';
+import * as ticketState from './ticket-state';
 
 const escapeRegex = (str: string): string => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -174,33 +176,67 @@ const closeCommand = async (ctx: Context): Promise<void> => {
   }
   const { language } = cache.config;
 
-  // Only process if the reply is to a bot message
-  if (!ctx.message.reply_to_message.from.is_bot) return;
-  const replyText = ctx.message.reply_to_message.text || ctx.message.reply_to_message.caption;
-  if (!replyText) return;
+  if (!ctx.message?.reply_to_message) {
+    await middleware.reply(ctx, 'Ответьте командой /close на сообщение тикета.');
+    return;
+  }
 
-  const resolved = await resolveTicketFromReply(replyText, null);
+  const resolved = await resolveTicketFromContext(ctx, null);
   if (!resolved) {
-    await middleware.reply(ctx, 'Could not find ticket in the replied message.');
+    await middleware.reply(ctx, 'Не удалось найти тикет по сообщению.');
     return;
   }
   const { ticket, ticketIdStr } = resolved;
 
-  const closed = await db.transitionTicketStatus(ticket.ticketId, 'closed');
+  if (ticket.status !== 'open' && ticket.status !== 'waiting_user') {
+    await middleware.reply(ctx, 'Тикет уже закрыт.');
+    return;
+  }
+
+  const actorId = ctx.from.id.toString();
+  const role = team.getStaffRole(actorId);
+  if (!role || !team.canPerformAction(actorId, 'reply')) {
+    await middleware.reply(ctx, 'У вас нет прав закрывать тикеты.');
+    return;
+  }
+  if (!team.canManageTicket(actorId, ticket.assigned_to)) {
+    await middleware.reply(ctx, ticket.assigned_to
+      ? 'Этот тикет назначен другому сотруднику.'
+      : 'Сначала возьмите тикет командой /take.');
+    return;
+  }
+
+  const expectedOwner = role === 'agent' ? actorId : undefined;
+  const closed = await ticketState.transitionTicketStateFrom(
+    ticket.ticketId,
+    ['open', 'waiting_user'],
+    'closed',
+    expectedOwner,
+  );
   if (!closed) {
-    await middleware.reply(ctx, 'Ticket state changed before it could be closed.');
+    const current = await db.getTicketById(ticket.ticketId, null);
+    await middleware.reply(ctx, current?.status === 'closed'
+      ? 'Тикет уже закрыт.'
+      : 'Состояние или владелец тикета изменились; тикет не закрыт.');
     return;
   }
 
   const userId = ticket.userid;
   const paddedTicket = ticketIdStr.toString().padStart(6, '0');
+  await db.recordAnalyticsEvent('ticket.closed', ticket.ticketId, actorId);
+  webhooks.webhooks.ticketClosed(ticket.ticketId, userId);
   await middleware.reply(ctx, `${language.ticket} #T${paddedTicket} ${language.closed}`);
   if (userId) {
-    await middleware.sendMessage(
-      userId,
-      ticket.messenger,
-      `${language.ticket} #T${paddedTicket} ${language.closed}\n\n${language.ticketClosed}`,
-    ).catch(log.error);
+    try {
+      await middleware.sendMessage(
+        userId,
+        ticket.messenger,
+        `${language.ticket} #T${paddedTicket} ${language.closed}\n\n${language.ticketClosed}`,
+      );
+    } catch (err) {
+      log.error(err);
+      await middleware.reply(ctx, 'Тикет закрыт, но уведомление пользователю не доставлено.');
+    }
     delete cache.ticketIDs[userId];
     delete cache.ticketStatus[userId];
     delete cache.ticketSent[userId];

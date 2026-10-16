@@ -8,13 +8,16 @@ export async function transitionTicketStateFrom(
   ticketId: number,
   expectedStates: TicketStatus | TicketStatus[],
   target: TicketStatus,
+  expectedOwner?: string,
 ): Promise<ISupportee | null> {
   const states = Array.isArray(expectedStates) ? expectedStates : [expectedStates];
+  const filter: Record<string, unknown> = {
+    ticketId,
+    status: { $in: states },
+  };
+  if (expectedOwner !== undefined) filter.assigned_to = expectedOwner;
   const ticket = await Supportee.findOneAndUpdate(
-    {
-      ticketId,
-      status: { $in: states },
-    },
+    filter,
     {
       $set: {
         status: target,
