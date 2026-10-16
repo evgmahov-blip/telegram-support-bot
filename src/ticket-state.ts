@@ -41,6 +41,7 @@ export async function closeTicketLifecycle(
   ticket: ISupportee,
   actorId: string,
   expectedOwner?: string,
+  options: { notifyUser?: boolean; metadata?: Record<string, unknown> } = {},
 ): Promise<{ outcome: 'closed'|'already_closed'|'stale'; ticket: ISupportee | null; notificationFailed?: boolean }> {
   if (ticket.status === 'closed') return { outcome: 'already_closed', ticket };
   const closed = await transitionTicketStateFrom(ticket.ticketId, ['open', 'waiting_user'], 'closed', expectedOwner);
@@ -50,12 +51,12 @@ export async function closeTicketLifecycle(
   }
   const userId = ticket.userid;
   delete cache.ticketIDs[userId]; delete cache.ticketStatus[userId]; delete cache.ticketSent[userId];
-  db.recordAnalyticsEventBestEffort('ticket.closed', ticket.ticketId, actorId);
+  db.recordAnalyticsEventBestEffort('ticket.closed', ticket.ticketId, actorId, options.metadata || {});
   Promise.resolve(webhooks.webhooks.ticketClosed(ticket.ticketId, userId)).catch(log.error);
   let notificationFailed = false;
-  try {
+  try { if (options.notifyUser !== false) {
     await middleware.sendMessage(userId, ticket.messenger,
       `${cache.config.language.ticket} #T${String(ticket.ticketId).padStart(6, '0')} ${cache.config.language.closed}\n\n${cache.config.language.ticketClosed}`);
-  } catch (err) { notificationFailed = true; log.error(err); }
+  } } catch (err) { notificationFailed = true; log.error(err); }
   return { outcome: 'closed', ticket: closed, notificationFailed };
 }

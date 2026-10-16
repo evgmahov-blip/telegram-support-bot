@@ -18,6 +18,12 @@ type Button = { text: string; callback_data?: string; url?: string };
 const kb = (rows: Button[][]) => ({ inline_keyboard: rows });
 const statusName: Record<string, string> = { open: 'Открыт', waiting_user: 'Ждём клиента', closed: 'Закрыт' };
 const priorityName: Record<string, string> = { low: 'Низкий', normal: 'Обычный', high: 'Высокий', urgent: 'Срочный' };
+const eventName: Record<string, string> = {
+  'ticket.closed': 'Тикет закрыт', 'ticket.reopened': 'Тикет открыт снова',
+  'ticket.taken': 'Тикет взят в работу', 'ticket.assigned': 'Назначен инженер',
+  'ticket.transferred': 'Тикет передан', 'ticket.waiting': 'Ожидание клиента',
+  'ticket.resumed': 'Работа продолжена',
+};
 const fmt = (d: unknown) => d ? new Date(d as string).toLocaleString('ru-RU', { timeZone: 'UTC' }) + ' UTC' : '—';
 
 function staffButtons(t: ISupportee) {
@@ -48,30 +54,42 @@ export async function cardText(ticket: ISupportee): Promise<string> {
 }
 
 export async function refreshStaffCard(ticketId: number): Promise<void> {
-  if (typeof db.getTicketById !== 'function') return;
-  const ticket = await db.getTicketById(ticketId, null);
-  if (!ticket) return;
-  const text = await cardText(ticket);
-  const opts = { parse_mode: 'HTML', reply_markup: staffButtons(ticket) };
-  if (ticket.staff_card_message_id && ticket.staff_card_chat_id) {
-    try {
+  try {
+    if (typeof db.getTicketById !== 'function') return;
+    let ticket = await db.getTicketById(ticketId, null);
+    if (!ticket) return;
+    const text = await cardText(ticket);
+    const opts = { parse_mode: 'HTML', reply_markup: staffButtons(ticket) };
+    if (ticket.staff_card_message_id && ticket.staff_card_chat_id) {
+      try {
       await TelegramAddon.getInstance().editMessage(ticket.staff_card_chat_id, ticket.staff_card_message_id, text, opts);
       return;
-    } catch (err) {
-      log.error(`Не удалось обновить карточку #T${ticketId}:`, err);
-      return; // Never duplicate a known canonical card after an ambiguous edit failure.
+      } catch (err) {
+        const description = String((err as { description?: string }).description || err);
+        if (!/message to edit not found|message can't be edited|message can.t be edited/i.test(description)
+          || typeof db.clearStaffCardBinding !== 'function') {
+          log.error(`Не удалось обновить карточку #T${ticketId}:`, err);
+          return; // Ambiguous failure: never risk a duplicate canonical card.
+        }
+        const cleared = await db.clearStaffCardBinding(ticketId, String(ticket.staff_card_chat_id), ticket.staff_card_message_id);
+        if (!cleared) return; // Another worker already repaired or replaced it.
+        ticket = cleared;
+      }
     }
+    if (typeof db.claimStaffCard !== 'function') return;
+    const claim = randomUUID();
+    const claimed = await db.claimStaffCard(ticketId, claim);
+    if (!claimed) return;
+    let messageId: string | null = null;
+    try { messageId = await middleware.sendMessage(cache.config.staffchat_id, cache.config.staffchat_type, text, opts); }
+    catch (err) { await db.releaseStaffCardClaim(ticketId, claim); throw err; }
+    if (!messageId) { await db.releaseStaffCardClaim(ticketId, claim); return; }
+    const bound = await db.bindStaffCard(ticketId, claim, String(cache.config.staffchat_id), Number(messageId), cache.config.staffchat_thread_id || null);
+    if (!bound) log.error(`Duplicate card candidate ${messageId} for #T${ticketId}; canonical binding was already present.`);
+  } catch (err) {
+    // Card presentation is best-effort and must never turn a completed action into a reported failure.
+    log.error(`Не удалось синхронизировать карточку #T${ticketId}:`, err);
   }
-  if (typeof db.claimStaffCard !== 'function') return;
-  const claim = randomUUID();
-  const claimed = await db.claimStaffCard(ticketId, claim);
-  if (!claimed) return;
-  let messageId: string | null = null;
-  try { messageId = await middleware.sendMessage(cache.config.staffchat_id, cache.config.staffchat_type, text, opts); }
-  catch (err) { await db.releaseStaffCardClaim(ticketId, claim); throw err; }
-  if (!messageId) { await db.releaseStaffCardClaim(ticketId, claim); return; }
-  const bound = await db.bindStaffCard(ticketId, claim, String(cache.config.staffchat_id), Number(messageId), cache.config.staffchat_thread_id || null);
-  if (!bound) log.error(`Duplicate card candidate ${messageId} for #T${ticketId}; canonical binding was already present.`);
 }
 
 function staffSurface(ctx: Context): boolean {
@@ -113,7 +131,8 @@ async function history(ctx: Context, ticket: ISupportee, page: number, staff: bo
     const body = timeline.map((x: any) => {
       const label = x.kind === 'user' ? 'Клиент' : x.kind === 'staff' ? 'Поддержка' : x.kind === 'note' ? `🔒 Заметка (${x.actor})` : `Событие${staff && x.actor ? ` · ${x.actor}` : ''}`;
       const owner = staff && x.metadata?.owner ? ` · владелец ${x.metadata.owner}` : '';
-      return `<b>${e(fmt(x.at))}</b>\n${e(`${label}: ${String(x.text).slice(0, 500)}${owner}`)}`;
+      const content = x.kind === 'event' ? eventName[x.text] || 'Изменение тикета' : String(x.text).slice(0, 500);
+      return `<b>${e(fmt(x.at))}</b>\n${e(`${label}: ${content}${owner}`)}`;
     }).join('\n\n') || 'История пуста.';
     await answer(ctx, `<b>История #T${ticket.ticketId}</b>\n\n${body}`, [
       [{ text: '◀️', callback_data: `${staff?'tc':'uc'}:h:${ticket.ticketId}:${Math.max(0,page-1)}` }, { text: '▶️', callback_data: `${staff?'tc':'uc'}:h:${ticket.ticketId}:${page+1}` }],
@@ -125,11 +144,13 @@ async function history(ctx: Context, ticket: ISupportee, page: number, staff: bo
     db.getTicketMessageHistory(ticket.ticketId, 0), ticketAudit.getTicketAuditHistory(ticket.ticketId, 0),
     staff ? db.getInternalNotes(ticket.ticketId) : Promise.resolve([]),
   ]);
-  const visibleMessages = staff ? messages : messages.filter(m => !m.delivery_key || m.delivered_at);
+  const visibleMessages = staff ? messages : messages.filter(m =>
+    (m.sender === 'user' || m.sender === 'staff')
+    && (m.sender === 'user' || Boolean(m.delivered_at) || m.delivery_key === undefined));
   const items = [
     ...visibleMessages.map(m => ({ at: m.timestamp, text: `${m.sender === 'user' ? 'Клиент' : 'Поддержка'}: ${m.text.slice(0, 100)}` })),
     ...events.filter(x => /ticket\.(closed|reopened|taken|assigned|transferred|waiting|resumed)/.test(x.type))
-      .map(x => ({ at: x.timestamp, text: `Событие: ${x.type}${x.agent_id ? ` · сотрудник ${x.agent_id}` : ''}${x.metadata?.owner ? ` · владелец ${x.metadata.owner}` : ''}` })),
+      .map(x => ({ at: x.timestamp, text: `Событие: ${eventName[x.type] || 'Изменение тикета'}${x.agent_id ? ` · сотрудник ${x.agent_id}` : ''}${x.metadata?.owner ? ` · владелец ${x.metadata.owner}` : ''}` })),
     ...notes.map(n => ({ at: n.timestamp, text: `🔒 Заметка (${n.author_id}): ${n.text.slice(0, 100)}` })),
   ].sort((a,b) => +new Date(a.at) - +new Date(b.at));
   const slice = items.slice(page * PAGE, page * PAGE + PAGE);
@@ -148,12 +169,14 @@ export async function handleCallback(ctx: Context): Promise<boolean> {
     if (ctx.chat.type !== 'private') { await ctx.answerCbQuery('Доступно только в личном чате.', true); return true; }
     if (p[1] === 'home') await showUserHome(ctx);
     else if (p[1] === 'new') {
-      const id = await db.addNewTicket(ctx.from.id.toString(), ctx.session.groupCategory, ctx.messenger);
-      await middleware.reply(ctx, `Создано обращение #T${String(id).padStart(6, '0')}. Опишите вопрос одним сообщением.`, {
+      await db.requestNewTicket(ctx.from.id.toString(), ctx.messenger);
+      await middleware.reply(ctx, 'Опишите вопрос одним сообщением. Обращение будет создано после отправки.', {
         reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'um:home:0' }]] },
       });
     }
-    else if (p[1] === 'help') await middleware.reply(ctx, cache.config.language.helpCommandText);
+    else if (p[1] === 'help') await answer(ctx, e(cache.config.language.helpCommandText), [
+      [{ text: '⬅️ Назад', callback_data: 'um:home:0' }],
+    ]);
     else {
       const page = Number(p[2]) || 0; const list = await db.listUserTickets(ctx.from.id.toString(), page, PAGE);
       await answer(ctx, '<b>Мои обращения</b>', [
@@ -242,7 +265,8 @@ export async function handleCallback(ctx: Context): Promise<boolean> {
     if (!team.canManageTicket(actor, ticket.assigned_to) || ticket.status === 'closed') { await ctx.answerCbQuery('Сначала возьмите активный тикет.', true); return true; }
     const prompt = await middleware.sendMessage(cache.config.staffchat_id, cache.config.staffchat_type,
       action === 'note' ? `🔒 Заметка для #T${id}: ответьте на это сообщение текстом заметки.` : `Ответ для #T${id}: ответьте на это сообщение. Другие сообщения группы не будут отправлены клиенту.`,
-      { reply_markup: { force_reply: true, selective: true }, message_thread_id: cache.config.staffchat_thread_id || undefined });
+      { reply_markup: { force_reply: true, selective: true }, reply_parameters: { message_id: qmsg!.message_id },
+        message_thread_id: cache.config.staffchat_thread_id || undefined });
     if (!prompt) { await ctx.answerCbQuery('Не удалось создать подсказку ответа.', true); return true; }
     const bound = await db.setReplyPrompt(id, actor, Number(prompt), new Date(Date.now()+PROMPT_MS), team.getStaffRole(actor)==='agent'?actor:undefined);
     if (!bound) { await ctx.answerCbQuery('Владелец или состояние тикета изменились.', true); return true; }

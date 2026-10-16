@@ -10,6 +10,7 @@ const mockTransitionTicketStatus = jest.fn();
 const mockRecordAnalyticsEvent = jest.fn().mockResolvedValue(undefined);
 const mockTicketClosedWebhook = jest.fn().mockResolvedValue(undefined);
 const mockSendCSATSurvey = jest.fn().mockResolvedValue(undefined);
+const mockCloseTicketLifecycle = jest.fn();
 
 jest.mock('../src/middleware', () => ({
   reply: mockReply,
@@ -43,6 +44,9 @@ jest.mock('../src/webhooks', () => ({
 jest.mock('../src/analytics', () => ({
   sendCSATSurvey: mockSendCSATSurvey,
   showStatsCommand: jest.fn(),
+}));
+jest.mock('../src/ticket-state', () => ({
+  closeTicketLifecycle: mockCloseTicketLifecycle,
 }));
 jest.mock('../src/team', () => ({
   canPerformAction: jest.fn().mockReturnValue(true),
@@ -273,6 +277,7 @@ describe('user /close (#112)', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     cache.config.allow_user_close = false;
+    mockCloseTicketLifecycle.mockResolvedValue({ outcome: 'closed' });
   });
 
   it('does nothing for users unless allow_user_close is set', async () => {
@@ -285,13 +290,12 @@ describe('user /close (#112)', () => {
     cache.config.allow_user_close = true;
     const ticket = { ticketId: 7, userid: 'user123', status: 'open', category: null, messenger: 'telegram' };
     mockGetTicketByUserId.mockResolvedValue(ticket);
-    mockTransitionTicketStatus.mockResolvedValue({ ...ticket, status: 'closed' });
 
     await commands.closeCommand(makeCtx(false));
 
-    expect(mockTransitionTicketStatus).toHaveBeenCalledWith(7, 'closed');
-    expect(mockRecordAnalyticsEvent).toHaveBeenCalledWith('ticket.closed', 7, null, { closed_by: 'user' });
-    expect(mockTicketClosedWebhook).toHaveBeenCalledWith(7, 'user123');
+    expect(mockCloseTicketLifecycle).toHaveBeenCalledWith(ticket, 'user123', undefined, {
+      notifyUser: false, metadata: { closed_by: 'user' },
+    });
     expect(mockReply).toHaveBeenCalledWith(expect.anything(), 'Ticket #T000007 closed');
     expect(mockSendMessage).toHaveBeenCalledWith('-100123', 'telegram', 'Ticket #T000007 closed by the user');
     expect(mockSendCSATSurvey).toHaveBeenCalledWith('user123', 'telegram', 7);
@@ -301,18 +305,17 @@ describe('user /close (#112)', () => {
     cache.config.allow_user_close = true;
     const ticket = { ticketId: 8, userid: 'user123', status: 'waiting_user', category: null, messenger: 'telegram' };
     mockGetTicketByUserId.mockResolvedValue(ticket);
-    mockTransitionTicketStatus.mockResolvedValue({ ...ticket, status: 'closed' });
 
     await commands.closeCommand(makeCtx(false));
 
-    expect(mockTransitionTicketStatus).toHaveBeenCalledWith(8, 'closed');
+    expect(mockCloseTicketLifecycle).toHaveBeenCalledWith(ticket, 'user123', undefined, expect.anything());
   });
 
   it('tells the user when there is no active ticket', async () => {
     cache.config.allow_user_close = true;
     mockGetTicketByUserId.mockResolvedValue({ ticketId: 7, status: 'closed' });
     await commands.closeCommand(makeCtx(false));
-    expect(mockTransitionTicketStatus).not.toHaveBeenCalled();
+    expect(mockCloseTicketLifecycle).not.toHaveBeenCalled();
     expect(mockReply).toHaveBeenCalledWith(expect.anything(), 'You cannot reply to a closed ticket.');
   });
 

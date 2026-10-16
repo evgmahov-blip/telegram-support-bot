@@ -27,6 +27,9 @@ jest.mock('../src/cache', () => ({
         regardsGroup: 'Support Team',
         msg_sent: 'Sent',
         ticketClosedError: 'Ticket closed',
+        ticket: 'Ticket',
+        from: 'from',
+        language: 'language',
         customer: 'customer',
       },
     },
@@ -158,6 +161,18 @@ describe('staff reply delivery reliability', () => {
     expect(mockPersistTicketMessage).toHaveBeenCalledTimes(1);
     expect(mockRecordEventBestEffort).not.toHaveBeenCalled();
     expect(mockTransitionTicketStatus).not.toHaveBeenCalled();
+  });
+
+  it('never forwards an ordinary reply to a navigation message containing a ticket number', async () => {
+    mockGetTicketByInternalId.mockResolvedValueOnce(null);
+    const context = createContext();
+    context.message.reply_to_message.text = 'История #T42';
+
+    await expect(chat(context)).resolves.toBeUndefined();
+
+    expect(mockPersistTicketMessage).not.toHaveBeenCalled();
+    expect(mockSendMessage).not.toHaveBeenCalledWith('user123', expect.anything(), expect.anything());
+    expect(mockReply).toHaveBeenCalledWith(context, 'Ticket closed');
   });
 
   it('does not replay a delivered reply when auto-close persistence keeps failing', async () => {

@@ -4,13 +4,16 @@ const getTicket = jest.fn();
 const answer = jest.fn().mockResolvedValue(undefined);
 const close = jest.fn();
 const timeline = jest.fn().mockResolvedValue([]);
+const edit = jest.fn().mockResolvedValue(undefined);
 
 jest.mock('../src/middleware', () => ({ reply, sendMessage: send }));
 jest.mock('../src/db', () => ({
   getTicketById: getTicket, listUserTickets: jest.fn(), listStaffTickets: jest.fn(), addNewTicket: jest.fn().mockResolvedValue(9),
+  requestNewTicket: jest.fn().mockResolvedValue(null),
   getTicketMessageHistory: jest.fn().mockResolvedValue([]), getLatestTicketMessage: jest.fn().mockResolvedValue(null),
   getTicketTimelinePage: timeline,
   getInternalNotes: jest.fn().mockResolvedValue([]), setReplyPrompt: jest.fn(), clearReplyPrompt: jest.fn(),
+  claimStaffCard: jest.fn(), releaseStaffCardClaim: jest.fn(), bindStaffCard: jest.fn(), clearStaffCardBinding: jest.fn(),
   setPendingTicketAction: jest.fn(), consumePendingTicketAction: jest.fn(), recordAnalyticsEventBestEffort: jest.fn(),
 }));
 jest.mock('../src/ticket-audit', () => ({ getTicketAuditHistory: jest.fn().mockResolvedValue([]) }));
@@ -19,12 +22,12 @@ jest.mock('../src/ticket-ownership', () => ({ takeTicket: jest.fn(), transferTic
 jest.mock('../src/team', () => ({
   getStaffRole: jest.fn((id: string) => id === '42' ? 'agent' : null), canPerformAction: jest.fn().mockReturnValue(true), canManageTicket: jest.fn().mockReturnValue(true),
 }));
-jest.mock('../src/addons/telegram', () => ({ __esModule: true, default: { getInstance: () => ({ editMessage: jest.fn() }) } }));
+jest.mock('../src/addons/telegram', () => ({ __esModule: true, default: { getInstance: () => ({ editMessage: edit }) } }));
 jest.mock('../src/cache', () => ({ __esModule: true, default: { config: {
   staffchat_id: '-100', staffchat_type: 'telegram', staffchat_thread_id: 7, language: { helpCommandText: 'help' },
 }, staffMembers: new Map([['42',{ telegram_id:'42', name:'Иван', role:'agent' }]]) } }));
 
-import { handleCallback } from '../src/ticket-ui';
+import { handleCallback, refreshStaffCard } from '../src/ticket-ui';
 import { Context, Messenger } from '../src/interfaces';
 
 const ticket: any = { ticketId: 7, userid: 'client', messenger: 'telegram', status: 'open', assigned_to: '42',
@@ -76,5 +79,28 @@ describe('raw ticket card callbacks', () => {
     send.mockResolvedValueOnce(null);
     await handleCallback(ctx('tc:reply:7'));
     expect(answer).toHaveBeenCalledWith('Не удалось создать подсказку ответа.', true);
+  });
+
+  it('does not create an empty ticket when New request is tapped repeatedly', async () => {
+    const db = jest.requireMock('../src/db');
+    const privateCtx = ctx('um:new:0', 'private', 0, 1, 'client'); privateCtx.session.admin = false;
+    await handleCallback(privateCtx); await handleCallback(privateCtx);
+    expect(db.addNewTicket).not.toHaveBeenCalled();
+    expect(db.requestNewTicket).toHaveBeenCalledTimes(2);
+    expect(reply).toHaveBeenCalledWith(privateCtx, expect.stringContaining('будет создано после отправки'), expect.anything());
+  });
+
+  it('reclaims and rebinds a card only after Telegram proves the old card is gone', async () => {
+    const db = jest.requireMock('../src/db');
+    edit.mockRejectedValueOnce({ description: 'Bad Request: message to edit not found' });
+    db.clearStaffCardBinding.mockResolvedValueOnce({ ...ticket, staff_card_chat_id: null, staff_card_message_id: null });
+    db.claimStaffCard.mockResolvedValueOnce(ticket);
+    db.bindStaffCard.mockResolvedValueOnce({ ...ticket, staff_card_message_id: 88 });
+
+    await refreshStaffCard(7);
+
+    expect(db.clearStaffCardBinding).toHaveBeenCalledWith(7, '-100', 55);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(db.bindStaffCard).toHaveBeenCalledWith(7, expect.any(String), '-100', 88, 7);
   });
 });

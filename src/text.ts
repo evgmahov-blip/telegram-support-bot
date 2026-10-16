@@ -44,6 +44,9 @@ export async function ticketHandler(bot: Addon, ctx: Context): Promise<ISupporte
       return null;
     }
 
+    const requestedNewTicket = typeof db.consumeNewTicketRequest === 'function'
+      ? await db.consumeNewTicketRequest(String(userId), messenger) : null;
+    if (requestedNewTicket) await db.addNewTicket(userId, session.groupCategory, messenger);
     let ticket = await db.getTicketByUserId(userId, session.groupCategory);
 
     if (!ticket || ticket.status === 'closed') {

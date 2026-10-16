@@ -49,6 +49,7 @@ export interface ISupportee extends mongoose.Document {
   pending_action_type: string | null;
   pending_action_expires_at: Date | null;
   pending_action_actor_id: string | null;
+  pending_new_request: boolean;
 }
 
 export const SupporteeSchema = new mongoose.Schema<ISupportee>({
@@ -79,6 +80,7 @@ export const SupporteeSchema = new mongoose.Schema<ISupportee>({
   pending_action_type: { type: String, default: null },
   pending_action_expires_at: { type: Date, default: null },
   pending_action_actor_id: { type: String, default: null },
+  pending_new_request: { type: Boolean, default: false },
 }, {
   timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' },
 });
@@ -109,11 +111,14 @@ const TicketMessageSchema = new mongoose.Schema<ITicketMessage>({
   sender_id: { type: String, default: '' },
   text: { type: String, required: true },
   timestamp: { type: Date, default: Date.now },
-  delivery_key: { type: String, default: null },
+  delivery_key: { type: String, required: false },
   delivered_at: { type: Date, default: null },
 });
 TicketMessageSchema.index({ ticketId: 1, timestamp: -1 });
-TicketMessageSchema.index({ delivery_key: 1 }, { unique: true, sparse: true });
+TicketMessageSchema.index(
+  { delivery_key: 1 },
+  { unique: true, partialFilterExpression: { delivery_key: { $type: 'string' } } },
+);
 
 const TicketMessage = mongoose.model('TicketMessage', TicketMessageSchema);
 
@@ -508,6 +513,16 @@ export async function releaseStaffCardClaim(ticketId: number, claim: string) {
   await Supportee.updateOne({ ticketId, staff_card_claim: claim, staff_card_message_id: null }, { $set: { staff_card_claim: null, staff_card_claimed_at: null } });
 }
 
+/** Clear only the canonical card binding that Telegram has proved unusable. */
+export async function clearStaffCardBinding(ticketId: number, chatId: string, messageId: number) {
+  return await Supportee.findOneAndUpdate(
+    { ticketId, staff_card_chat_id: chatId, staff_card_message_id: messageId },
+    { $set: { staff_card_chat_id: null, staff_card_message_id: null, staff_card_thread_id: null,
+      staff_card_claim: null, staff_card_claimed_at: null } },
+    { new: true },
+  );
+}
+
 export async function setReplyPrompt(ticketId: number, staffId: string, promptId: number, expiresAt: Date, expectedOwner?: string) {
   const query: Record<string, unknown> = { ticketId, status: { $in: ['open', 'waiting_user'] } };
   if (expectedOwner !== undefined) query.assigned_to = expectedOwner;
@@ -537,6 +552,20 @@ export async function clearReplyPrompt(ticketId: number, staffId?: string) {
   return await Supportee.findOneAndUpdate(query, { $set: {
     pending_reply_staff_id: null, pending_reply_prompt_id: null, pending_reply_expires_at: null,
   } }, { new: true });
+}
+
+/** Persist a single-use menu intent on the user's existing ticket; no second ticket store. */
+export async function requestNewTicket(userid: string, messenger: string) {
+  return await Supportee.findOneAndUpdate(
+    { userid, messenger }, { $set: { pending_new_request: true } }, { sort: { ticketId: -1 }, new: true },
+  );
+}
+
+export async function consumeNewTicketRequest(userid: string, messenger: string) {
+  return await Supportee.findOneAndUpdate(
+    { userid, messenger, pending_new_request: true },
+    { $set: { pending_new_request: false } }, { sort: { ticketId: -1 }, new: false },
+  );
 }
 
 /**
@@ -819,8 +848,18 @@ export async function getLatestTicketMessage(ticketId: number): Promise<ITicketM
 }
 
 export async function getTicketTimelinePage(ticketId: number, page: number, pageSize: number, includeNotes: boolean) {
+  const clientMessageFilter = {
+    ticketId,
+    sender: { $in: ['user', 'staff'] },
+    $or: [
+      { sender: 'user' },
+      { sender: 'staff', delivered_at: { $ne: null } },
+      // Messages written before delivery keys were introduced are delivered legacy replies.
+      { sender: 'staff', delivery_key: { $exists: false } },
+    ],
+  };
   const pipeline: any[] = [
-    { $match: includeNotes ? { ticketId } : { ticketId, $or: [{ delivery_key: null }, { delivery_key: { $exists: false } }, { delivered_at: { $ne: null } }] } },
+    { $match: includeNotes ? { ticketId } : clientMessageFilter },
     { $project: { at: '$timestamp', kind: '$sender', actor: '$sender_id', text: 1, metadata: { $literal: {} } } },
     { $unionWith: { coll: AnalyticsEvent.collection.name, pipeline: [
       { $match: { ticketId, type: { $in: ['ticket.closed','ticket.reopened','ticket.taken','ticket.assigned','ticket.transferred','ticket.waiting','ticket.resumed'] } } },

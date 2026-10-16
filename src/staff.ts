@@ -31,6 +31,13 @@ function extractTicketId(replyText: string): string | null {
   return match ? match[1] : null;
 }
 
+function isLegacyTicketMessage(replyText: string): boolean {
+  const { language } = cache.config;
+  return replyText.includes(`${language.ticket} #T`)
+    && replyText.includes(` ${language.from || 'from'} `)
+    && replyText.includes(` ${language.language || 'language'}:`);
+}
+
 /** Compatibility-only user-id resolver for historical forwarded messages. */
 function extractSupporteeId(replyText: string): string | null {
   const linkMatch = replyText.match(/tg:\/\/user\?id=(\d+)/);
@@ -133,7 +140,7 @@ async function chat(ctx: Context) {
     if (ticket) ticketId = ticket.ticketId;
   }
 
-  if (!ticket && replyText) {
+  if (!ticket && replyText && isLegacyTicketMessage(replyText)) {
     const extractedId = extractTicketId(replyText);
     if (extractedId) {
       ticketId = parseInt(extractedId, 10);
@@ -141,7 +148,7 @@ async function chat(ctx: Context) {
     }
   }
 
-  if (!ticket && replyText) {
+  if (!ticket && replyText && isLegacyTicketMessage(replyText)) {
     const supporteeId = extractSupporteeId(replyText);
     if (supporteeId) {
       ticket = await db.getTicketByUserId(supporteeId, ctx.session.groupCategory);
@@ -169,7 +176,8 @@ async function chat(ctx: Context) {
   // Prompts are durable ticket state, so restart does not lose the selected ticket.
   if (ticket.pending_reply_prompt_id === correlatedMessageId) {
     if (ticket.pending_reply_staff_id !== senderId || !ticket.pending_reply_expires_at || new Date(ticket.pending_reply_expires_at).getTime() < Date.now()) {
-      await db.clearReplyPrompt(ticketId);
+      const expired = !ticket.pending_reply_expires_at || new Date(ticket.pending_reply_expires_at).getTime() < Date.now();
+      if (expired) await db.clearReplyPrompt(ticketId, ticket.pending_reply_staff_id || undefined);
       await middleware.reply(ctx, 'Запрос ответа истёк или принадлежит другому сотруднику. Нажмите «Ответить» снова.');
       return;
     }

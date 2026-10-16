@@ -233,17 +233,13 @@ const userCloseCommand = async (ctx: Context): Promise<void> => {
   const ticketId = ticket.ticketId;
   const paddedTicket = ticketId.toString().padStart(6, '0');
 
-  const closed = await db.transitionTicketStatus(ticketId, 'closed');
-  if (!closed) {
+  const result = await ticketState.closeTicketLifecycle(ticket, userId, undefined, {
+    notifyUser: false, metadata: { closed_by: 'user' },
+  });
+  if (result.outcome !== 'closed') {
     await middleware.reply(ctx, language.ticketClosedError);
     return;
   }
-  await db.recordAnalyticsEvent('ticket.closed', ticketId, null, { closed_by: 'user' });
-  await webhooks.webhooks.ticketClosed(ticketId, userId);
-
-  delete cache.ticketIDs[userId];
-  delete cache.ticketStatus[userId];
-  delete cache.ticketSent[userId];
 
   await middleware.reply(ctx, `${language.ticket} #T${paddedTicket} ${language.closed}`);
   const staffTarget = ctx.session.group && ctx.session.group !== cache.config.staffchat_id
@@ -255,7 +251,8 @@ const userCloseCommand = async (ctx: Context): Promise<void> => {
     `${language.ticket} #T${paddedTicket} ${language.closedByUser}`,
   ).catch(log.error);
 
-  await analytics.sendCSATSurvey(ticket.userid, ticket.messenger, ticketId);
+  await analytics.sendCSATSurvey(ticket.userid, ticket.messenger, ticketId).catch(log.error);
+  await refreshStaffCard(ticketId);
 };
 
 /**

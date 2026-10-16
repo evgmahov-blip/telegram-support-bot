@@ -5,6 +5,7 @@ const mockEventSave = jest.fn().mockResolvedValue(undefined);
 const mockCounterFindOneAndUpdate = jest.fn();
 const mockCounterFindOne = jest.fn();
 const mockMessageFind = jest.fn();
+const mockMessageAggregate = jest.fn();
 const mockEventFind = jest.fn();
 const mockEventFindOne = jest.fn();
 const mockEventUpdateOne = jest.fn().mockResolvedValue({ modifiedCount: 1 });
@@ -16,6 +17,8 @@ const TicketMessageModel: any = jest.fn(function (this: any, data: any) {
   this.save = mockMessageSave;
 });
 TicketMessageModel.find = mockMessageFind;
+TicketMessageModel.aggregate = mockMessageAggregate;
+TicketMessageModel.collection = { name: 'ticketmessages' };
 
 const AnalyticsEventModel: any = jest.fn(function (this: any, data: any) {
   Object.assign(this, data);
@@ -26,6 +29,10 @@ AnalyticsEventModel.find = mockEventFind;
 AnalyticsEventModel.findOne = mockEventFindOne;
 AnalyticsEventModel.updateOne = mockEventUpdateOne;
 AnalyticsEventModel.bulkWrite = mockEventBulkWrite;
+AnalyticsEventModel.collection = { name: 'analyticsevents' };
+
+const InternalNoteModel: any = jest.fn();
+InternalNoteModel.collection = { name: 'internalnotes' };
 
 const SupporteeModel: any = {
   findOne: jest.fn(),
@@ -46,7 +53,7 @@ jest.mock('mongoose', () => {
       if (name === 'TicketMessage') return TicketMessageModel;
       if (name === 'AnalyticsEvent') return AnalyticsEventModel;
       if (name === 'TicketCounter') return { findOne: mockCounterFindOne, findOneAndUpdate: mockCounterFindOneAndUpdate };
-      if (name === 'InternalNote') return jest.fn();
+      if (name === 'InternalNote') return InternalNoteModel;
       if (name === 'UserBan') return { findOne: jest.fn(), findOneAndUpdate: jest.fn(), deleteOne: jest.fn() };
       return SupporteeModel;
     }),
@@ -148,6 +155,21 @@ describe('append-only ticket history and event log', () => {
     const result = await db.getConversationHistory(7);
     expect(q.limit).toHaveBeenCalledWith(2);
     expect(result).toHaveLength(2);
+  });
+
+  it('filters AI drafts and undelivered staff replies from client timeline aggregation', async () => {
+    mockMessageAggregate.mockResolvedValue([]);
+    await db.getTicketTimelinePage(7, 0, 6, false);
+    const pipeline = mockMessageAggregate.mock.calls[0][0];
+    expect(pipeline[0].$match).toEqual(expect.objectContaining({
+      ticketId: 7,
+      sender: { $in: ['user', 'staff'] },
+    }));
+    expect(pipeline[0].$match.$or).toEqual(expect.arrayContaining([
+      { sender: 'user' },
+      { sender: 'staff', delivered_at: { $ne: null } },
+      { sender: 'staff', delivery_key: { $exists: false } },
+    ]));
   });
 
   it('assigns the next committed sequence and UUID', async () => {
