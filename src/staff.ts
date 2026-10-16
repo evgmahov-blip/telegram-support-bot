@@ -7,6 +7,7 @@ import * as log from './logger'
 import * as webhooks from './webhooks';
 import * as analytics from './analytics';
 import * as team from './team';
+import { refreshStaffCard } from './ticket-ui';
 
 /**
  * Generates user-facing staff text. MOST never exposes the engineer identity to
@@ -78,6 +79,16 @@ async function forwardReplyToParent(ctx: Context, ticket: ISupportee, staffMessa
 
 const POST_DELIVERY_TRANSITION_ATTEMPTS = 3;
 
+async function markDeliveredWithRetry(deliveryKey: string): Promise<void> {
+  let last: unknown;
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try { await db.markStaffReplyDelivered(deliveryKey); return; } catch (err) { last = err; }
+  }
+  // Telegram already accepted the reply. Throwing here would release the
+  // ingress claim and immediately replay an already delivered message.
+  log.error(`Критично: не удалось закрепить доставку ${deliveryKey}.`, last);
+}
+
 /** Retry post-delivery state changes locally; never replay the user-facing reply. */
 async function transitionTicketAfterDelivery(
   ticketId: number,
@@ -147,8 +158,39 @@ async function chat(ctx: Context) {
   if (!name) name = cache.config.language.customer || 'customer';
 
   const staffMessage = ctx.message.text || '';
+  const deliveryKey = `telegram:${ctx.update_id || ctx.message.message_id}:ticket:${ticketId}`;
+
+  const isPromptReply = /^(Ответ для|🔒 Заметка для) #T\d+/.test(replyText);
+  if (isPromptReply && ticket.pending_reply_prompt_id !== correlatedMessageId) {
+    await middleware.reply(ctx, 'Эта подсказка отменена, истекла или заменена. Нажмите кнопку в актуальной карточке.');
+    return;
+  }
+
+  // Prompts are durable ticket state, so restart does not lose the selected ticket.
+  if (ticket.pending_reply_prompt_id === correlatedMessageId) {
+    if (ticket.pending_reply_staff_id !== senderId || !ticket.pending_reply_expires_at || new Date(ticket.pending_reply_expires_at).getTime() < Date.now()) {
+      await db.clearReplyPrompt(ticketId);
+      await middleware.reply(ctx, 'Запрос ответа истёк или принадлежит другому сотруднику. Нажмите «Ответить» снова.');
+      return;
+    }
+    if (replyText.startsWith('🔒 Заметка')) {
+      const current = await db.getTicketById(ticketId, null);
+      if (!current || current.status === 'closed' || !team.canManageTicket(senderId, current.assigned_to)) {
+        await middleware.reply(ctx, 'Владелец или состояние тикета изменились; заметка не сохранена.');
+        return;
+      }
+      await team.addInternalNoteCommand(ctx, ticketId, staffMessage);
+      await db.clearReplyPrompt(ticketId, senderId);
+      await refreshStaffCard(ticketId);
+      return;
+    }
+  }
 
   if (staffMessage.startsWith('!note ') || staffMessage.startsWith('!internal ')) {
+    if (!team.canManageTicket(senderId, ticket.assigned_to)) {
+      await middleware.reply(ctx, 'Только текущий владелец активного тикета может добавить заметку.');
+      return;
+    }
     const noteText = staffMessage.replace(/^!(?:note|internal)\s+/i, '');
     await team.addInternalNoteCommand(ctx, ticketId, noteText);
     return;
@@ -166,10 +208,14 @@ async function chat(ctx: Context) {
   if (ticket.userid.includes('WEB')) {
     // Persist before the external delivery side effect so a history failure is
     // safe to retry and can never replay an already delivered staff reply.
-    await db.persistTicketMessage(ticketId, 'staff', senderId, staffMessage);
+    const reserved = typeof db.reserveStaffReply === 'function'
+      ? await db.reserveStaffReply(ticketId, senderId, staffMessage, deliveryKey) : null;
+    if (reserved?.delivered_at) return;
+    if (!reserved) await db.persistTicketMessage(ticketId, 'staff', senderId, staffMessage);
     try {
       const socketId = ticket.userid.split('WEB')[1];
       cache.io.to(socketId).emit('chat_staff', ticketMsg(name, ctx.message));
+      if (reserved) await markDeliveredWithRetry(deliveryKey);
     } catch (e) {
       middleware.sendMessage(
         ctx.chat.id,
@@ -191,8 +237,12 @@ async function chat(ctx: Context) {
     // Translation is still pre-delivery and may safely fail/retry. Once the
     // immutable history write succeeds, the only remaining throwing operation
     // before the delivery boundary is the delivery itself.
-    await db.persistTicketMessage(ticketId, 'staff', senderId, staffMessage);
+    const reserved = typeof db.reserveStaffReply === 'function'
+      ? await db.reserveStaffReply(ticketId, senderId, staffMessage, deliveryKey) : null;
+    if (reserved?.delivered_at) return;
+    if (!reserved) await db.persistTicketMessage(ticketId, 'staff', senderId, staffMessage);
     await middleware.sendMessage(ticket.userid, ticket.messenger, replyContent);
+    if (reserved) await markDeliveredWithRetry(deliveryKey);
   }
 
   if (!ticket.first_response_at) {
@@ -223,6 +273,8 @@ async function chat(ctx: Context) {
       });
     }
   }
+  if (typeof db.clearReplyPrompt === 'function') await db.clearReplyPrompt(ticketId, senderId);
+  await refreshStaffCard(ticketId);
 }
 
 export { chat, ticketMsg, extractSupporteeId, findParentCategory, forwardReplyToParent };

@@ -3,6 +3,7 @@ import TelegramAddon from './addons/telegram';
 import cache from './cache';
 import * as middleware from './middleware';
 import * as team from './team';
+import * as ticketUi from './ticket-ui';
 
 const replyKeyboard = (keys: any[]) => ({
   parse_mode: cache.config.parse_mode,
@@ -94,6 +95,8 @@ function initInline(bot: TelegramAddon) {
  */
 async function callbackQuery(ctx: Context) {
   const data = ctx.callbackQuery.data;
+
+  if (await ticketUi.handleCallback(ctx)) return;
 
   if (data && data.startsWith('assign:')) {
     const parts = data.split(':');

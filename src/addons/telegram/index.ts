@@ -118,6 +118,17 @@ class TelegramAddon implements Addon {
     return response.message_id.toString();
   }
 
+  async editMessage(chatId: string | number, messageId: number, text: string, options: Record<string, unknown> = {}): Promise<void> {
+    const validModes = ['HTML', 'MarkdownV2'];
+    if (!validModes.includes(options.parse_mode as string)) delete options.parse_mode;
+    try {
+      await this.bot.api.editMessageText(chatId, messageId, text, { ...options, disable_web_page_preview: true } as never);
+    } catch (err) {
+      const description = String((err as { description?: string }).description || err);
+      if (!/message is not modified/i.test(description)) throw err;
+    }
+  }
+
   async sendDocument(
     chatId: string | number,
     document: unknown,

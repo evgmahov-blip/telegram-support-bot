@@ -1,6 +1,7 @@
 const mockLean = jest.fn();
-const mockLimit = jest.fn(() => ({ lean: mockLean }));
-const mockSort = jest.fn(() => ({ limit: mockLimit }));
+const query = { limit: jest.fn(), lean: mockLean };
+const mockLimit = query.limit;
+const mockSort = jest.fn(() => query);
 const mockFind = jest.fn(() => ({ sort: mockSort }));
 
 jest.mock('../src/db', () => ({
@@ -16,7 +17,7 @@ describe('ticket audit history', () => {
     jest.clearAllMocks();
   });
 
-  it('reads newest events for one ticket with a bounded limit', async () => {
+  it('reads requested events for one ticket without silently truncating the limit', async () => {
     const events = [{ type: 'ticket.taken', ticketId: 31 }];
     mockLean.mockResolvedValue(events);
 
@@ -24,6 +25,6 @@ describe('ticket audit history', () => {
 
     expect(mockFind).toHaveBeenCalledWith({ ticketId: 31 });
     expect(mockSort).toHaveBeenCalledWith({ timestamp: -1 });
-    expect(mockLimit).toHaveBeenCalledWith(100);
+    expect(mockLimit).toHaveBeenCalledWith(500);
   });
 });

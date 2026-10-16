@@ -8,6 +8,7 @@ import * as aiDraft from './ai-draft';
 import * as webhooks from './webhooks';
 import * as workflows from './workflows';
 import { persistStaffMessageCorrelation } from './staff-correlation';
+import { refreshStaffCard } from './ticket-ui';
 
 const TIME_BETWEEN_CONFIRMATION_MESSAGES = 86400000; // 24 hours
 function formatMessageAsTicket(
@@ -126,6 +127,7 @@ async function processTicket(
       ctx.message.from.first_name,
     );
   }
+  await refreshStaffCard(ticket.ticketId);
 
   db.recordAnalyticsEventBestEffort('ticket.message.user', ticket.ticketId, ctx.from.id.toString());
 
@@ -211,6 +213,7 @@ async function chat(ctx: Context, chat: { id: string }) {
         ctx.message.from.first_name,
       );
     }
+    await refreshStaffCard(ticket.ticketId);
 
     db.recordAnalyticsEventBestEffort('ticket.message.user', ticket.ticketId, ctx.from.id.toString());
 

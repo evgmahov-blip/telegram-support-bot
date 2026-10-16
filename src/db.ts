@@ -37,6 +37,18 @@ export interface ISupportee extends mongoose.Document {
   closed_at: Date | null;
   created_at: Date;
   updated_at: Date;
+  staff_card_chat_id: string | null;
+  staff_card_message_id: number | null;
+  staff_card_thread_id: number | null;
+  pending_reply_prompt_id: number | null;
+  pending_reply_staff_id: string | null;
+  pending_reply_expires_at: Date | null;
+  staff_card_claim: string | null;
+  staff_card_claimed_at: Date | null;
+  pending_action_token: string | null;
+  pending_action_type: string | null;
+  pending_action_expires_at: Date | null;
+  pending_action_actor_id: string | null;
 }
 
 export const SupporteeSchema = new mongoose.Schema<ISupportee>({
@@ -55,6 +67,18 @@ export const SupporteeSchema = new mongoose.Schema<ISupportee>({
   sentiment_score: { type: Number, default: null },
   first_response_at: { type: Date, default: null },
   closed_at: { type: Date, default: null },
+  staff_card_chat_id: { type: String, default: null },
+  staff_card_message_id: { type: Number, default: null },
+  staff_card_thread_id: { type: Number, default: null },
+  pending_reply_prompt_id: { type: Number, default: null },
+  pending_reply_staff_id: { type: String, default: null },
+  pending_reply_expires_at: { type: Date, default: null },
+  staff_card_claim: { type: String, default: null },
+  staff_card_claimed_at: { type: Date, default: null },
+  pending_action_token: { type: String, default: null },
+  pending_action_type: { type: String, default: null },
+  pending_action_expires_at: { type: Date, default: null },
+  pending_action_actor_id: { type: String, default: null },
 }, {
   timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' },
 });
@@ -75,6 +99,8 @@ export interface ITicketMessage extends mongoose.Document {
   sender_id: string;
   text: string;
   timestamp: Date;
+  delivery_key?: string | null;
+  delivered_at?: Date | null;
 }
 
 const TicketMessageSchema = new mongoose.Schema<ITicketMessage>({
@@ -83,8 +109,11 @@ const TicketMessageSchema = new mongoose.Schema<ITicketMessage>({
   sender_id: { type: String, default: '' },
   text: { type: String, required: true },
   timestamp: { type: Date, default: Date.now },
+  delivery_key: { type: String, default: null },
+  delivered_at: { type: Date, default: null },
 });
 TicketMessageSchema.index({ ticketId: 1, timestamp: -1 });
+TicketMessageSchema.index({ delivery_key: 1 }, { unique: true, sparse: true });
 
 const TicketMessage = mongoose.model('TicketMessage', TicketMessageSchema);
 
@@ -439,6 +468,77 @@ export async function getTicketByUserId (
   return result as ISupportee | null;
 };
 
+export async function listUserTickets(userId: string, page: number, pageSize = 6): Promise<ISupportee[]> {
+  return await Supportee.find({ userid: userId }).sort({ updated_at: -1, ticketId: -1 })
+    .skip(Math.max(0, page) * pageSize).limit(pageSize).lean<ISupportee[]>();
+}
+
+export async function listStaffTickets(
+  view: 'new' | 'mine' | 'active' | 'closed', actorId: string, page: number, pageSize = 6,
+): Promise<ISupportee[]> {
+  const query: Record<string, unknown> = view === 'new'
+    ? { status: { $in: ['open', 'waiting_user'] }, assigned_to: null }
+    : view === 'mine'
+      ? { status: { $in: ['open', 'waiting_user'] }, assigned_to: actorId }
+      : view === 'closed'
+        ? { status: 'closed' }
+        : { status: { $in: ['open', 'waiting_user'] } };
+  return await Supportee.find(query).sort({ updated_at: -1, ticketId: -1 })
+    .skip(Math.max(0, page) * pageSize).limit(pageSize).lean<ISupportee[]>();
+}
+
+export async function claimStaffCard(ticketId: number, claim: string) {
+  return await Supportee.findOneAndUpdate(
+    { ticketId, staff_card_message_id: null, $or: [
+      { staff_card_claim: null }, { staff_card_claimed_at: { $lt: new Date(Date.now() - 60_000) } },
+    ] },
+    { $set: { staff_card_claim: claim, staff_card_claimed_at: new Date() } }, { new: true },
+  );
+}
+
+export async function bindStaffCard(ticketId: number, claim: string, chatId: string, messageId: number, threadId: number | null) {
+  return await Supportee.findOneAndUpdate(
+    { ticketId, staff_card_message_id: null, staff_card_claim: claim },
+    { $set: { staff_card_chat_id: chatId, staff_card_message_id: messageId, staff_card_thread_id: threadId, staff_card_claim: null, staff_card_claimed_at: null }, $addToSet: { internalIds: messageId } },
+    { new: true },
+  );
+}
+
+export async function releaseStaffCardClaim(ticketId: number, claim: string) {
+  await Supportee.updateOne({ ticketId, staff_card_claim: claim, staff_card_message_id: null }, { $set: { staff_card_claim: null, staff_card_claimed_at: null } });
+}
+
+export async function setReplyPrompt(ticketId: number, staffId: string, promptId: number, expiresAt: Date, expectedOwner?: string) {
+  const query: Record<string, unknown> = { ticketId, status: { $in: ['open', 'waiting_user'] } };
+  if (expectedOwner !== undefined) query.assigned_to = expectedOwner;
+  return await Supportee.findOneAndUpdate(
+    query,
+    { $set: { pending_reply_staff_id: staffId, pending_reply_prompt_id: promptId, pending_reply_expires_at: expiresAt }, $addToSet: { internalIds: promptId } },
+    { new: true },
+  );
+}
+
+export async function setPendingTicketAction(ticketId: number, type: string, token: string, actorId: string, expiresAt: Date) {
+  return await Supportee.findOneAndUpdate({ ticketId }, { $set: {
+    pending_action_type: type, pending_action_token: token, pending_action_actor_id: actorId, pending_action_expires_at: expiresAt,
+  } }, { new: true });
+}
+
+export async function consumePendingTicketAction(ticketId: number, type: string, token: string, actorId: string) {
+  return await Supportee.findOneAndUpdate({ ticketId, pending_action_type: type, pending_action_token: token,
+    pending_action_actor_id: actorId, pending_action_expires_at: { $gt: new Date() } }, { $set: {
+    pending_action_type: null, pending_action_token: null, pending_action_actor_id: null, pending_action_expires_at: null,
+  } }, { new: false });
+}
+
+export async function clearReplyPrompt(ticketId: number, staffId?: string) {
+  const query: Record<string, unknown> = { ticketId };
+  if (staffId) query.pending_reply_staff_id = staffId;
+  return await Supportee.findOneAndUpdate(query, { $set: {
+    pending_reply_staff_id: null, pending_reply_prompt_id: null, pending_reply_expires_at: null,
+  } }, { new: true });
+}
+
 /**
  * Opens an additional ticket for a user without touching their existing ones
  * (ticket_per_message, #172).
@@ -655,6 +755,22 @@ export async function persistTicketMessage(
   }
 }
 
+/** Reserve one staff delivery across Telegram update retries. */
+export async function reserveStaffReply(ticketId: number, senderId: string, text: string, deliveryKey: string) {
+  const existing = await TicketMessage.findOne({ delivery_key: deliveryKey });
+  if (existing) return existing;
+  try {
+    return await TicketMessage.create({ ticketId, sender: 'staff', sender_id: senderId, text, delivery_key: deliveryKey });
+  } catch (err) {
+    if ((err as { code?: number }).code === 11000) return await TicketMessage.findOne({ delivery_key: deliveryKey });
+    throw err;
+  }
+}
+
+export async function markStaffReplyDelivered(deliveryKey: string) {
+  await TicketMessage.updateOne({ delivery_key: deliveryKey }, { $set: { delivered_at: new Date() } });
+}
+
 export async function addTicketMessage(
   ticketId: number,
   sender: 'user' | 'staff' | 'ai',
@@ -686,18 +802,37 @@ export async function getConversationHistory(
 /** Full chronological ticket history for audit/export/KB workflows. */
 export async function getTicketMessageHistory(
   ticketId: number,
-  limit: number = 1000,
+  limit: number = 0,
 ): Promise<ITicketMessage[]> {
   try {
-    const safeLimit = Math.max(1, Math.min(limit, 5000));
-    return await TicketMessage.find({ ticketId })
-      .sort({ timestamp: 1 })
-      .limit(safeLimit)
-      .lean<ITicketMessage[]>();
+    const query = TicketMessage.find({ ticketId }).sort({ timestamp: 1 });
+    if (limit > 0) query.limit(limit);
+    return await query.lean<ITicketMessage[]>();
   } catch (err) {
     log.error('DB getTicketMessageHistory error:', err);
     return [];
   }
+}
+
+export async function getLatestTicketMessage(ticketId: number): Promise<ITicketMessage | null> {
+  return await TicketMessage.findOne({ ticketId }).sort({ timestamp: -1 }).lean<ITicketMessage | null>();
+}
+
+export async function getTicketTimelinePage(ticketId: number, page: number, pageSize: number, includeNotes: boolean) {
+  const pipeline: any[] = [
+    { $match: includeNotes ? { ticketId } : { ticketId, $or: [{ delivery_key: null }, { delivery_key: { $exists: false } }, { delivered_at: { $ne: null } }] } },
+    { $project: { at: '$timestamp', kind: '$sender', actor: '$sender_id', text: 1, metadata: { $literal: {} } } },
+    { $unionWith: { coll: AnalyticsEvent.collection.name, pipeline: [
+      { $match: { ticketId, type: { $in: ['ticket.closed','ticket.reopened','ticket.taken','ticket.assigned','ticket.transferred','ticket.waiting','ticket.resumed'] } } },
+      { $project: { at: '$timestamp', kind: { $literal: 'event' }, actor: '$agent_id', text: '$type', metadata: 1 } },
+    ] } },
+  ];
+  if (includeNotes) pipeline.push({ $unionWith: { coll: InternalNote.collection.name, pipeline: [
+    { $match: { ticketId } },
+    { $project: { at: '$timestamp', kind: { $literal: 'note' }, actor: '$author_id', text: 1, metadata: { $literal: {} } } },
+  ] } });
+  pipeline.push({ $sort: { at: 1, _id: 1 } }, { $skip: Math.max(0, page) * pageSize }, { $limit: pageSize });
+  return await TicketMessage.aggregate(pipeline);
 }
 
 // --- Analytics / event log methods ---

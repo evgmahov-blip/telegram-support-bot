@@ -400,7 +400,10 @@ export class Context {
     type: string;
   } = {} as Context['chat'];
   session: SessionData = {} as SessionData;
-  callbackQuery: { data: string; from: { id: string | number }; id: string } = { data: '', from: { id: '' }, id: '' };
+  callbackQuery: {
+    data: string; from: { id: string | number }; id: string;
+    message?: { message_id: number; chat: { id: string | number }; message_thread_id?: number };
+  } = { data: '', from: { id: '' }, id: '' };
   from: { username: string; id: string | number } = { username: '', id: '' };
   inlineQuery: unknown = null;
   reply: (text: string, options?: Record<string, unknown>) => Promise<void> = async () => {};
@@ -489,5 +492,4 @@ export enum Messenger {
   SIGNAL = 'signal',
   WEB = 'web',
 }
-
 

@@ -7,6 +7,7 @@ import * as ticketState from './ticket-state';
 import * as team from './team';
 import * as log from './logger'
 import { persistStaffMessageCorrelation } from './staff-correlation';
+import { refreshStaffCard } from './ticket-ui';
 
 const escapeRegex = (str: string): string => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -177,6 +178,7 @@ async function fileHandler(type: string, bot: Addon, ctx: Context) {
       ctx.message.from.first_name,
     );
   }
+  await refreshStaffCard(ticket.ticketId);
 
   if (session.admin) {
     const actorId = ctx.from.id.toString();

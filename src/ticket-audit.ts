@@ -6,11 +6,9 @@ import { AnalyticsEvent, IAnalyticsEvent } from './db';
  */
 export async function getTicketAuditHistory(
   ticketId: number,
-  limit: number = 20,
+  limit: number = 0,
 ): Promise<IAnalyticsEvent[]> {
-  const safeLimit = Math.max(1, Math.min(limit, 100));
-  return await AnalyticsEvent.find({ ticketId })
-    .sort({ timestamp: -1 })
-    .limit(safeLimit)
-    .lean<IAnalyticsEvent[]>();
+  const query = AnalyticsEvent.find({ ticketId }).sort({ timestamp: -1 });
+  if (limit > 0) query.limit(limit);
+  return await query.lean<IAnalyticsEvent[]>();
 }

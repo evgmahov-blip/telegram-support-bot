@@ -3,6 +3,7 @@ const mockReply = jest.fn().mockResolvedValue(undefined);
 const mockSendMessage = jest.fn().mockResolvedValue(undefined);
 const mockCloseAll = jest.fn().mockResolvedValue(undefined);
 const mockTransitionTicketStatus = jest.fn().mockResolvedValue({ ticketId: 1001, status: 'open' });
+const mockCloseTicketLifecycle = jest.fn().mockResolvedValue({ outcome: 'closed', ticket: { ticketId: 1001 } });
 const mockBanUser = jest.fn().mockResolvedValue(undefined);
 const mockUnbanUser = jest.fn().mockResolvedValue(undefined);
 
@@ -20,9 +21,10 @@ jest.mock('../src/db', () => ({
     ticketId: 1001,
     userid: 'user123',
     messenger: 'telegram',
-    status: 'closed',
+    status: 'open',
     category: null,
   }),
+  getTicketByInternalId: jest.fn().mockResolvedValue(null),
   getTicketByUserId: jest.fn().mockResolvedValue(null),
   transitionTicketStatus: mockTransitionTicketStatus,
   banUser: mockBanUser,
@@ -31,6 +33,11 @@ jest.mock('../src/db', () => ({
   recordAnalyticsEvent: jest.fn().mockResolvedValue(undefined),
   getInternalNotes: jest.fn().mockResolvedValue([]),
   getConversationHistory: jest.fn().mockResolvedValue([]),
+}));
+
+jest.mock('../src/ticket-state', () => ({
+  transitionTicketStateFrom: mockTransitionTicketStatus,
+  closeTicketLifecycle: mockCloseTicketLifecycle,
 }));
 
 jest.mock('../src/cache', () => ({
@@ -60,6 +67,8 @@ jest.mock('../src/cache', () => ({
 
 jest.mock('../src/team', () => ({
   canPerformAction: jest.fn().mockReturnValue(true),
+  getStaffRole: jest.fn().mockReturnValue('agent'),
+  canManageTicket: jest.fn().mockReturnValue(true),
 }));
 
 jest.mock('../src/workflows', () => ({
@@ -86,6 +95,7 @@ describe('Commands Module', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockTransitionTicketStatus.mockResolvedValue({ ticketId: 1001, status: 'open' });
+    mockCloseTicketLifecycle.mockResolvedValue({ outcome: 'closed', ticket: { ticketId: 1001 } });
     Object.keys(cache.ticketIDs).forEach(k => delete cache.ticketIDs[k]);
     Object.keys(cache.ticketStatus).forEach(k => delete cache.ticketStatus[k]);
     Object.keys(cache.ticketSent).forEach(k => delete cache.ticketSent[k]);
@@ -224,7 +234,9 @@ describe('Commands Module', () => {
 
       await commands.closeCommand(ctx);
 
-      expect(mockTransitionTicketStatus).toHaveBeenCalledWith(1001, 'closed');
+      expect(mockCloseTicketLifecycle).toHaveBeenCalledWith(
+        expect.objectContaining({ ticketId: 1001 }), 'user123', 'user123',
+      );
     });
   });
 

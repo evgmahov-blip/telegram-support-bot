@@ -10,6 +10,7 @@ import * as analytics from './analytics';
 import * as workflows from './workflows';
 import * as edited from './edited';
 import * as log from './logger'
+import * as ticketUi from './ticket-ui';
 
 /**
  * grammY sets ctx.match to a string for string triggers and to a RegExpMatchArray for
@@ -139,6 +140,9 @@ export function registerCommonHandlers(addon: Addon, keys?: string[][]) {
             await middleware.reply(ctx, cache.config.language.services);
           }
         }
+        if (addon.platform === 'telegram') await ticketUi.showUserHome(ctx);
+      } else if (addon.platform === 'telegram' && ctx.session.admin && String(ctx.chat.id) === String(cache.config.staffchat_id)) {
+        await ticketUi.showStaffHome(ctx);
       } else {
         await middleware.reply(ctx, cache.config.language.prvChatOnly);
       }
@@ -206,7 +210,7 @@ export function registerCommonHandlers(addon: Addon, keys?: string[][]) {
     log.error('Error: ', err);
     if (!ctx || !ctx.message) return;
     try {
-      await middleware.reply(ctx, 'Message is not sent due to an error.');
+      await middleware.reply(ctx, 'Сообщение не доставлено. Проверьте актуальную карточку и повторите отправку ответом на новую подсказку.');
     } catch (e) {
       log.error('Could not send error msg to chat: ', e);
     }
