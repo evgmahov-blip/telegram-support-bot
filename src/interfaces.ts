@@ -491,5 +491,7 @@ export enum Messenger {
   TELEGRAM = 'telegram',
   SIGNAL = 'signal',
   WEB = 'web',
+  /** Staff-recorded external ticket; never a delivery transport (see manual-ticket-guard). */
+  MANUAL = 'manual',
 }
 

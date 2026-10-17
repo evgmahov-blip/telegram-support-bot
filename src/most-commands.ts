@@ -10,6 +10,7 @@ import * as staff from './staff';
 import * as middleware from './middleware';
 import { resolveTicketFromReply } from './ticket-resolution';
 import { refreshStaffCard } from './ticket-ui';
+import { staffDisplayName } from './staff-names';
 
 async function resolveRepliedTicket(ctx: Context): Promise<ISupportee | null> {
   const resolved = await resolveTicketFromReply(ctx, null);
@@ -235,8 +236,7 @@ export async function notesCommand(ctx: Context): Promise<void> {
 
   const esc = middleware.strictEscape;
   const lines = notes.map((note) => {
-    const author = cache.staffMembers.get(note.author_id);
-    return `• ${esc(author?.name || note.author_id)}: ${esc(note.text)}`;
+    return `• ${esc(staffDisplayName(note.author_id))}: ${esc(note.text)}`;
   });
   await middleware.reply(
     ctx,
@@ -267,8 +267,8 @@ export async function historyCommand(ctx: Context): Promise<void> {
     const when = event.timestamp
       ? new Date(event.timestamp).toISOString().slice(0, 16).replace('T', ' ')
       : '-';
-    const member = event.agent_id ? cache.staffMembers.get(event.agent_id) : undefined;
-    const actor = event.agent_id ? (member?.name || event.agent_id) : 'system/user';
+    const actor = !event.agent_id ? 'system/user'
+      : event.metadata?.closed_by === 'user' ? 'user' : staffDisplayName(event.agent_id);
     return `• ${esc(when)} · ${esc(event.type)} · ${esc(actor)}`;
   });
 

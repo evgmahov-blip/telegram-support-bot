@@ -9,6 +9,7 @@ import * as updateDedup from '../../telegram-update-dedup';
 import cache from '../../cache';
 import { registerCommonHandlers } from '../../handlers';
 import * as log from '../../logger'
+import { assertDeliverableRecipient } from '../../manual-ticket-guard';
 
 type BotContext = GrammyContext & SessionFlavor<SessionData>;
 
@@ -93,6 +94,7 @@ class TelegramAddon implements Addon {
 
   async sendMessage(chatId: string | number, text: string, options: Record<string, unknown> = {}): Promise<string | null> {
     if (typeof chatId !== 'string' && typeof chatId !== 'number') return null;
+    assertDeliverableRecipient(chatId);
     options = this.withThread(chatId, { ...options, disable_web_page_preview: true });
     const validModes = ['HTML', 'MarkdownV2'];
     if (options?.parse_mode === 'Markdown') {
@@ -135,6 +137,7 @@ class TelegramAddon implements Addon {
     other?: Record<string, unknown>,
     signal?: AbortSignal,
   ): Promise<string | null> {
+    assertDeliverableRecipient(chatId);
     try {
       const response = await this.bot.api.sendDocument(
         chatId,
@@ -150,6 +153,7 @@ class TelegramAddon implements Addon {
   }
 
   async sendPhoto(chatId: string | number, photo: unknown, options?: Record<string, unknown>): Promise<string | null> {
+    assertDeliverableRecipient(chatId);
     try {
       const response = await this.bot.api.sendPhoto(chatId, photo as never, this.withThread(chatId, options) as never);
       return response?.message_id?.toString() ?? null;
@@ -160,6 +164,7 @@ class TelegramAddon implements Addon {
   }
 
   async sendVideo(chatId: string | number, video: unknown, options?: Record<string, unknown>): Promise<string | null> {
+    assertDeliverableRecipient(chatId);
     try {
       const response = await this.bot.api.sendVideo(chatId, video as never, this.withThread(chatId, options) as never);
       return response?.message_id?.toString() ?? null;
@@ -170,6 +175,7 @@ class TelegramAddon implements Addon {
   }
 
   async sendSticker(chatId: string | number, sticker: unknown, options?: Record<string, unknown>): Promise<string | null> {
+    assertDeliverableRecipient(chatId);
     try {
       const response = await this.bot.api.sendSticker(chatId, sticker as never, this.withThread(chatId, options) as never);
       return response?.message_id?.toString() ?? null;

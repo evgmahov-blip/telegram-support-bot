@@ -3,6 +3,7 @@ import { randomUUID } from 'crypto';
 import cache from './cache';
 import { Messenger, TicketPriority } from './interfaces';
 import * as log from './logger'
+import { isManualRecipient, MANUAL_USER_PREFIX } from './manual-ticket-guard';
 
 // Lazy config accessors — defer reading cache.config until runtime
 // to avoid circular module initialization issues (index → migrate → db → cache)
@@ -51,7 +52,16 @@ export interface ISupportee extends mongoose.Document {
   pending_action_expires_at: Date | null;
   pending_action_actor_id: string | null;
   pending_new_request: boolean;
+  // Manual external tickets (phone/email/in-person): staff-only intake data, no client transport.
+  manual_source: ManualSource | null;
+  external_client: string | null;
+  external_contact: string | null;
+  created_by: string | null;
+  manual_request_key: string | null;
 }
+
+export type ManualSource = 'phone' | 'email' | 'in_person' | 'other';
+export const MANUAL_SOURCES: ManualSource[] = ['phone', 'email', 'in_person', 'other'];
 
 export const SupporteeSchema = new mongoose.Schema<ISupportee>({
   ticketId: { type: Number, required: true, unique: true, alias: 'id' },
@@ -83,6 +93,11 @@ export const SupporteeSchema = new mongoose.Schema<ISupportee>({
   pending_action_expires_at: { type: Date, default: null },
   pending_action_actor_id: { type: String, default: null },
   pending_new_request: { type: Boolean, default: false },
+  manual_source: { type: String, enum: MANUAL_SOURCES, default: null },
+  external_client: { type: String, default: null },
+  external_contact: { type: String, default: null },
+  created_by: { type: String, default: null },
+  manual_request_key: { type: String, required: false },
 }, {
   timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' },
 });
@@ -90,6 +105,11 @@ export const SupporteeSchema = new mongoose.Schema<ISupportee>({
 SupporteeSchema.index({ userid: 1, messenger: 1, ticketId: -1 });
 SupporteeSchema.index({ internalIds: 1 });
 SupporteeSchema.index({ status: 1, category: 1, assigned_to: 1 });
+// One confirmed intake draft can never produce a second ticket, even across crash/retry.
+SupporteeSchema.index(
+  { manual_request_key: 1 },
+  { unique: true, partialFilterExpression: { manual_request_key: { $type: 'string' } } },
+);
 
 const Supportee = mongoose.model(getCollectionName(), SupporteeSchema);
 
@@ -217,6 +237,53 @@ const UserBanSchema = new mongoose.Schema<IUserBan>({
 UserBanSchema.index({ messenger: 1, userid: 1 }, { unique: true });
 
 const UserBan = mongoose.model('UserBan', UserBanSchema);
+
+/**
+ * Short-lived staff intake state for «Создать заявку вручную». It is not a
+ * ticket: a draft that is never confirmed must not appear in ticket lists, so
+ * it cannot live in Supportee. Rows self-expire through the purge_at TTL index.
+ */
+export type ManualDraftStatus = 'source' | 'form' | 'preview' | 'creating' | 'created' | 'cancelled';
+
+export interface IManualIntakeDraft extends mongoose.Document {
+  token: string;
+  actor_id: string;
+  chat_id: string;
+  thread_id: number | null;
+  status: ManualDraftStatus;
+  source: ManualSource | null;
+  prompt_message_id: number | null;
+  confirm_nonce: string | null;
+  client: string | null;
+  contact: string | null;
+  description: string | null;
+  ticketId: number | null;
+  expires_at: Date;
+  purge_at: Date;
+}
+
+const ManualIntakeDraftSchema = new mongoose.Schema<IManualIntakeDraft>({
+  token: { type: String, required: true },
+  actor_id: { type: String, required: true },
+  chat_id: { type: String, required: true },
+  thread_id: { type: Number, default: null },
+  status: { type: String, enum: ['source', 'form', 'preview', 'creating', 'created', 'cancelled'], required: true },
+  source: { type: String, enum: MANUAL_SOURCES, default: null },
+  prompt_message_id: { type: Number, default: null },
+  confirm_nonce: { type: String, default: null },
+  client: { type: String, default: null },
+  contact: { type: String, default: null },
+  description: { type: String, default: null },
+  ticketId: { type: Number, default: null },
+  expires_at: { type: Date, required: true },
+  purge_at: { type: Date, required: true },
+});
+ManualIntakeDraftSchema.index({ token: 1 }, { unique: true });
+ManualIntakeDraftSchema.index({ chat_id: 1, prompt_message_id: 1 });
+ManualIntakeDraftSchema.index({ actor_id: 1, status: 1 });
+ManualIntakeDraftSchema.index({ purge_at: 1 }, { expireAfterSeconds: 0 });
+
+const ManualIntakeDraft = mongoose.model('ManualIntakeDraft', ManualIntakeDraftSchema);
 
 export async function connect() {
   mongoose.connection.on('open', () => {
@@ -600,6 +667,112 @@ export const addNewTicket = async (
   return ticketId;
 };
 
+// --- Manual external tickets ---
+
+const DRAFT_PURGE_MS = 24 * 60 * 60 * 1000;
+const OPEN_DRAFT_STATES: ManualDraftStatus[] = ['source', 'form', 'preview'];
+
+/** Start a fresh draft; the actor's older unfinished drafts become stale. */
+export async function startManualDraft(token: string, actorId: string, chatId: string, threadId: number | null, expiresAt: Date) {
+  await ManualIntakeDraft.updateMany({ actor_id: actorId, status: { $in: OPEN_DRAFT_STATES } }, { $set: { status: 'cancelled' } });
+  return await ManualIntakeDraft.create({ token, actor_id: actorId, chat_id: chatId, thread_id: threadId,
+    status: 'source', expires_at: expiresAt, purge_at: new Date(Date.now() + DRAFT_PURGE_MS) });
+}
+
+export async function getManualDraft(token: string) {
+  return await ManualIntakeDraft.findOne({ token }) as IManualIntakeDraft | null;
+}
+
+export async function findManualDraftByPrompt(chatId: string, promptId: number) {
+  return await ManualIntakeDraft.findOne({ chat_id: chatId, prompt_message_id: promptId }) as IManualIntakeDraft | null;
+}
+
+export async function bindManualDraftPrompt(token: string, actorId: string, source: ManualSource, promptId: number, expiresAt: Date) {
+  return await ManualIntakeDraft.findOneAndUpdate(
+    { token, actor_id: actorId, status: { $in: ['source', 'form'] }, expires_at: { $gt: new Date() } },
+    { $set: { source, prompt_message_id: promptId, status: 'form', confirm_nonce: null, expires_at: expiresAt } },
+    { new: true },
+  ) as IManualIntakeDraft | null;
+}
+
+export async function submitManualDraftForm(token: string, actorId: string, promptId: number,
+  fields: { client: string; contact: string | null; description: string }, nonce: string, expiresAt: Date) {
+  return await ManualIntakeDraft.findOneAndUpdate(
+    { token, actor_id: actorId, prompt_message_id: promptId, status: { $in: ['form', 'preview'] }, expires_at: { $gt: new Date() } },
+    { $set: { ...fields, status: 'preview', confirm_nonce: nonce, expires_at: expiresAt } },
+    { new: true },
+  ) as IManualIntakeDraft | null;
+}
+
+/**
+ * Claim the confirmation. A draft stuck in `creating` (crash between claim and
+ * completion) stays claimable by the same actor/nonce so the retry finishes
+ * the same ticket instead of losing the confirmed request.
+ */
+export async function claimManualDraftConfirm(token: string, actorId: string, nonce: string) {
+  return await ManualIntakeDraft.findOneAndUpdate(
+    { token, actor_id: actorId, confirm_nonce: nonce, $or: [
+      { status: 'preview', expires_at: { $gt: new Date() } }, { status: 'creating' },
+    ] },
+    { $set: { status: 'creating' } },
+    { new: true },
+  ) as IManualIntakeDraft | null;
+}
+
+export async function completeManualDraft(token: string, ticketId: number) {
+  await ManualIntakeDraft.updateOne({ token, status: 'creating' }, { $set: { status: 'created', ticketId } });
+}
+
+export async function cancelManualDraft(token: string, actorId: string) {
+  return await ManualIntakeDraft.findOneAndUpdate(
+    { token, actor_id: actorId, status: { $in: OPEN_DRAFT_STATES } }, { $set: { status: 'cancelled' } }, { new: true },
+  ) as IManualIntakeDraft | null;
+}
+
+/**
+ * Create (or, on retry, return) the one ticket for a confirmed intake draft.
+ * The synthetic userid is unique per request and outside every client
+ * namespace, so no transport can ever address it.
+ */
+export async function createManualTicket(requestKey: string, input: {
+  source: ManualSource; client: string; contact: string | null; description: string; createdBy: string;
+}): Promise<{ ticket: ISupportee; created: boolean }> {
+  let ticket = await Supportee.findOne({ manual_request_key: requestKey }) as ISupportee | null;
+  let created = false;
+  let raced = false;
+  if (!ticket) {
+    const ticketId = await getNextTicketId();
+    try {
+      ticket = await Supportee.create({
+        ticketId, userid: `${MANUAL_USER_PREFIX}${randomUUID()}`, messenger: Messenger.MANUAL, status: 'open',
+        category: null, name: input.client, manual_source: input.source, external_client: input.client,
+        external_contact: input.contact, created_by: input.createdBy, manual_request_key: requestKey,
+      }) as unknown as ISupportee;
+      created = true;
+    } catch (err) {
+      if ((err as { code?: number }).code !== 11000) throw err;
+      ticket = await Supportee.findOne({ manual_request_key: requestKey }) as ISupportee | null;
+      if (!ticket) throw err;
+      raced = true;
+    }
+  }
+  // The concurrent winner records the creation audit; a crash-retry repairs a missing one.
+  if (created || (!raced && !await AnalyticsEvent.exists({ ticketId: ticket.ticketId, type: 'ticket.created' }))) {
+    await recordAnalyticsEvent('ticket.created', ticket.ticketId, input.createdBy, { source: 'manual', manual_source: input.source });
+  }
+  // The initial description is keyed history: a retry completes it exactly once.
+  const descriptionKey = `manual:${requestKey}:description`;
+  if (!await TicketMessage.exists({ delivery_key: descriptionKey })) {
+    try {
+      await TicketMessage.create({ ticketId: ticket.ticketId, sender: 'user', sender_id: ticket.userid,
+        text: input.description, delivery_key: descriptionKey });
+    } catch (err) {
+      if ((err as { code?: number }).code !== 11000) throw err;
+    }
+  }
+  return { ticket, created };
+}
+
 export async function getByTicketId(
   ticketId: string,
 ): Promise<ISupportee | null> {
@@ -769,8 +942,9 @@ export async function getAllUsers(): Promise<Array<{ userid: string; messenger: 
     const users: Array<{ userid: string; messenger: string }> = [];
     for (const doc of docs) {
       const userid = String(doc.userid ?? '');
-      if (!userid || userid.startsWith('WEB')) continue;
       const messenger = String(doc.messenger);
+      // Manual tickets have no client transport and are never broadcast targets.
+      if (!userid || userid.startsWith('WEB') || isManualRecipient(userid, messenger)) continue;
       const key = `${messenger}:${userid}`;
       if (seen.has(key)) continue;
       if (await checkBan(userid, messenger)) continue;
@@ -809,6 +983,21 @@ export async function reserveStaffReply(ticketId: number, senderId: string, text
     return await TicketMessage.create({ ticketId, sender: 'staff', sender_id: senderId, text, delivery_key: deliveryKey });
   } catch (err) {
     if ((err as { code?: number }).code === 11000) return await TicketMessage.findOne({ delivery_key: deliveryKey });
+    throw err;
+  }
+}
+
+/**
+ * Staff-history-only record for a manual ticket. It has a delivery key (so it
+ * is never treated as a legacy delivered reply) and is never marked delivered.
+ */
+export async function recordStaffWork(ticketId: number, senderId: string, text: string, deliveryKey: string): Promise<boolean> {
+  if (await TicketMessage.exists({ delivery_key: deliveryKey })) return false;
+  try {
+    await TicketMessage.create({ ticketId, sender: 'staff', sender_id: senderId, text, delivery_key: deliveryKey });
+    return true;
+  } catch (err) {
+    if ((err as { code?: number }).code === 11000) return false;
     throw err;
   }
 }
@@ -879,7 +1068,9 @@ export async function getTicketTimelinePage(ticketId: number, page: number, page
     { $match: includeNotes ? { ticketId } : clientMessageFilter },
     { $project: { at: '$timestamp', kind: '$sender', actor: '$sender_id', text: 1, metadata: { $literal: {} } } },
     { $unionWith: { coll: AnalyticsEvent.collection.name, pipeline: [
-      { $match: { ticketId, type: { $in: ['ticket.closed','ticket.reopened','ticket.taken','ticket.assigned','ticket.transferred','ticket.waiting','ticket.resumed'] } } },
+      { $match: { ticketId, type: { $in: ['ticket.closed','ticket.reopened','ticket.taken','ticket.assigned','ticket.transferred','ticket.waiting','ticket.resumed',
+        // Creation audit (incl. manual intake author) is staff-only history.
+        ...(includeNotes ? ['ticket.created'] : [])] } } },
       { $project: { at: '$timestamp', kind: { $literal: 'event' }, actor: '$agent_id', text: '$type', metadata: 1 } },
     ] } },
   ];
@@ -1223,4 +1414,4 @@ export async function recordCSAT(
 
 // --- Export models for use in other modules ---
 
-export { TicketMessage, AnalyticsEvent, WebhookCursor, InternalNote, TicketCounter, UserBan };
+export { TicketMessage, AnalyticsEvent, WebhookCursor, InternalNote, TicketCounter, UserBan, ManualIntakeDraft };

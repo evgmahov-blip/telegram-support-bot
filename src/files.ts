@@ -8,6 +8,7 @@ import * as team from './team';
 import * as log from './logger'
 import { persistStaffMessageCorrelation } from './staff-correlation';
 import { refreshStaffCard } from './ticket-ui';
+import { isManualTicket } from './manual-ticket-guard';
 
 const escapeRegex = (str: string): string => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -62,6 +63,12 @@ async function fileHandler(type: string, bot: Addon, ctx: Context) {
       await reply(ctx, ticket.assigned_to
         ? 'This ticket is owned by another engineer.'
         : 'Take the ticket first with /take.');
+      return;
+    }
+
+    // A manual ticket has no client channel: never send or record a file as delivered.
+    if (isManualTicket(ticket)) {
+      await reply(ctx, 'Ручная заявка: файлы клиенту не отправляются. Запишите результат текстом через «Записать ответ».');
       return;
     }
 

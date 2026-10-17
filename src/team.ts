@@ -4,6 +4,7 @@ import * as db from './db';
 import * as ownership from './ticket-ownership';
 import * as middleware from './middleware';
 import * as log from './logger'
+import { staffDisplayName } from './staff-names';
 
 /**
  * Initializes staff member cache from config on startup.
@@ -79,16 +80,14 @@ export async function takeTicketCommand(ctx: Context, ticketId: number): Promise
     if (!ticket) {
         const current = await db.getTicketById(ticketId, null);
         if (current?.assigned_to) {
-            const owner = cache.staffMembers.get(current.assigned_to);
-            await middleware.reply(ctx, `Ticket is already owned by ${owner?.name || current.assigned_to}.`);
+            await middleware.reply(ctx, `Ticket is already owned by ${staffDisplayName(current.assigned_to)}.`);
         } else {
             await middleware.reply(ctx, 'Ticket is not active or its state changed.');
         }
         return;
     }
 
-    const actor = cache.staffMembers.get(actorId);
-    const actorName = actor?.name || actorId;
+    const actorName = staffDisplayName(actorId);
     await middleware.reply(ctx, `Ticket #T${ticketId.toString().padStart(6, '0')} taken by ${actorName}.`);
     await db.recordAnalyticsEvent('ticket.taken', ticketId, actorId, { owner: actorId });
 }
@@ -132,8 +131,7 @@ export async function transferTicketCommand(
         return;
     }
 
-    const target = cache.staffMembers.get(targetId);
-    const targetName = target?.name || targetId;
+    const targetName = staffDisplayName(targetId);
     await middleware.reply(ctx, `Ticket #T${ticketId.toString().padStart(6, '0')} transferred to ${targetName}.`);
 
     if (targetId !== actorId) {
@@ -194,8 +192,7 @@ export async function assignTicketCommand(ctx: Context, targetId: string, ticket
 
     await db.assignTicket(ticketId, targetId);
 
-    const member = cache.staffMembers.get(targetId);
-    const memberName = member?.name || targetId;
+    const memberName = staffDisplayName(targetId);
     await middleware.reply(ctx, `${cache.config.language.ticketAssignedTo} ${memberName}`);
 
     // Notify the assigned agent
@@ -277,7 +274,7 @@ export async function addInternalNoteCommand(ctx: Context, ticketId: number, tex
     middleware.sendMessage(
         cache.config.staffchat_id,
         cache.config.staffchat_type,
-        `📝 ${cache.config.language.internalNote} #T${ticketId.toString().padStart(6, '0')} (${cache.config.language.noteAddedBy} ${esc(ctx.message?.from?.first_name || 'staff')}):\n${esc(text)}`,
+        `📝 ${cache.config.language.internalNote} #T${ticketId.toString().padStart(6, '0')} (${cache.config.language.noteAddedBy} ${esc(staffDisplayName(ctx.from.id.toString()))}):\n${esc(text)}`,
         { parse_mode: cache.config.parse_mode },
     ).catch(log.error);
 
@@ -297,9 +294,7 @@ export async function showNotesCommand(ctx: Context, ticketId: number): Promise<
     const esc = middleware.strictEscape;
     let output = `📝 ${cache.config.language.internalNote} #T${ticketId.toString().padStart(6, '0')}:\n\n`;
     for (const note of notes) {
-        const author = cache.staffMembers.get(note.author_id);
-        const authorName = author?.name || note.author_id;
-        output += `• [${authorName}] ${esc(note.text)}\n`;
+        output += `• [${esc(staffDisplayName(note.author_id))}] ${esc(note.text)}\n`;
     }
 
     await middleware.reply(ctx, output.trim());
@@ -317,7 +312,7 @@ export async function listStaffCommand(ctx: Context): Promise<void> {
     let output = '👥 *Staff Members*:\n\n';
     for (const [id, member] of cache.staffMembers) {
         const roleIcons: Record<string, string> = { admin: '👑', supervisor: '⭐', agent: '🔧' };
-        output += `${roleIcons[member.role] || ''} ${member.name} (${member.role})\n`;
+        output += `${roleIcons[member.role] || ''} ${staffDisplayName(id)} (${member.role})\n`;
     }
 
     await middleware.reply(ctx, output.trim(), { parse_mode: cache.config.parse_mode });

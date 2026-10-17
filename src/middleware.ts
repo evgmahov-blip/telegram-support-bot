@@ -2,6 +2,7 @@ import cache from './cache';
 import SignalAddon from './addons/signal';
 import { Context, Messenger } from './interfaces';
 import TelegramAddon from './addons/telegram';
+import { assertDeliverableRecipient } from './manual-ticket-guard';
 
 /**
  * Escapes special characters for MarkdownV2, HTML, or Markdown formats.
@@ -40,6 +41,7 @@ async function sendMessage (
   msg: string,
   extra: any = { parse_mode: cache.config.parse_mode }
 ): Promise<string | null> {
+  assertDeliverableRecipient(id, messenger);
   const messengerType = messenger as Messenger;
   const cleanedMsg = msg.replace(/ {2,}/g, ' ');
 

@@ -8,6 +8,8 @@ import * as webhooks from './webhooks';
 import * as analytics from './analytics';
 import * as team from './team';
 import { refreshStaffCard } from './ticket-ui';
+import * as manualIntake from './manual-intake';
+import { isManualTicket } from './manual-ticket-guard';
 
 /**
  * Generates user-facing staff text. MOST never exposes the engineer identity to
@@ -115,6 +117,33 @@ async function transitionTicketAfterDelivery(
   return null;
 }
 
+const MANUAL_REPLY_LIMIT = 3000;
+
+/**
+ * «Записать ответ» on a manual ticket: the text is staff history only. There
+ * is no client channel, so nothing is sent, marked delivered or announced as sent.
+ */
+async function recordManualReply(ctx: Context, ticket: ISupportee, senderId: string, text: string, deliveryKey: string) {
+  const ticketId = ticket.ticketId;
+  const body = text.trim();
+  if (!body) {
+    await middleware.reply(ctx, 'Пустой ответ не записан.');
+    return;
+  }
+  if (body.length > MANUAL_REPLY_LIMIT) {
+    await middleware.reply(ctx, `Ответ длиннее ${MANUAL_REPLY_LIMIT} символов и не записан. Сократите текст.`);
+    return;
+  }
+  // Keyed by Telegram update: a replayed update never writes a second history row.
+  const created = await db.recordStaffWork(ticketId, senderId, body, deliveryKey);
+  if (!created) return;
+  if (!ticket.first_response_at) await db.setFirstResponseAt(ticketId);
+  db.recordAnalyticsEventBestEffort('ticket.work_recorded', ticketId, senderId, { manual: true });
+  await middleware.reply(ctx, `Ответ записан в историю ручной заявки #T${ticketId.toString().padStart(6, '0')}. Клиенту ничего не отправлено.`);
+  await db.clearReplyPrompt(ticketId, senderId);
+  await refreshStaffCard(ticketId);
+}
+
 /** Handles replies written in the closed staff group. */
 async function chat(ctx: Context) {
   if (!ctx.session.admin) return;
@@ -140,6 +169,9 @@ async function chat(ctx: Context) {
 
   let ticket: ISupportee | null = null;
   let ticketId = 0;
+
+  // Manual intake answers are bound to their own ForceReply prompt, never to a ticket.
+  if (typeof replyToMessageId === 'number' && await manualIntake.handleFormReply(ctx, replyToMessageId)) return;
 
   if (typeof correlatedMessageId === 'number') {
     ticket = await db.getTicketByInternalId(correlatedMessageId);
@@ -214,6 +246,11 @@ async function chat(ctx: Context) {
     await middleware.reply(ctx, ticket.assigned_to
       ? 'This ticket is owned by another engineer.'
       : 'Take the ticket first with /take.');
+    return;
+  }
+
+  if (isManualTicket(ticket)) {
+    await recordManualReply(ctx, ticket, senderId, staffMessage, deliveryKey);
     return;
   }
 

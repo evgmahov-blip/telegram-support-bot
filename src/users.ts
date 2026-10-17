@@ -9,6 +9,7 @@ import * as webhooks from './webhooks';
 import * as workflows from './workflows';
 import { persistStaffMessageCorrelation } from './staff-correlation';
 import { refreshStaffCard } from './ticket-ui';
+import { staffDisplayName } from './staff-names';
 
 const TIME_BETWEEN_CONFIRMATION_MESSAGES = 86400000; // 24 hours
 function formatMessageAsTicket(
@@ -31,9 +32,7 @@ function formatMessageAsTicket(
 
   let assignPrefix = '';
   if (ticketObj && ticketObj.assigned_to) {
-    const assignedMember = cache.staffMembers?.get(ticketObj.assigned_to);
-    const assignName = assignedMember?.name || ticketObj.assigned_to;
-    assignPrefix = `📋 Assigned: ${assignName}\n`;
+    assignPrefix = `📋 Assigned: ${esc(staffDisplayName(ticketObj.assigned_to))}\n`;
   }
 
   let tagsPrefix = '';

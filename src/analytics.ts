@@ -3,6 +3,7 @@ import * as db from './db';
 import * as middleware from './middleware';
 import { Context } from './interfaces';
 import * as log from './logger'
+import { isManualRecipient } from './manual-ticket-guard';
 
 /**
  * Records a CSAT rating for a ticket.
@@ -20,6 +21,8 @@ export async function recordCSATRating(
  */
 export async function sendCSATSurvey(userId: string | number, messenger: string, ticketId: number): Promise<void> {
     if (!cache.config.enable_csat) return;
+    // Manual tickets have no client channel to survey.
+    if (isManualRecipient(userId, messenger)) return;
 
     const msg = cache.config.language.csatRatingRequest || 'How would you rate your support experience?';
 

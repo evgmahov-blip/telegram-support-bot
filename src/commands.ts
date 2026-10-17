@@ -12,6 +12,8 @@ import * as webhooks from './webhooks';
 import { resolveTicketFromReply as resolveTicketFromContext } from './ticket-resolution';
 import * as ticketState from './ticket-state';
 import { refreshStaffCard } from './ticket-ui';
+import { isManualTicket, MANUAL_SOURCE_LABELS } from './manual-ticket-guard';
+import { staffDisplayName } from './staff-names';
 
 const escapeRegex = (str: string): string => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -152,6 +154,8 @@ const openCommand = async (ctx: Context): Promise<void> => {
         ticketInfo = '(web)';
       } else if (uidStr.includes('SIGNAL')) {
         ticketInfo = '(signal)';
+      } else if (isManualTicket(ticket)) {
+        ticketInfo = '(manual)';
       }
       // Mark tickets that already got a staff reply (#137)
       const repliedMark =
@@ -216,6 +220,7 @@ const closeCommand = async (ctx: Context): Promise<void> => {
   const paddedTicket = ticketIdStr.toString().padStart(6, '0');
   await middleware.reply(ctx, `${language.ticket} #T${paddedTicket} ${language.closed}`);
   if (result.notificationFailed) await middleware.reply(ctx, 'Тикет закрыт, но уведомление пользователю не доставлено.');
+  if (isManualTicket(ticket)) await middleware.reply(ctx, 'Ручная заявка: клиент не уведомлялся, канала доставки нет.');
   await refreshStaffCard(ticket.ticketId);
 };
 
@@ -271,6 +276,10 @@ const banCommand = async (ctx: Context): Promise<void> => {
     return;
   }
   const { ticket, ticketIdStr } = resolved;
+  if (isManualTicket(ticket)) {
+    await middleware.reply(ctx, 'Ручная заявка не связана с аккаунтом клиента; блокировать некого.');
+    return;
+  }
 
   await db.banUser(ticket.userid, ticket.messenger);
   await middleware.sendMessage(
@@ -626,14 +635,19 @@ const ticketCommand = async (ctx: Context): Promise<void> => {
   const padded = ticketId.toString().padStart(6, '0');
   const lines: string[] = [];
   lines.push(`*${esc(language.ticketDetails)} #T${padded}*`);
-  lines.push(`${esc(language.customer)}: ${anonymous_tickets ? esc(ticket.name ?? '-') : `${esc(ticket.name ?? '-')} (${esc(String(ticket.userid))})`}`);
+  if (isManualTicket(ticket)) {
+    // The synthetic manual userid is internal; staff see the recorded external client.
+    lines.push(`${esc(language.customer)}: ${esc(ticket.external_client ?? '-')} · ${esc(ticket.external_contact ?? '-')}`);
+    lines.push(`manual: ${esc(MANUAL_SOURCE_LABELS[ticket.manual_source ?? 'other'] ?? '-')} · ${esc(staffDisplayName(ticket.created_by))}`);
+  } else {
+    lines.push(`${esc(language.customer)}: ${anonymous_tickets ? esc(ticket.name ?? '-') : `${esc(ticket.name ?? '-')} (${esc(String(ticket.userid))})`}`);
+  }
   lines.push(`status: ${esc(ticket.status ?? '-')} · ${esc(String(ticket.messenger ?? '-'))}`);
   if (ticket.category) lines.push(`category: ${esc(ticket.category)}`);
   if (ticket.priority && ticket.priority !== 'normal') lines.push(`priority: ${esc(ticket.priority)}`);
   if (Array.isArray(ticket.tags) && ticket.tags.length > 0) lines.push(`tags: ${esc(ticket.tags.map((t) => `#${t}`).join(' '))}`);
   if (ticket.assigned_to) {
-    const member = cache.staffMembers?.get(ticket.assigned_to);
-    lines.push(`${esc(language.ticketAssignedTo)}: ${esc(member?.name ?? ticket.assigned_to)}`);
+    lines.push(`${esc(language.ticketAssignedTo)}: ${esc(staffDisplayName(ticket.assigned_to))}`);
   }
   if (ticket.first_response_at) lines.push(`first response: ${esc(new Date(ticket.first_response_at).toISOString())}`);
   if (ticket.closed_at) lines.push(`closed: ${esc(new Date(ticket.closed_at).toISOString())}`);

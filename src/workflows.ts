@@ -3,6 +3,7 @@ import * as db from './db';
 import * as middleware from './middleware';
 import { Context } from './interfaces';
 import * as log from './logger'
+import { isManualTicket } from './manual-ticket-guard';
 
 /**
  * Checks if the current time is within business hours.
@@ -103,6 +104,14 @@ export async function checkAutoClose(): Promise<void> {
                 .limit(1);
 
             if (messages.length === 0 || new Date(messages[0].timestamp) < cutoffDate) {
+                if (isManualTicket(ticket)) {
+                    // No client channel: close by ticket id and never attempt a notification.
+                    if (await db.transitionTicketStatus(ticket.ticketId, 'closed')) {
+                        await db.recordAnalyticsEvent('ticket.closed', ticket.ticketId, null, { reason: 'auto_close_inactivity' });
+                        log.info(`Auto-closed manual ticket #T${ticket.ticketId} (inactivity ${days}d)`);
+                    }
+                    continue;
+                }
                 await db.add(ticket.userid, 'closed', ticket.category, ticket.messenger);
                 await db.setClosedAt(ticket.ticketId);
                 await db.recordAnalyticsEvent('ticket.closed', ticket.ticketId, null, { reason: 'auto_close_inactivity' });

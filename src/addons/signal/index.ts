@@ -8,6 +8,7 @@ import { registerCommonHandlers } from '../../handlers';
 import * as db from '../../db';
 import * as log from '../../logger';
 import { AsyncWorkTracker } from '../../async-work';
+import { assertDeliverableRecipient } from '../../manual-ticket-guard';
 
 const SEND_ENDPOINT = 'v2/send';
 const GROUP_ENDPOINT = 'v1/groups';
@@ -47,6 +48,7 @@ class SignalAddon implements Addon {
   }
 
   async sendMessage(chatId: string | number, text: string, options?: any): Promise<string | null> {
+    assertDeliverableRecipient(chatId);
     try {
       // Build the payload in the required format.
       const payload = {
@@ -118,6 +120,7 @@ class SignalAddon implements Addon {
 
   // --- Helper method to send a file attachment ---
   private async sendFile(chatId: string | number, fileId: any, caption: string = ''): Promise<string | null> {
+    assertDeliverableRecipient(chatId);
     try {
       // Download attachment by fileId
       const attachment = await this.axiosInstance.get(`/${ATTACHMENTS_ENDPOINT}/${fileId}`, { responseType: 'arraybuffer' });

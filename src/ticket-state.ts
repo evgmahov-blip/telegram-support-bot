@@ -4,6 +4,7 @@ import cache from './cache';
 import * as middleware from './middleware';
 import * as webhooks from './webhooks';
 import * as log from './logger';
+import { isManualTicket } from './manual-ticket-guard';
 
 /**
  * Compare-and-set transition for a ticket lifecycle state.
@@ -57,7 +58,8 @@ export async function closeTicketLifecycle(
   } catch (err) { log.error(err); }
   Promise.resolve(webhooks.webhooks.ticketClosed(ticket.ticketId, userId)).catch(log.error);
   let notificationFailed = false;
-  try { if (options.notifyUser !== false) {
+  // Manual tickets have no client channel: no notification is attempted or reported as failed.
+  try { if (options.notifyUser !== false && !isManualTicket(ticket)) {
     await middleware.sendMessage(userId, ticket.messenger,
       `${cache.config.language.ticket} #T${String(ticket.ticketId).padStart(6, '0')} ${cache.config.language.closed}\n\n${cache.config.language.ticketClosed}`);
   } } catch (err) { notificationFailed = true; log.error(err); }
