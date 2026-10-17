@@ -236,3 +236,14 @@ it('resets edit mode when navigating back after skipping an edited contact', asy
   await handleTextInput(msg('Новое описание', 100));
   expect(current(t)).toMatchObject({ status: 'input', step: 'contact', edit_return: false });
 });
+
+it('returns field validation errors to the same actual topic', async () => {
+  cache.config.staffchat_thread_id = null;
+  await startDraft(cb('', 42, -100, 7));
+  const t = fakeDb.startManualDraft.mock.calls.at(-1)[0];
+  await handleDraftCallback(cb('', 42, -100, 7), ['mi','s',t,'0','phone']);
+  const c = msg('x'.repeat(201), 100, 42, -100, 7);
+  await handleTextInput(c);
+  expect(reply).toHaveBeenLastCalledWith(c, expect.stringContaining('200'),
+    expect.objectContaining({ message_thread_id: 7 }));
+});

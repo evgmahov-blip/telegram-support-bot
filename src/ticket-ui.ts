@@ -159,7 +159,8 @@ export async function answer(ctx: Context, text: string, rows: Button[][]) {
       log.error('Не удалось обновить окно навигации, отправляю новое:', err);
     }
   }
-  await middleware.reply(ctx, text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: rows } });
+  await middleware.reply(ctx, text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: rows },
+    message_thread_id: ctx.message?.message_thread_id ?? q?.message_thread_id ?? undefined });
 }
 
 export async function showUserHome(ctx: Context) {

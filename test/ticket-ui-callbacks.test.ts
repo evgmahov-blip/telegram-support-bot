@@ -334,3 +334,31 @@ describe('staff «Вернуть в работу» on a closed canonical card', 
     expect(state.transitionTicketStateFrom).not.toHaveBeenCalled();
   });
 });
+
+
+it('sends a plain-message navigation answer to the actual topic when none is configured', async () => {
+  const cache = require('../src/cache').default;
+  const previous = cache.config.staffchat_thread_id;
+  try {
+    cache.config.staffchat_thread_id = null;
+    const c: any = ctx('tm:home:0', -100, 9);
+    delete c.callbackQuery;
+    c.message = { chat: c.chat, message_id: 100, message_thread_id: 9, text: 'Клиент' };
+    const render = require('../src/ticket-ui').answer;
+    await render(c, 'Следующий вопрос', []);
+    expect(reply).toHaveBeenLastCalledWith(c, 'Следующий вопрос',
+      expect.objectContaining({ message_thread_id: 9 }));
+  } finally { cache.config.staffchat_thread_id = previous; }
+});
+it('keeps a canonical-card fallback answer in its originating topic', async () => {
+  const cache = require('../src/cache').default;
+  const previous = cache.config.staffchat_thread_id;
+  try {
+    cache.config.staffchat_thread_id = null;
+    getTicketByInternalId.mockResolvedValueOnce({ staff_card_message_id: 55, staff_card_chat_id: '-100', staff_card_thread_id: 9 });
+    const c = ctx('tm:home:0', -100, 9);
+    await require('../src/ticket-ui').answer(c, 'Меню', []);
+    expect(reply).toHaveBeenLastCalledWith(c, 'Меню',
+      expect.objectContaining({ message_thread_id: 9 }));
+  } finally { cache.config.staffchat_thread_id = previous; }
+});

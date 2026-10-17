@@ -127,8 +127,8 @@ export async function handleTextInput(ctx: Context): Promise<boolean> {
   if (chat !== String(cache.config.staffchat_id) || (cache.config.staffchat_thread_id && thread !== cache.config.staffchat_thread_id) || !canCreate(actor)) return false;
   const d = await db.findActiveManualDraft(actor, chat, thread); if (!d?.step) return false;
   const step = d.step as Step; const value = clean(text, step === 'description');
-  if (!value) { await middleware.reply(ctx, `Поле «${stepTitle[step]}» не может быть пустым.`); return true; }
-  if (value.length > stepLimit[step]) { await middleware.reply(ctx, `Поле «${stepTitle[step]}» длиннее ${stepLimit[step]} символов. Значение не изменено; отправьте короче.`); return true; }
+  if (!value) { await middleware.reply(ctx, `Поле «${stepTitle[step]}» не может быть пустым.`, { message_thread_id: thread ?? undefined }); return true; }
+  if (value.length > stepLimit[step]) { await middleware.reply(ctx, `Поле «${stepTitle[step]}» длиннее ${stepLimit[step]} символов. Значение не изменено; отправьте короче.`, { message_thread_id: thread ?? undefined }); return true; }
   const next = d.edit_return ? null : step === 'client' ? 'description' : step === 'description' ? 'contact' : null;
   const saved = await db.consumeManualDraftInput(d.token, actor, chat, thread, d.version, step, ctx.message.message_id, value, next, expires());
   if (!saved) return true;
@@ -142,6 +142,6 @@ export async function handleFormReply(ctx: Context, promptId: number): Promise<b
   if (typeof db.findManualDraftByPrompt !== 'function') return false;
   const old = await db.findManualDraftByPrompt(String(ctx.chat.id), promptId);
   if (!old) return false;
-  await middleware.reply(ctx, 'Эта подсказка относится к старой форме. Откройте «Главная» → «Создать заявку вручную» и пройдите пошаговый ввод.');
+  await middleware.reply(ctx, 'Эта подсказка относится к старой форме. Откройте «Главная» → «Создать заявку вручную» и пройдите пошаговый ввод.', { message_thread_id: threadOf(ctx) ?? undefined });
   return true;
 }
