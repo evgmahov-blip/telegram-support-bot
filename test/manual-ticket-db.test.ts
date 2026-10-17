@@ -147,8 +147,22 @@ describe('manual ticket persistence', () => {
       new Date(Date.now() + 1000));
     const [filter, update] = mockDrafts.findOneAndUpdate.mock.calls.at(-1);
     expect(filter).toEqual(expect.objectContaining({ token: 'tok', actor_id: '42', chat_id: '-100', thread_id: 7,
-      status: 'input', step: 'description', version: 2, last_consumed_message_id: { $ne: 900 } }));
+      status: 'input', step: 'description', version: 2,
+      $or: [{ last_consumed_message_id: { $exists: false } }, { last_consumed_message_id: null }, { last_consumed_message_id: { $lt: 900 } }] }));
     expect(update.$set).toEqual(expect.objectContaining({ description: 'много\nстрок', step: 'contact',
       last_consumed_message_id: 900 }));
   });
+});
+
+it('fences cancellation with the expected draft version in the Mongo predicate', async () => {
+  await (db.cancelManualDraft as any)('tok', '42', 7);
+  expect(mockDrafts.findOneAndUpdate.mock.calls.at(-1)[0]).toEqual(expect.objectContaining({
+    token: 'tok', actor_id: '42', version: 7,
+  }));
+});
+it('writes the preview nonce atomically with final input and its incremented version', async () => {
+  await db.consumeManualDraftInput('tok', '42', '-100', 7, 8, 'contact', 901, 'mail', null, new Date(Date.now() + 1000));
+  const [, update] = mockDrafts.findOneAndUpdate.mock.calls.at(-1);
+  expect(update.$set).toEqual(expect.objectContaining({ status: 'preview', step: null, contact: 'mail', confirm_nonce: '9' }));
+  expect(update.$inc).toEqual({ version: 1 });
 });

@@ -27,11 +27,11 @@ const fakeDb: any = {
   consumeManualDraftInput: jest.fn(async (t, actor, chat, thread, version, step, messageId, value, next, expires_at) => {
     const d = drafts.get(t);
     if (!d || d.actor_id !== actor || d.chat_id !== chat || d.thread_id !== thread || d.version !== version
-      || d.status !== 'input' || d.step !== step || !live(d) || d.last_consumed_message_id === messageId) return null;
+      || d.status !== 'input' || d.step !== step || !live(d) || (d.last_consumed_message_id != null && d.last_consumed_message_id >= messageId)) return null;
     d[step] = value; Object.assign(d, { step: next, status: next ? 'input' : 'preview', version: version + 1,
-      last_consumed_message_id: messageId, confirm_nonce: null, expires_at }); return { ...d };
+      last_consumed_message_id: messageId, confirm_nonce: next ? null : String(version + 1), edit_return: false, expires_at }); return { ...d };
   }),
-  cancelManualDraft: jest.fn(async (t, actor) => { const d = drafts.get(t); if (!d || d.actor_id !== actor || !OPEN.includes(d.status)) return null; d.status = 'cancelled'; return { ...d }; }),
+  cancelManualDraft: jest.fn(async (t, actor, version) => { const d = drafts.get(t); if (!d || d.actor_id !== actor || (version !== undefined && version !== d.version) || !OPEN.includes(d.status)) return null; d.status = 'cancelled'; return { ...d }; }),
   cancelActiveManualDraft: jest.fn(async (actor, chat, thread) => { for (const d of drafts.values()) if (d.actor_id === actor && d.chat_id === chat && d.thread_id === thread && OPEN.includes(d.status)) d.status = 'cancelled'; }),
   claimManualDraftConfirm: jest.fn(async (t, actor, nonce) => { const d = drafts.get(t); if (!d || d.actor_id !== actor || d.confirm_nonce !== nonce || !((d.status === 'preview' && live(d)) || d.status === 'creating')) return null; d.status = 'creating'; return { ...d }; }),
   completeManualDraft: jest.fn(async (t, ticketId) => { Object.assign(drafts.get(t), { status: 'created', ticketId }); }),
@@ -43,8 +43,10 @@ jest.mock('../src/db', () => fakeDb);
 jest.mock('../src/middleware', () => ({ reply }));
 jest.mock('../src/ticket-ui', () => ({ answer, refreshStaffCard: refresh, STAFF_HOME: { text: '🏠 Главная', callback_data: 'tm:home:0' }, e: (x: any) => String(x).replace(/&/g, '&amp;').replace(/</g, '&lt;') }));
 jest.mock('../src/cache', () => ({ __esModule: true, default: { config: { staffchat_id: '-100', staffchat_thread_id: 7 } } }));
+jest.mock('../src/staff-names', () => ({ staffDisplayName: () => 'Инженер' }));
 jest.mock('../src/team', () => ({ getStaffRole: (id: string) => ['42','43'].includes(id) ? 'agent' : null, canPerformAction: (id: string) => ['42','43'].includes(id) }));
 
+import cache from '../src/cache';
 import { startDraft, handleDraftCallback, handleTextInput, cancelActiveForHome, handleFormReply } from '../src/manual-intake';
 
 const cb = (data = '', actor = 42, chat = -100, thread = 7): any => ({ from: { id: actor }, chat: { id: chat }, session: { admin: chat === -100 },
@@ -66,7 +68,7 @@ async function preview(skip = false) {
   return t;
 }
 
-beforeEach(() => { jest.clearAllMocks(); drafts.clear(); tickets.clear(); });
+beforeEach(() => { jest.clearAllMocks(); drafts.clear(); tickets.clear(); cache.config.staffchat_thread_id = 7; });
 
 it('walks through ordinary text without Reply, escapes preview, and creates only on explicit confirm', async () => {
   const t = await preview();
@@ -171,4 +173,66 @@ it('cancel prevents subsequent plain text capture', async () => {
 it('a new start invalidates only the same engineer previous draft', async () => {
   const old = await start(); const other = await start(43); await startDraft(cb('', 42));
   expect(current(old).status).toBe('cancelled'); expect(current(other).status).toBe('input');
+});
+
+it('binds the actual topic even when the configured staff topic is unset', async () => {
+  cache.config.staffchat_thread_id = null;
+  await startDraft(cb('', 42, -100, 7));
+  const t = fakeDb.startManualDraft.mock.calls.at(-1)[0];
+  expect(current(t).thread_id).toBe(7);
+  await handleDraftCallback(cb('', 42, -100, 7), ['mi','s',t,'0','phone']);
+  expect(await handleTextInput(msg('другая тема', 100, 42, -100, 8))).toBe(false);
+  const before = { ...current(t) };
+  await handleDraftCallback(cb('', 42, -100, 8), ['mi','b',t,String(before.version)]);
+  expect(current(t)).toMatchObject(before);
+  await cancelActiveForHome(cb('', 42, -100, 8));
+  expect(current(t).status).toBe('input');
+  expect(await handleTextInput(msg('правильная тема', 101, 42, -100, 7))).toBe(true);
+});
+it('does not use a root-chat draft from a forum topic', async () => {
+  cache.config.staffchat_thread_id = null;
+  await startDraft(cb('', 42, -100, null));
+  const t = fakeDb.startManualDraft.mock.calls.at(-1)[0];
+  await handleDraftCallback(cb('', 42, -100, null), ['mi','s',t,'0','phone']);
+  expect(current(t).thread_id).toBeNull();
+  expect(await handleTextInput(msg('другая тема', 100, 42, -100, 7))).toBe(false);
+  expect(await handleTextInput(msg('клиент', 101, 42, -100, null))).toBe(true);
+});
+it('rejects cancellation that races with a newer input version', async () => {
+  const t = await start(); const version = current(t).version;
+  fakeDb.getManualDraft.mockImplementationOnce(async () => {
+    const before = { ...current(t) };
+    await handleTextInput(msg('Клиент', 100));
+    return before;
+  });
+  await handleDraftCallback(cb(), ['mi','x',t,String(version)]);
+  expect(current(t)).toMatchObject({ status: 'input', step: 'description', client: 'Клиент' });
+});
+it('ignores a delayed duplicate after another field has already advanced', async () => {
+  const t = await start();
+  await handleTextInput(msg('Клиент', 100));
+  await handleTextInput(msg('Описание', 101));
+  const version = current(t).version;
+  await handleTextInput(msg('Клиент', 100));
+  expect(current(t)).toMatchObject({ status: 'input', step: 'contact', contact: null, version });
+  await handleTextInput(msg('Контакт', 102));
+  expect(current(t)).toMatchObject({ status: 'preview', contact: 'Контакт' });
+});
+it('makes the preview confirmable in the same atomic input transition', async () => {
+  const t = await start();
+  await handleTextInput(msg('Клиент', 100));
+  await handleTextInput(msg('Описание', 101));
+  const transitions = fakeDb.transitionManualDraft.mock.calls.length;
+  await handleTextInput(msg('Контакт', 102));
+  expect(fakeDb.transitionManualDraft).toHaveBeenCalledTimes(transitions);
+  expect(current(t).confirm_nonce).toBe(String(current(t).version));
+});
+it('resets edit mode when navigating back after skipping an edited contact', async () => {
+  const t = await preview();
+  await handleDraftCallback(cb(), ['mi','f',t,String(current(t).version),'contact']);
+  await handleDraftCallback(cb(), ['mi','skip',t,String(current(t).version)]);
+  await handleDraftCallback(cb(), ['mi','b',t,String(current(t).version)]);
+  await handleDraftCallback(cb(), ['mi','b',t,String(current(t).version)]);
+  await handleTextInput(msg('Новое описание', 100));
+  expect(current(t)).toMatchObject({ status: 'input', step: 'contact', edit_return: false });
 });

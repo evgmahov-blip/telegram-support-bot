@@ -708,9 +708,12 @@ export async function consumeManualDraftInput(token: string, actorId: string, ch
   const field = step === 'client' ? 'client' : step === 'description' ? 'description' : 'contact';
   return await ManualIntakeDraft.findOneAndUpdate(
     { token, actor_id: actorId, chat_id: chatId, thread_id: threadId, status: 'input', step, version,
-      expires_at: { $gt: new Date() }, last_consumed_message_id: { $ne: messageId } },
+      expires_at: { $gt: new Date() }, $or: [
+        { last_consumed_message_id: { $exists: false } }, { last_consumed_message_id: null },
+        { last_consumed_message_id: { $lt: messageId } },
+      ] },
     { $set: { [field]: value, step: nextStep, status: nextStep ? 'input' : 'preview',
-      last_consumed_message_id: messageId, confirm_nonce: null, edit_return: false, expires_at: expiresAt }, $inc: { version: 1 } },
+      last_consumed_message_id: messageId, confirm_nonce: nextStep ? null : String(version + 1), edit_return: false, expires_at: expiresAt }, $inc: { version: 1 } },
     { new: true },
   ) as IManualIntakeDraft | null;
 }
@@ -764,9 +767,9 @@ export async function completeManualDraft(token: string, ticketId: number) {
   await ManualIntakeDraft.updateOne({ token, status: 'creating' }, { $set: { status: 'created', ticketId } });
 }
 
-export async function cancelManualDraft(token: string, actorId: string) {
+export async function cancelManualDraft(token: string, actorId: string, version?: number) {
   return await ManualIntakeDraft.findOneAndUpdate(
-    { token, actor_id: actorId, status: { $in: OPEN_DRAFT_STATES } }, { $set: { status: 'cancelled' } }, { new: true },
+    { token, actor_id: actorId, ...(version === undefined ? {} : { version }), status: { $in: OPEN_DRAFT_STATES } }, { $set: { status: 'cancelled' } }, { new: true },
   ) as IManualIntakeDraft | null;
 }
 

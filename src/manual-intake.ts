@@ -6,11 +6,13 @@ import * as ticketUi from './ticket-ui';
 import { Context } from './interfaces';
 import { MANUAL_SOURCE_LABELS } from './manual-ticket-guard';
 import { randomBytes } from 'crypto';
+import { staffDisplayName } from './staff-names';
 
 const DRAFT_MS = 15 * 60 * 1000;
 export const LIMITS = { client: 200, contact: 200, description: 3000 };
 type Rows = ticketUi.Button[][];
 type Step = 'client'|'description'|'contact';
+const threadOf = (ctx: Context): number | null => ctx.message?.message_thread_id ?? ctx.callbackQuery?.message?.message_thread_id ?? null;
 export type ManualFields = { client: string; contact: string | null; description: string };
 const token = (bytes: number) => randomBytes(bytes).toString('hex');
 const pad = (id: number) => String(id).padStart(6, '0');
@@ -47,7 +49,7 @@ async function showStep(ctx: Context, d: any) {
   const hint = step === 'client' ? 'Например: Вася, АРСО.' : step === 'description'
     ? 'Отправьте обычный текст; можно несколько строк.' : 'Телефон, email или другой способ связи. Это поле необязательно.';
   const rows = nav(d); if (step === 'contact') rows.unshift([{ text: 'Пропустить', callback_data: `mi:skip:${d.token}:${d.version}` }]);
-  await ticketUi.answer(ctx, `<b>${stepTitle[step]}</b>\n${hint}\n\nЛимит: ${stepLimit[step]} символов. Ожидаю следующее обычное текстовое сообщение в этой теме.`, rows);
+  await ticketUi.answer(ctx, `<a href="tg://user?id=${ticketUi.e(d.actor_id)}">${ticketUi.e(staffDisplayName(d.actor_id))}</a>\n<b>${stepTitle[step]}</b>\n${hint}\n\nЛимит: ${stepLimit[step]} символов. Ожидаю следующее обычное текстовое сообщение в этой теме.`, rows);
 }
 
 async function showSource(ctx: Context, d: any) {
@@ -67,24 +69,24 @@ async function showPreview(ctx: Context, d: any) {
 export async function startDraft(ctx: Context): Promise<boolean> {
   const actor = ctx.from.id.toString();
   if (!canCreate(actor)) { await ctx.answerCbQuery('Нет прав на создание заявок.', true); return true; }
-  const d = await db.startManualDraft(token(8), actor, String(cache.config.staffchat_id), cache.config.staffchat_thread_id || null, expires());
+  const d = await db.startManualDraft(token(8), actor, String(cache.config.staffchat_id), threadOf(ctx), expires());
   await showSource(ctx, d);
   await ctx.answerCbQuery(); return true;
 }
 
 export async function cancelActiveForHome(ctx: Context) {
   if (typeof db.cancelActiveManualDraft === 'function')
-    await db.cancelActiveManualDraft(ctx.from.id.toString(), String(ctx.chat.id), cache.config.staffchat_thread_id || null);
+    await db.cancelActiveManualDraft(ctx.from.id.toString(), String(ctx.chat.id), threadOf(ctx));
 }
 
 export async function handleDraftCallback(ctx: Context, p: string[]): Promise<boolean> {
   const actor = ctx.from.id.toString(), action = p[1], t = p[2];
   if (!canCreate(actor)) { await ctx.answerCbQuery('Нет прав на создание заявок.', true); return true; }
   const d = t ? await db.getManualDraft(t) : null;
-  if (!d || d.actor_id !== actor) { await ctx.answerCbQuery('Черновик устарел или принадлежит другому сотруднику.', true); return true; }
+  if (!d || d.actor_id !== actor || d.chat_id !== String(ctx.chat.id) || (d.thread_id ?? null) !== threadOf(ctx)) { await ctx.answerCbQuery('Черновик устарел или принадлежит другому сотруднику.', true); return true; }
   const version = Number(p[3]);
   if (action === 'x') {
-    const cancelled = d.version === version && await db.cancelManualDraft(t, actor);
+    const cancelled = d.version === version && await db.cancelManualDraft(t, actor, version);
     if (!cancelled) await ctx.answerCbQuery('Кнопка устарела.', true); else { await ticketUi.answer(ctx, 'Создание ручной заявки отменено.', [[ticketUi.STAFF_HOME]]); await ctx.answerCbQuery('Отменено.'); }
     return true;
   }
@@ -100,12 +102,12 @@ export async function handleDraftCallback(ctx: Context, p: string[]): Promise<bo
   let saved: any = null;
   if (action === 's') {
     const source = p[4] as db.ManualSource;
-    if (db.MANUAL_SOURCES.includes(source)) saved = await db.transitionManualDraft(t, actor, version, { status: 'source' }, { source, status: 'input', step: 'client' }, expires());
-  } else if (action === 'skip') saved = await db.transitionManualDraft(t, actor, version, { status: 'input', step: 'contact' }, { contact: null, status: 'preview', step: null, confirm_nonce: String(version + 1) }, expires());
+    if (db.MANUAL_SOURCES.includes(source)) saved = await db.transitionManualDraft(t, actor, version, { status: 'source' }, { source, status: 'input', step: 'client', edit_return: false }, expires());
+  } else if (action === 'skip') saved = await db.transitionManualDraft(t, actor, version, { status: 'input', step: 'contact' }, { contact: null, status: 'preview', step: null, edit_return: false, confirm_nonce: String(version + 1) }, expires());
   else if (action === 'b') {
     const previous = d.status === 'preview' ? 'contact' : d.step === 'contact' ? 'description' : d.step === 'description' ? 'client' : d.step === 'client' ? 'source' : null;
     if (previous) saved = await db.transitionManualDraft(t, actor, version, { status: d.status, step: d.step },
-      previous === 'source' ? { status: 'source', step: null, confirm_nonce: null } : { status: 'input', step: previous, confirm_nonce: null }, expires());
+      previous === 'source' ? { status: 'source', step: null, edit_return: false, confirm_nonce: null } : { status: 'input', step: previous, edit_return: false, confirm_nonce: null }, expires());
   } else if (action === 'edit') {
     if (d.status === 'preview' && d.version === version) {
       await ticketUi.answer(ctx, '<b>Что изменить?</b>', [[{ text: 'Кто обратился', callback_data: `mi:f:${t}:${version}:client` }, { text: 'Что случилось', callback_data: `mi:f:${t}:${version}:description` }], [{ text: 'Контакт', callback_data: `mi:f:${t}:${version}:contact` }], ...nav(d)]);
@@ -121,8 +123,8 @@ export async function handleDraftCallback(ctx: Context, p: string[]): Promise<bo
 export async function handleTextInput(ctx: Context): Promise<boolean> {
   const text = ctx.message?.text;
   if (!text || text.startsWith('/') || ctx.message?.reply_to_message || !ctx.session.admin) return false;
-  const actor = ctx.from.id.toString(), chat = String(ctx.chat.id), thread = cache.config.staffchat_thread_id || null;
-  if (chat !== String(cache.config.staffchat_id) || (thread && ctx.message.message_thread_id !== thread) || !canCreate(actor)) return false;
+  const actor = ctx.from.id.toString(), chat = String(ctx.chat.id), thread = threadOf(ctx);
+  if (chat !== String(cache.config.staffchat_id) || (cache.config.staffchat_thread_id && thread !== cache.config.staffchat_thread_id) || !canCreate(actor)) return false;
   const d = await db.findActiveManualDraft(actor, chat, thread); if (!d?.step) return false;
   const step = d.step as Step; const value = clean(text, step === 'description');
   if (!value) { await middleware.reply(ctx, `Поле «${stepTitle[step]}» не может быть пустым.`); return true; }
@@ -130,11 +132,8 @@ export async function handleTextInput(ctx: Context): Promise<boolean> {
   const next = d.edit_return ? null : step === 'client' ? 'description' : step === 'description' ? 'contact' : null;
   const saved = await db.consumeManualDraftInput(d.token, actor, chat, thread, d.version, step, ctx.message.message_id, value, next, expires());
   if (!saved) return true;
-  if (saved.status === 'preview') {
-    const nonce = String(saved.version + 1);
-    const preview = await db.transitionManualDraft(saved.token, actor, saved.version, { status: 'preview' }, { confirm_nonce: nonce }, expires());
-    if (preview) await showPreview(ctx, preview);
-  } else await showStep(ctx, saved);
+  if (saved.status === 'preview') await showPreview(ctx, saved);
+  else await showStep(ctx, saved);
   return true;
 }
 
