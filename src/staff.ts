@@ -161,6 +161,9 @@ async function chat(ctx: Context) {
   }
 
   const replyMsg = ctx.message?.reply_to_message;
+  // Replies belong to the existing ticket/prompt router. Only an ordinary
+  // non-reply may be consumed by an explicitly active manual wizard step.
+  if (!replyMsg && typeof manualIntake.handleTextInput === 'function' && await manualIntake.handleTextInput(ctx)) return;
   if (!replyMsg) return;
 
   const replyText = replyMsg.text || replyMsg.caption || '';

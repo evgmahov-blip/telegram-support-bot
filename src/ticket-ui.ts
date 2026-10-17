@@ -286,7 +286,8 @@ export async function handleCallback(ctx: Context): Promise<boolean> {
   if (p[0] === 'tm') {
     if (!staffSurface(ctx)) { await ctx.answerCbQuery('Недоступно вне рабочей группы/темы.', true); return true; }
     if (p[1] === 'manual') return await manualIntake.startDraft(ctx);
-    if (p[1] === 'home') await showStaffHome(ctx); else await staffList(ctx, p[1] as never, Number(p[2]) || 0);
+    if (p[1] === 'home') { await manualIntake.cancelActiveForHome(ctx); await showStaffHome(ctx); }
+    else await staffList(ctx, p[1] as never, Number(p[2]) || 0);
     await ctx.answerCbQuery(); return true;
   }
   if (p[0] === 'mi') {

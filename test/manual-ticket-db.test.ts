@@ -128,8 +128,27 @@ describe('manual ticket persistence', () => {
 
   it('starting a new draft supersedes the actor\'s unfinished drafts only', async () => {
     await db.startManualDraft('tok2', '42', '-100', 7, new Date(Date.now() + 1000));
-    expect(mockDrafts.updateMany).toHaveBeenCalledWith({ actor_id: '42', status: { $in: ['source', 'form', 'preview'] } },
+    expect(mockDrafts.updateMany).toHaveBeenCalledWith({ actor_id: '42', status: { $in: ['source', 'input', 'form', 'preview'] } },
       { $set: { status: 'cancelled' } });
     expect(mockDrafts.create).toHaveBeenCalledWith(expect.objectContaining({ token: 'tok2', actor_id: '42', status: 'source', thread_id: 7 }));
+  });
+
+  it('advances a wizard step only for the exact version and state', async () => {
+    await db.transitionManualDraft('tok', '42', 3, { status: 'input', step: 'contact' },
+      { status: 'preview', step: null }, new Date(Date.now() + 1000));
+    const [filter, update] = mockDrafts.findOneAndUpdate.mock.calls.at(-1);
+    expect(filter).toEqual(expect.objectContaining({ token: 'tok', actor_id: '42', version: 3,
+      status: 'input', step: 'contact', expires_at: { $gt: expect.any(Date) } }));
+    expect(update.$inc).toEqual({ version: 1 });
+  });
+
+  it('consumes one message with actor/chat/topic/step/version and message dedup predicates', async () => {
+    await db.consumeManualDraftInput('tok', '42', '-100', 7, 2, 'description', 900, 'много\nстрок', 'contact',
+      new Date(Date.now() + 1000));
+    const [filter, update] = mockDrafts.findOneAndUpdate.mock.calls.at(-1);
+    expect(filter).toEqual(expect.objectContaining({ token: 'tok', actor_id: '42', chat_id: '-100', thread_id: 7,
+      status: 'input', step: 'description', version: 2, last_consumed_message_id: { $ne: 900 } }));
+    expect(update.$set).toEqual(expect.objectContaining({ description: 'много\nстрок', step: 'contact',
+      last_consumed_message_id: 900 }));
   });
 });

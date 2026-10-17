@@ -33,7 +33,7 @@ jest.mock('../src/team', () => ({ canPerformAction: () => true, canManageTicket:
 jest.mock('../src/webhooks', () => ({ webhooks: { ticketReplied: mockTicketReplied, ticketClosed: jest.fn() } }));
 jest.mock('../src/analytics', () => ({ sendCSATSurvey: mockSendCSATSurvey }));
 jest.mock('../src/ticket-ui', () => ({ refreshStaffCard: mockRefreshStaffCard }));
-jest.mock('../src/manual-intake', () => ({ handleFormReply: mockHandleFormReply }));
+jest.mock('../src/manual-intake', () => ({ handleFormReply: mockHandleFormReply, handleTextInput: jest.fn().mockResolvedValue(false) }));
 jest.mock('../src/logger', () => ({ info: jest.fn(), error: jest.fn() }));
 
 import { chat } from '../src/staff';

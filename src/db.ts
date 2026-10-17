@@ -243,7 +243,8 @@ const UserBan = mongoose.model('UserBan', UserBanSchema);
  * ticket: a draft that is never confirmed must not appear in ticket lists, so
  * it cannot live in Supportee. Rows self-expire through the purge_at TTL index.
  */
-export type ManualDraftStatus = 'source' | 'form' | 'preview' | 'creating' | 'created' | 'cancelled';
+export type ManualDraftStatus = 'source' | 'input' | 'form' | 'preview' | 'creating' | 'created' | 'cancelled';
+export type ManualDraftStep = 'client' | 'description' | 'contact' | null;
 
 export interface IManualIntakeDraft extends mongoose.Document {
   token: string;
@@ -251,6 +252,8 @@ export interface IManualIntakeDraft extends mongoose.Document {
   chat_id: string;
   thread_id: number | null;
   status: ManualDraftStatus;
+  step: ManualDraftStep;
+  version: number;
   source: ManualSource | null;
   prompt_message_id: number | null;
   confirm_nonce: string | null;
@@ -258,6 +261,8 @@ export interface IManualIntakeDraft extends mongoose.Document {
   contact: string | null;
   description: string | null;
   ticketId: number | null;
+  last_consumed_message_id: number | null;
+  edit_return: boolean;
   expires_at: Date;
   purge_at: Date;
 }
@@ -267,7 +272,9 @@ const ManualIntakeDraftSchema = new mongoose.Schema<IManualIntakeDraft>({
   actor_id: { type: String, required: true },
   chat_id: { type: String, required: true },
   thread_id: { type: Number, default: null },
-  status: { type: String, enum: ['source', 'form', 'preview', 'creating', 'created', 'cancelled'], required: true },
+  status: { type: String, enum: ['source', 'input', 'form', 'preview', 'creating', 'created', 'cancelled'], required: true },
+  step: { type: String, enum: ['client', 'description', 'contact', null], default: null },
+  version: { type: Number, default: 0, required: true },
   source: { type: String, enum: MANUAL_SOURCES, default: null },
   prompt_message_id: { type: Number, default: null },
   confirm_nonce: { type: String, default: null },
@@ -275,6 +282,8 @@ const ManualIntakeDraftSchema = new mongoose.Schema<IManualIntakeDraft>({
   contact: { type: String, default: null },
   description: { type: String, default: null },
   ticketId: { type: Number, default: null },
+  last_consumed_message_id: { type: Number, default: null },
+  edit_return: { type: Boolean, default: false },
   expires_at: { type: Date, required: true },
   purge_at: { type: Date, required: true },
 });
@@ -670,13 +679,45 @@ export const addNewTicket = async (
 // --- Manual external tickets ---
 
 const DRAFT_PURGE_MS = 24 * 60 * 60 * 1000;
-const OPEN_DRAFT_STATES: ManualDraftStatus[] = ['source', 'form', 'preview'];
+const OPEN_DRAFT_STATES: ManualDraftStatus[] = ['source', 'input', 'form', 'preview'];
 
 /** Start a fresh draft; the actor's older unfinished drafts become stale. */
 export async function startManualDraft(token: string, actorId: string, chatId: string, threadId: number | null, expiresAt: Date) {
   await ManualIntakeDraft.updateMany({ actor_id: actorId, status: { $in: OPEN_DRAFT_STATES } }, { $set: { status: 'cancelled' } });
   return await ManualIntakeDraft.create({ token, actor_id: actorId, chat_id: chatId, thread_id: threadId,
-    status: 'source', expires_at: expiresAt, purge_at: new Date(Date.now() + DRAFT_PURGE_MS) });
+    status: 'source', step: null, version: 0, expires_at: expiresAt, purge_at: new Date(Date.now() + DRAFT_PURGE_MS) });
+}
+
+export async function findActiveManualDraft(actorId: string, chatId: string, threadId: number | null) {
+  return await ManualIntakeDraft.findOne({ actor_id: actorId, chat_id: chatId, thread_id: threadId,
+    status: 'input', expires_at: { $gt: new Date() } }) as IManualIntakeDraft | null;
+}
+
+/** All wizard navigation is compare-and-set by token/actor/version. */
+export async function transitionManualDraft(token: string, actorId: string, version: number,
+  expected: Partial<Pick<IManualIntakeDraft, 'status'|'step'>>, set: Record<string, unknown>, expiresAt: Date) {
+  return await ManualIntakeDraft.findOneAndUpdate(
+    { token, actor_id: actorId, version, expires_at: { $gt: new Date() }, ...expected },
+    { $set: { ...set, expires_at: expiresAt }, $inc: { version: 1 } }, { new: true },
+  ) as IManualIntakeDraft | null;
+}
+
+export async function consumeManualDraftInput(token: string, actorId: string, chatId: string, threadId: number | null,
+  version: number, step: Exclude<ManualDraftStep, null>, messageId: number, value: string,
+  nextStep: ManualDraftStep, expiresAt: Date) {
+  const field = step === 'client' ? 'client' : step === 'description' ? 'description' : 'contact';
+  return await ManualIntakeDraft.findOneAndUpdate(
+    { token, actor_id: actorId, chat_id: chatId, thread_id: threadId, status: 'input', step, version,
+      expires_at: { $gt: new Date() }, last_consumed_message_id: { $ne: messageId } },
+    { $set: { [field]: value, step: nextStep, status: nextStep ? 'input' : 'preview',
+      last_consumed_message_id: messageId, confirm_nonce: null, edit_return: false, expires_at: expiresAt }, $inc: { version: 1 } },
+    { new: true },
+  ) as IManualIntakeDraft | null;
+}
+
+export async function cancelActiveManualDraft(actorId: string, chatId: string, threadId: number | null) {
+  return await ManualIntakeDraft.updateMany({ actor_id: actorId, chat_id: chatId, thread_id: threadId,
+    status: { $in: OPEN_DRAFT_STATES } }, { $set: { status: 'cancelled' } });
 }
 
 export async function getManualDraft(token: string) {
