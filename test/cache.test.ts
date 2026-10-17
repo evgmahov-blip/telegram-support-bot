@@ -74,6 +74,33 @@ describe('Cache Module', () => {
 });
 
 describe('mergeLanguage', () => {
+  const legacyEnglishLanguage = {
+    startCommandText: '/start - Start the bot', faqCommandText: '/faq - Frequently Asked Questions',
+    helpCommandText: '/help - Get help',
+    confirmationMessage: 'Your message has been sent. We will get back to you as soon as possible.',
+    contactMessage: '', blockedSpam: 'You are blocked due to spam.', ticket: 'Ticket', closed: 'Closed',
+    acceptedBy: 'Accepted by', dear: 'Dear', regards: 'Regards', from: 'from', language: 'Language',
+    msg_sent: 'Message sent!', file_sent: 'File sent!', usr_with_ticket: 'User with ticket', banned: 'Banned',
+    replyPrivate: 'Reply in private chat', services: 'Services', customer: 'Customer',
+    msgForwarding: 'Message forwarding', back: 'Back', whatSubCategory: 'What sub-category?',
+    prvChatEnded: 'Private chat ended.', prvChatOpened: 'Private chat opened.', prvChatEnd: 'End private chat',
+    prvChatOpenedCustomer: 'Staff has opened a private chat with you.', instructionsSent: 'Instructions sent!',
+    openTickets: 'Open Tickets', support: 'Support', prvChatOnly: 'Private chat only', ticketClosed: 'Ticket closed',
+    links: 'Links', textFirst: 'Please send a text message first.',
+    ticketClosedError: 'This ticket is closed. Please open a new one.', automatedReply: 'Automated Reply',
+    automatedReplyAuthor: 'Support Team', doesntHelp: "That doesn't help",
+    automatedReplySent: 'An automated reply has been sent.', ticketReopened: 'Ticket reopened!',
+    yourTicketId: 'Your Ticket ID', helpCommandStaffText: '/help - Staff commands reference',
+    regardsGroup: 'Regards, Support Team', csatRatingRequest: 'Please rate your support experience (1-5):',
+    csatThankYou: 'Thank you for your feedback!', triagePriority: 'Priority', triageSummary: 'Triage Summary',
+    sentimentAlert: 'Sentiment Alert', ticketAssignedTo: 'Ticket assigned to', ticketUnassigned: 'Ticket unassigned',
+    assignedBy: 'Assigned by', internalNote: 'Internal Note', noteAddedBy: 'Note added by',
+    offlineMessage: "We're currently offline. We'll get back to you when we're available.",
+    businessHoursClosed: 'Our support hours are from {start} to {end}.',
+    escalationNotify: 'This ticket has been escalated.', replied: 'replied', ticketDetails: 'Ticket details',
+    editedMessage: 'edited their message', broadcastSent: 'Broadcast sent to', closedByUser: 'closed by the user',
+  };
+
   it('applies all default language strings when the config has no language block', () => {
     const language = mergeLanguage(undefined);
     expect(language.confirmationMessage).toBeTruthy();
@@ -82,9 +109,14 @@ describe('mergeLanguage', () => {
   });
 
   it('keeps user overrides while filling missing language keys', () => {
-    const language = mergeLanguage({ ticket: 'Anfrage' });
+    const language = mergeLanguage({ ticket: 'Anfrage', helpCommandText: 'English help for our customers' });
     expect(language.ticket).toBe('Anfrage');
+    expect(language.helpCommandText).toBe('English help for our customers');
     expect(language.confirmationMessage).toBeTruthy();
+  });
+
+  it('migrates a full legacy stock English dictionary to all Russian defaults', () => {
+    expect(mergeLanguage(legacyEnglishLanguage)).toEqual(mergeLanguage(undefined));
   });
 
   it('falls back to the legacy contactMessage for confirmationMessage', () => {

@@ -17,6 +17,7 @@ jest.mock('openai', () => {
 import * as staff from '../src/staff';
 import cache from '../src/cache';
 import * as middleware from '../src/middleware';
+import { legacyEnglishDefaults, mergeLanguage } from '../src/language';
 
 jest.mock('../src/cache');
 jest.mock('../src/middleware');
@@ -83,6 +84,14 @@ describe('Staff Module', () => {
       expect(result).toBe('Здравствуйте, Женя!\n\nвсё будет хорошо не очкуй\n\nКоманда поддержки МОСТ');
       expect(result).not.toContain('С уважением');
       expect(result).not.toContain('Скрытый инженер');
+    });
+
+    it('uses Russian greeting and signature after merging a full legacy dictionary', () => {
+      (cache as any).config.language = mergeLanguage({ ...legacyEnglishDefaults });
+      const result = (staff as any).ticketMsg('Женя', {
+        text: 'Keep this exact engineer body', from: { first_name: 'Hidden engineer' },
+      });
+      expect(result).toBe('Здравствуйте, Женя!\n\nKeep this exact engineer body\n\nКоманда поддержки МОСТ');
     });
 
     it('should handle clean replies', () => {
