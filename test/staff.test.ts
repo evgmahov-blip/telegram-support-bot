@@ -67,10 +67,22 @@ describe('Staff Module', () => {
 
       const result = (staff as any).ticketMsg('Jane', message);
 
-      expect(result).toContain('Dear Jane');
+      expect(result).toContain('Dear Jane!');
       expect(result).toContain('Hello world');
       expect(result).toContain('Support Team');
       expect(result).not.toContain('John Engineer');
+    });
+
+    it('renders the reviewed Russian reply exactly once without changing engineer text', () => {
+      (cache as any).config.language.dear = 'Здравствуйте,';
+      (cache as any).config.language.regards = 'С уважением,';
+      (cache as any).config.language.regardsGroup = 'Команда поддержки МОСТ';
+      const result = (staff as any).ticketMsg('Женя', {
+        text: 'всё будет хорошо не очкуй', from: { first_name: 'Скрытый инженер' },
+      });
+      expect(result).toBe('Здравствуйте, Женя!\n\nвсё будет хорошо не очкуй\n\nКоманда поддержки МОСТ');
+      expect(result).not.toContain('С уважением');
+      expect(result).not.toContain('Скрытый инженер');
     });
 
     it('should handle clean replies', () => {

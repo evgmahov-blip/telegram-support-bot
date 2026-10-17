@@ -61,7 +61,7 @@ async function showSource(ctx: Context, d: any) {
 
 async function showPreview(ctx: Context, d: any) {
   const source = MANUAL_SOURCE_LABELS[d.source as db.ManualSource] || 'Другое';
-  await ticketUi.answer(ctx, `<b>Проверьте ручную заявку</b>\nИсточник: ${ticketUi.e(source)}\nКто обратился: ${ticketUi.e(d.client)}\nКонтакт: ${ticketUi.e(d.contact || '—')}\n\n<b>Что случилось</b>\n${ticketUi.e(d.description)}\n\nТикет появится в «Новые». Клиенту ничего не отправляется.`, [
+  await ticketUi.answer(ctx, `<b>Проверьте ручную заявку</b>\nИсточник: ${ticketUi.e(source)}\nКто обратился: ${ticketUi.e(d.client)}\nКонтакт: ${ticketUi.e(d.contact || '—')}\n\n<b>Что случилось</b>\n${ticketUi.e(d.description)}\n\nЗаявка появится в разделе «Новые». Клиенту ничего не отправляется.`, [
     [{ text: '✅ Создать', callback_data: `mi:ok:${d.token}:${d.version}` }, { text: '✏️ Изменить', callback_data: `mi:edit:${d.token}:${d.version}` }], ...nav(d),
   ]);
 }
@@ -106,7 +106,7 @@ export async function handleDraftCallback(ctx: Context, p: string[]): Promise<bo
     if (!claimed?.source || !claimed.client || !claimed.description) { await ctx.answerCbQuery('Подтверждение устарело. Откройте актуальный предпросмотр.', true); return true; }
     const { ticket } = await db.createManualTicket(t, { source: claimed.source, client: claimed.client, contact: claimed.contact, description: claimed.description, createdBy: actor });
     await db.completeManualDraft(t, ticket.ticketId); await ticketUi.refreshStaffCard(ticket.ticketId);
-    await ticketUi.answer(ctx, `Ручная заявка #T${pad(ticket.ticketId)} создана. Клиенту ничего не отправлялось.`, [[{ text: '⬅️ К тикету', callback_data: `tc:open:${ticket.ticketId}` }, ticketUi.STAFF_HOME]]);
+    await ticketUi.answer(ctx, `Ручная заявка № ${ticket.ticketId} создана. Клиенту ничего не отправлялось.`, [[{ text: '⬅️ К заявке', callback_data: `tc:open:${ticket.ticketId}` }, ticketUi.STAFF_HOME]]);
     await ctx.answerCbQuery('Готово.'); return true;
   }
   let saved: any = null;

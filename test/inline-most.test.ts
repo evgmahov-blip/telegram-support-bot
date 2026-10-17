@@ -63,7 +63,7 @@ describe('MOST inline callbacks', () => {
 
     expect(ctx.session.mode).toBeNull();
     expect(ctx.session.modeData).toEqual({});
-    expect(ctx.answerCbQuery).toHaveBeenCalledWith('This action is no longer available.', true);
+    expect(ctx.answerCbQuery).toHaveBeenCalledWith('Это действие больше недоступно.', true);
     expect(mockAssignTicketCommand).not.toHaveBeenCalled();
     expect(mockUnassignTicketCommand).not.toHaveBeenCalled();
   });

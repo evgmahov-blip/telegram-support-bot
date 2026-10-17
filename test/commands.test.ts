@@ -196,7 +196,7 @@ describe('Commands Module', () => {
 
       expect(mockCloseAll).toHaveBeenCalled();
       expect(Object.keys(cache.ticketIDs)).toHaveLength(0);
-      expect(mockReply).toHaveBeenCalledWith(ctx, 'All tickets closed.');
+      expect(mockReply).toHaveBeenCalledWith(ctx, 'Все заявки закрыты.');
     });
 
     it('should reject non-admin users', async () => {

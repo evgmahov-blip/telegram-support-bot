@@ -24,7 +24,8 @@ function ticketMsg(
   if (config.clean_replies) {
     return esc(message.text);
   }
-  return `${config.language.dear} ${esc(name)},\n\n${esc(message.text)}\n\n${config.language.regards}\n${config.language.regardsGroup}`;
+  const greeting = String(config.language.dear || 'Здравствуйте,').trim();
+  return `${greeting} ${esc(name)}!\n\n${esc(message.text)}\n\n${config.language.regardsGroup}`;
 }
 
 /** Compatibility-only resolver for historical ticket text. */
@@ -143,7 +144,7 @@ async function recordManualReply(ctx: Context, ticket: ISupportee, senderId: str
   await middleware.reply(ctx, 'Запись сохранена. Куда перейти?', {
     message_thread_id: ctx.message.message_thread_id ?? undefined,
     reply_markup: { inline_keyboard: [[
-      { text: '⬅️ К тикету', callback_data: `tc:open:${ticketId}` },
+      { text: '⬅️ К заявке', callback_data: `tc:open:${ticketId}` },
       { text: '🏠 Главная', callback_data: 'tm:home:0' },
     ]] },
   });
@@ -157,13 +158,13 @@ async function chat(ctx: Context) {
   if (cache.config.staffchat_id && String(ctx.chat.id) !== String(cache.config.staffchat_id)) return;
   const configuredThread = cache.config.staffchat_thread_id;
   if (configuredThread && ctx.message?.message_thread_id !== configuredThread) {
-    await middleware.reply(ctx, 'Ответы на тикеты принимаются только в настроенной теме поддержки.');
+    await middleware.reply(ctx, 'Ответы по заявкам принимаются только в настроенной теме поддержки.');
     return;
   }
 
   const senderId = ctx.from.id.toString();
   if (!team.canPerformAction(senderId, 'reply')) {
-    await middleware.reply(ctx, 'You do not have permission to reply to tickets.');
+    await middleware.reply(ctx, 'У вас нет прав отвечать по заявкам.');
     return;
   }
 
@@ -261,7 +262,7 @@ async function chat(ctx: Context) {
     if (ticket.pending_reply_kind === 'note') {
       const current = await db.getTicketById(ticketId, null);
       if (!current || current.status === 'closed' || !team.canManageTicket(senderId, current.assigned_to)) {
-        await middleware.reply(ctx, 'Владелец или состояние тикета изменились; заметка не сохранена.');
+        await middleware.reply(ctx, 'Владелец или состояние заявки изменились; заметка не сохранена.');
         return;
       }
       let claim: string | null = null;
@@ -282,7 +283,7 @@ async function chat(ctx: Context) {
 
   if (staffMessage.startsWith('!note ') || staffMessage.startsWith('!internal ')) {
     if (!team.canManageTicket(senderId, ticket.assigned_to)) {
-      await middleware.reply(ctx, 'Только текущий владелец активного тикета может добавить заметку.');
+      await middleware.reply(ctx, 'Только текущий владелец активной заявки может добавить заметку.');
       return;
     }
     const noteText = staffMessage.replace(/^!(?:note|internal)\s+/i, '');
@@ -293,8 +294,8 @@ async function chat(ctx: Context) {
 
   if (!team.canManageTicket(senderId, ticket.assigned_to)) {
     await middleware.reply(ctx, ticket.assigned_to
-      ? 'This ticket is owned by another engineer.'
-      : 'Take the ticket first with /take.');
+      ? 'Эта заявка назначена другому сотруднику.'
+      : 'Сначала возьмите заявку командой /take.');
     return;
   }
 
@@ -349,7 +350,7 @@ async function chat(ctx: Context) {
       middleware.sendMessage(
         ctx.chat.id,
         ticket.messenger,
-        'Web chat already closed.',
+        'Веб-чат уже закрыт.',
       ).catch(log.error);
       log.error('Web reply delivery failed', e);
       throw e;
@@ -398,7 +399,7 @@ async function chat(ctx: Context) {
     await middleware.reply(ctx, `✅ Ответ по #T${ticketId} отправлен клиенту ${name}.`, {
       message_thread_id: ctx.message.message_thread_id ?? undefined,
       reply_markup: { inline_keyboard: [[
-        { text: '⬅️ К тикету', callback_data: `tc:open:${ticketId}` },
+        { text: '⬅️ К заявке', callback_data: `tc:open:${ticketId}` },
         { text: '🏠 Главная', callback_data: 'tm:home:0' },
       ]] },
     }).catch(log.error);

@@ -109,7 +109,7 @@ async function callbackQuery(ctx: Context) {
   // They must never recreate a private engineer session.
   ctx.session.mode = null;
   ctx.session.modeData = {} as ModeData;
-  await ctx.answerCbQuery('This action is no longer available.', true);
+  await ctx.answerCbQuery('Это действие больше недоступно.', true);
 }
 
 export { callbackQuery, initInline, replyKeyboard, removeKeyboard };

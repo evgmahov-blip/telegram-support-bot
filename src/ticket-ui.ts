@@ -24,19 +24,22 @@ const USER_HOME: Button = { text: '🏠 Главная', callback_data: 'um:home
 const statusName: Record<string, string> = { open: 'Открыт', waiting_user: 'Ждём клиента', closed: 'Закрыт' };
 const priorityName: Record<string, string> = { low: 'Низкий', normal: 'Обычный', high: 'Высокий', urgent: 'Срочный' };
 const eventName: Record<string, string> = {
-  'ticket.closed': 'Тикет закрыт', 'ticket.reopened': 'Тикет открыт снова',
-  'ticket.taken': 'Тикет взят в работу', 'ticket.assigned': 'Назначен инженер',
-  'ticket.transferred': 'Тикет передан', 'ticket.waiting': 'Ожидание клиента',
-  'ticket.resumed': 'Работа продолжена', 'ticket.created': 'Тикет создан',
+  'ticket.closed': 'Заявка закрыта', 'ticket.reopened': 'Заявка открыта снова',
+  'ticket.taken': 'Заявка взята в работу', 'ticket.assigned': 'Назначен инженер',
+  'ticket.transferred': 'Заявка передана', 'ticket.waiting': 'Ожидание клиента',
+  'ticket.resumed': 'Работа продолжена', 'ticket.created': 'Заявка создана',
 };
-const doneText: Record<string, string> = { close: 'Тикет закрыт:', xfer: 'Тикет передан:', cancel: 'Ожидание ответа отменено:' };
+const doneText: Record<string, string> = { close: 'Заявка закрыта:', xfer: 'Заявка передана:', cancel: 'Ожидание ответа отменено:' };
 
 /** Staff-only actor label for history/audit rows; the Telegram ID is never rendered. */
 function actorLabel(actor: unknown, metadata?: Record<string, unknown>): string {
   if (metadata?.closed_by === 'user') return 'клиент';
   return staffDisplayName(actor as string);
 }
-const fmt = (d: unknown) => d ? new Date(d as string).toLocaleString('ru-RU', { timeZone: 'UTC' }) + ' UTC' : '—';
+const fmt = (d: unknown) => d ? new Date(d as string).toLocaleString('ru-RU', {
+  timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit', year: '2-digit',
+  hour: '2-digit', minute: '2-digit',
+}) : '—';
 
 function staffButtons(t: ISupportee) {
   const id = t.ticketId;
@@ -59,17 +62,19 @@ export async function cardText(ticket: ISupportee): Promise<string> {
   const owner = ticket.assigned_to ? staffDisplayName(ticket.assigned_to) : 'Не назначен';
   const preview = latest?.text ? latest.text.replace(/\s+/g, ' ').slice(0, 240) : 'Сообщений пока нет';
   // External client data is rendered on the staff card only; clients never see manual tickets.
-  const manual = isManualTicket(ticket)
-    ? `Ручная заявка · источник: ${e(MANUAL_SOURCE_LABELS[ticket.manual_source ?? 'other'] || 'Другое')}\n` +
-      `Клиент: ${e(ticket.external_client || '—')}\nКонтакт: ${e(ticket.external_contact || '—')}\n` +
-      `Создал: ${e(staffDisplayName(ticket.created_by))}\nКлиенту ничего не отправляется — ответы записываются в историю.\n`
-    : '';
-  return `<b>Тикет #T${String(ticket.ticketId).padStart(6, '0')}</b>\n` + manual +
+  const manual = isManualTicket(ticket);
+  const client = manual ? (ticket.external_client || ticket.name || 'Не указан') : (ticket.name || 'Не указан');
+  const details = [
+    manual && ticket.manual_source ? `Источник: ${e(MANUAL_SOURCE_LABELS[ticket.manual_source] || 'Другое')}` : '',
+    `Клиент: ${e(client)}`,
+    manual && ticket.external_contact ? `Контакт: ${e(ticket.external_contact)}` : '',
+    ticket.category && !/^(общая|general|common)$/i.test(ticket.category) ? `Категория: ${e(ticket.category)}` : '',
+    ticket.priority && ticket.priority !== 'normal' ? `Приоритет: ${e(priorityName[ticket.priority] || ticket.priority)}` : '',
+  ].filter(Boolean).join('\n');
+  return `<b>Заявка #${ticket.ticketId}</b>\n` +
     `Статус: <b>${e(statusName[ticket.status] || ticket.status)}</b>\n` +
-    `Категория / очередь: ${e(ticket.category || 'Общая')}\n` +
-    `Инженер: ${e(owner)}\nПриоритет: ${e(priorityName[ticket.priority] || ticket.priority)}\n` +
-    `Создан: ${e(fmt(ticket.created_at))}\nОбновлён: ${e(fmt(ticket.updated_at))}\n\n` +
-    `<b>Последнее сообщение</b>\n${e(preview)}`;
+    `${details}\nИнженер: ${e(owner)}\n\n` +
+    `<b>${manual ? 'Описание / последняя запись' : 'Последнее сообщение'}</b>\n${e(preview)}`;
 }
 
 export async function refreshStaffCard(ticketId: number): Promise<void> {
@@ -172,7 +177,7 @@ export async function showUserHome(ctx: Context) {
 
 export async function showStaffHome(ctx: Context) {
   await answer(ctx, '<b>Панель поддержки</b>', [
-    [{ text: '🆕 Новые', callback_data: 'tm:new:0' }, { text: '🙋 Мои тикеты', callback_data: 'tm:mine:0' }],
+    [{ text: '🆕 Новые', callback_data: 'tm:new:0' }, { text: '🙋 Мои заявки', callback_data: 'tm:mine:0' }],
     [{ text: '📂 Все активные', callback_data: 'tm:active:0' }, { text: '✅ Закрытые', callback_data: 'tm:closed:0' }],
     [{ text: '📝 Создать заявку вручную', callback_data: 'tm:manual:0' }],
   ]);
@@ -188,7 +193,7 @@ async function staffList(ctx: Context, view: 'new'|'mine'|'active'|'closed', pag
   if (more) nav.push({ text: '▶️', callback_data: `tm:${view}:${page+1}` });
   rows.push(nav);
   rows.push([{ text: '🏠 Главная', callback_data: 'tm:home:0' }]);
-  await answer(ctx, `<b>${list.length ? 'Тикеты' : 'Тикетов нет'}</b>`, rows);
+  await answer(ctx, `<b>${list.length ? 'Заявки' : 'Заявок нет'}</b>`, rows);
 }
 
 async function history(ctx: Context, ticket: ISupportee, page: number, staff: boolean) {
@@ -205,7 +210,7 @@ async function history(ctx: Context, ticket: ISupportee, page: number, staff: bo
         : `Событие${staff && x.actor ? ` · ${actorLabel(x.actor, x.metadata)}` : ''}`;
       const owner = staff && x.metadata?.owner ? ` · владелец ${staffDisplayName(x.metadata.owner)}` : '';
       const content = x.kind === 'event'
-        ? (x.text === 'ticket.created' && x.metadata?.source === 'manual' ? 'Заявка создана вручную' : eventName[x.text] || 'Изменение тикета')
+        ? (x.text === 'ticket.created' && x.metadata?.source === 'manual' ? 'Заявка создана вручную' : eventName[x.text] || 'Изменение заявки')
         : String(x.text).slice(0, 500);
       return `<b>${e(fmt(x.at))}</b>\n${e(`${label}: ${content}${owner}`)}`;
     }).join('\n\n') || 'История пуста.';
@@ -213,7 +218,7 @@ async function history(ctx: Context, ticket: ISupportee, page: number, staff: bo
       ...(page > 0 ? [{ text: '◀️', callback_data: `${staff?'tc':'uc'}:h:${ticket.ticketId}:${page-1}` }] : []),
       ...(more ? [{ text: '▶️', callback_data: `${staff?'tc':'uc'}:h:${ticket.ticketId}:${page+1}` }] : []),
     ];
-    await answer(ctx, `<b>История #T${ticket.ticketId}</b>\n\n${body}`, [
+    await answer(ctx, `<b>История заявки № ${ticket.ticketId}</b>\n\n${body}`, [
       ...(nav.length ? [nav] : []),
       [{ text: '⬅️ Назад', callback_data: `${staff?'tc':'uc'}:open:${ticket.ticketId}` }, { text: '🏠 Главная', callback_data: staff?'tm:home:0':'um:home:0' }],
     ]);
@@ -229,12 +234,12 @@ async function history(ctx: Context, ticket: ISupportee, page: number, staff: bo
   const items = [
     ...visibleMessages.map(m => ({ at: m.timestamp, text: `${m.sender === 'user' ? 'Клиент' : 'Поддержка'}: ${m.text.slice(0, 100)}` })),
     ...events.filter(x => /ticket\.(closed|reopened|taken|assigned|transferred|waiting|resumed)/.test(x.type))
-      .map(x => ({ at: x.timestamp, text: `Событие: ${eventName[x.type] || 'Изменение тикета'}${staff && x.agent_id ? ` · ${actorLabel(x.agent_id, x.metadata)}` : ''}${staff && x.metadata?.owner ? ` · владелец ${staffDisplayName(x.metadata.owner)}` : ''}` })),
+      .map(x => ({ at: x.timestamp, text: `Событие: ${eventName[x.type] || 'Изменение заявки'}${staff && x.agent_id ? ` · ${actorLabel(x.agent_id, x.metadata)}` : ''}${staff && x.metadata?.owner ? ` · владелец ${staffDisplayName(x.metadata.owner)}` : ''}` })),
     ...notes.map(n => ({ at: n.timestamp, text: `🔒 Заметка (${actorLabel(n.author_id)}): ${n.text.slice(0, 100)}` })),
   ].sort((a,b) => +new Date(a.at) - +new Date(b.at));
   const slice = items.slice(page * PAGE, page * PAGE + PAGE);
   const body = slice.map(x => `<b>${e(fmt(x.at))}</b>\n${e(x.text)}`).join('\n\n') || 'История пуста.';
-  await answer(ctx, `<b>История #T${ticket.ticketId}</b>\n\n${body}`, [
+  await answer(ctx, `<b>История заявки № ${ticket.ticketId}</b>\n\n${body}`, [
     [{ text: '◀️', callback_data: `${staff?'tc':'uc'}:h:${ticket.ticketId}:${Math.max(0,page-1)}` }, { text: '▶️', callback_data: `${staff?'tc':'uc'}:h:${ticket.ticketId}:${page+1}` }],
     [{ text: '⬅️ Назад', callback_data: `${staff?'tc':'uc'}:open:${ticket.ticketId}` }, { text: '🏠 Главная', callback_data: staff?'tm:home:0':'um:home:0' }],
   ]);
@@ -275,8 +280,10 @@ export async function handleCallback(ctx: Context): Promise<boolean> {
     else {
       // Clients never reopen tickets themselves: a recurring problem goes through a new request or staff «Вернуть в работу».
       const closed = ticket.status === 'closed';
-      await answer(ctx, `<b>Обращение #T${ticket.ticketId}</b>\nСтатус: ${e(statusName[ticket.status])}\nКатегория: ${e(ticket.category || 'Общая')}\nОбновлено: ${e(fmt(ticket.updated_at))}`
-        + (closed ? '\n\nЕсли проблема повторилась, создайте новое обращение — поддержка сможет вернуть этот тикет в работу.' : ''), [
+      const category = ticket.category && !/^(общая|general|common)$/i.test(ticket.category)
+        ? `\nКатегория: ${e(ticket.category)}` : '';
+      await answer(ctx, `<b>Обращение № ${ticket.ticketId}</b>\nСтатус: ${e(statusName[ticket.status])}${category}`
+        + (closed ? '\n\nЕсли проблема повторилась, создайте новое обращение — поддержка сможет вернуть эту заявку в работу.' : ''), [
         [{ text: '📜 Сообщения', callback_data: `uc:h:${ticket.ticketId}:0` }],
         ...(closed ? [[{ text: '➕ Новое обращение', callback_data: 'um:new:0' }]] : []),
         [{ text: '⬅️ Назад', callback_data: 'um:list:0' }, USER_HOME],
@@ -298,7 +305,7 @@ export async function handleCallback(ctx: Context): Promise<boolean> {
   if (p[0] !== 'tc') return false;
   if (!staffSurface(ctx)) { await ctx.answerCbQuery('Недоступно вне рабочей группы/темы.', true); return true; }
   const action = p[1], id = Number(p[2]); const ticket = await db.getTicketById(id, null);
-  if (!ticket) { await ctx.answerCbQuery('Тикет не найден.', true); return true; }
+  if (!ticket) { await ctx.answerCbQuery('Заявка не найдена.', true); return true; }
   const actor = ctx.from.id.toString();
   const qmsg = ctx.callbackQuery.message;
   const canonicalBinding = ticket.staff_card_message_id === qmsg?.message_id && String(ticket.staff_card_chat_id) === String(qmsg?.chat.id)
@@ -313,7 +320,7 @@ export async function handleCallback(ctx: Context): Promise<boolean> {
     const url = current.staff_card_message_id ? `https://t.me/c/${raw}/${current.staff_card_message_id}${current.staff_card_thread_id ? `?thread=${current.staff_card_thread_id}` : ''}` : undefined;
     // Lifecycle buttons live only on the canonical card (stale-button guard); for a closed ticket point there for «Вернуть в работу».
     const closed = current.status === 'closed';
-    await answer(ctx, await cardText(current) + (closed ? '\n\nЧтобы вернуть тикет в работу, откройте постоянную карточку и нажмите «Вернуть в работу».' : ''), [
+    await answer(ctx, await cardText(current) + (closed ? '\n\nЧтобы вернуть заявку в работу, откройте постоянную карточку и нажмите «Вернуть в работу».' : ''), [
       ...(url ? [[{ text: closed ? 'Перейти к карточке → «Вернуть в работу»' : 'Перейти к постоянной карточке', url }]] : []),
       [{ text: '📜 История', callback_data: `tc:h:${id}:0` }],
       [{ text: '⬅️ Назад', callback_data: closed ? 'tm:closed:0' : 'tm:active:0' }, STAFF_HOME]]);
@@ -321,7 +328,7 @@ export async function handleCallback(ctx: Context): Promise<boolean> {
   }
   if (action === 'h') { await history(ctx, ticket, Number(p[3]) || 0, true); await ctx.answerCbQuery(); return true; }
   if (action === 'take') {
-    const changed = await ownership.takeTicket(id, actor); if (!changed) { await ctx.answerCbQuery('Тикет уже взят или неактивен.', true); return true; }
+    const changed = await ownership.takeTicket(id, actor); if (!changed) { await ctx.answerCbQuery('Заявка уже взята или неактивна.', true); return true; }
     db.recordAnalyticsEventBestEffort('ticket.taken', id, actor, { owner: actor });
   } else if (action === 'wait' && team.canManageTicket(actor, ticket.assigned_to)) {
     const changed = await ticketState.transitionTicketStateFrom(id, 'open', 'waiting_user', team.getStaffRole(actor)==='agent'?actor:undefined);
@@ -332,15 +339,15 @@ export async function handleCallback(ctx: Context): Promise<boolean> {
     if (!changed) { await ctx.answerCbQuery('Состояние изменилось. Карточка обновлена.', true); await refreshStaffCard(id); return true; }
     db.recordAnalyticsEventBestEffort('ticket.resumed', id, actor);
   } else if (action === 'closeask') {
-    if (!team.canManageTicket(actor, ticket.assigned_to) || ticket.status === 'closed') { await ctx.answerCbQuery('Нет прав или тикет уже закрыт.', true); return true; }
+    if (!team.canManageTicket(actor, ticket.assigned_to) || ticket.status === 'closed') { await ctx.answerCbQuery('Нет прав или заявка уже закрыта.', true); return true; }
     const token = randomUUID().replace(/-/g,'').slice(0,12);
     await db.setPendingTicketAction(id, 'close', token, actor, new Date(Date.now()+PROMPT_MS));
-    await answer(ctx, `Закрыть тикет #T${id}?`, [[{text:'Да, закрыть',callback_data:`tc:close:${id}:${token}`},{text:'Отмена',callback_data:`tc:open:${id}`}], [STAFF_HOME]]); await ctx.answerCbQuery(); return true;
+    await answer(ctx, `Закрыть заявку № ${id}?`, [[{text:'Да, закрыть',callback_data:`tc:close:${id}:${token}`},{text:'Отмена',callback_data:`tc:open:${id}`}], [STAFF_HOME]]); await ctx.answerCbQuery(); return true;
   } else if (action === 'close' && team.canManageTicket(actor, ticket.assigned_to)) {
     if (!await db.consumePendingTicketAction(id, 'close', p[3], actor)) { await ctx.answerCbQuery('Подтверждение устарело.', true); return true; }
     const result = await ticketState.closeTicketLifecycle(ticket, actor, team.getStaffRole(actor)==='agent'?actor:undefined);
-    if (result.outcome !== 'closed') { await refreshStaffCard(id); await ctx.answerCbQuery(result.outcome === 'already_closed' ? 'Тикет уже закрыт.' : 'Владелец или состояние изменились.', true); return true; }
-    if (result.notificationFailed) await middleware.reply(ctx, 'Тикет закрыт, но уведомление клиенту не доставлено.');
+    if (result.outcome !== 'closed') { await refreshStaffCard(id); await ctx.answerCbQuery(result.outcome === 'already_closed' ? 'Заявка уже закрыта.' : 'Владелец или состояние изменились.', true); return true; }
+    if (result.notificationFailed) await middleware.reply(ctx, 'Заявка закрыта, но уведомление клиенту не доставлено.');
     if (isManualTicket(ticket)) await middleware.reply(ctx, `Ручная заявка #T${id} закрыта. Клиент не уведомлялся: канала доставки нет.`);
   }
   else if (action === 'reopen' && team.canPerformAction(actor, 'reply') && team.canManageTicket(actor, ticket.assigned_to)) {
@@ -365,7 +372,7 @@ export async function handleCallback(ctx: Context): Promise<boolean> {
     db.recordAnalyticsEventBestEffort('ticket.transferred', id, actor, { owner: p[3] });
   }
   else if (action === 'reply' || action === 'note') {
-    if (!team.canManageTicket(actor, ticket.assigned_to) || ticket.status === 'closed') { await ctx.answerCbQuery('Сначала возьмите активный тикет.', true); return true; }
+    if (!team.canManageTicket(actor, ticket.assigned_to) || ticket.status === 'closed') { await ctx.answerCbQuery('Сначала возьмите активную заявку.', true); return true; }
     const chatId = String(qmsg!.chat.id), threadId = qmsg!.message_thread_id || null;
     if (typeof db.clearExpiredReplyComposes === 'function')
       await db.clearExpiredReplyComposes(actor, chatId, threadId);
@@ -404,14 +411,14 @@ export async function handleCallback(ctx: Context): Promise<boolean> {
       return true;
     }
     if (!bound) {
-      await TelegramAddon.getInstance().editMessage(cache.config.staffchat_id, Number(prompt), 'Эта подсказка отменена: владелец или состояние тикета изменились.').catch(log.error);
-      await ctx.answerCbQuery('Владелец или состояние тикета изменились.', true); return true;
+      await TelegramAddon.getInstance().editMessage(cache.config.staffchat_id, Number(prompt), 'Эта подсказка отменена: владелец или состояние заявки изменились.').catch(log.error);
+      await ctx.answerCbQuery('Владелец или состояние заявки изменились.', true); return true;
     }
     // A separate panel keeps cancellation/navigation visible while the next ordinary text is awaited.
     const fence = bound.pending_reply_version ?? prompt;
     await answer(ctx, `${action === 'note' ? 'Ожидаю заметку' : manual ? 'Ожидаю запись ответа' : 'Ожидаю ответ'} для #T${id} (${e(recipient)}) 15 минут: отправьте следующий обычный текст в этой теме.`, [
       [{text:'✖️ Отменить',callback_data:`tc:cancel:${id}:${fence}`}],
-      [{ text: '⬅️ К тикету', callback_data: `tc:open:${id}` }, STAFF_HOME],
+      [{ text: '⬅️ К заявке', callback_data: `tc:open:${id}` }, STAFF_HOME],
     ]); await ctx.answerCbQuery(); return true;
   } else if (action === 'cancel') {
     const fence = Number(p[3]);
@@ -426,6 +433,6 @@ export async function handleCallback(ctx: Context): Promise<boolean> {
   else { await ctx.answerCbQuery('Действие недоступно или нет прав.', true); return true; }
   await refreshStaffCard(id);
   // close/xfer/cancel arrive from transient panels: replace their now-spent buttons with navigation.
-  if (!canonicalBinding) await answer(ctx, `${doneText[action] || 'Готово.'} #T${id}`, [[{ text: '⬅️ К тикету', callback_data: `tc:open:${id}` }, STAFF_HOME]]);
+  if (!canonicalBinding) await answer(ctx, `${doneText[action] || 'Готово.'} № ${id}`, [[{ text: '⬅️ К заявке', callback_data: `tc:open:${id}` }, STAFF_HOME]]);
   await ctx.answerCbQuery('Готово.'); return true;
 }

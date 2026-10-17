@@ -51,9 +51,9 @@ describe('production /close regression', () => {
   });
 
   it.each([
-    ['nonstaff', 77, ticket, 'У вас нет прав закрывать тикеты.'],
-    ['unassigned agent', 42, { ...ticket, assigned_to: null }, 'Сначала возьмите тикет командой /take.'],
-    ['another agent', 99, ticket, 'Этот тикет назначен другому сотруднику.'],
+    ['nonstaff', 77, ticket, 'У вас нет прав закрывать заявки.'],
+    ['unassigned agent', 42, { ...ticket, assigned_to: null }, 'Сначала возьмите заявку командой /take.'],
+    ['another agent', 99, ticket, 'Эта заявка назначена другому сотруднику.'],
   ])('%s boundary', async (_n, actor, current, expected) => {
     getTicketByInternalId.mockResolvedValue(current);
     await closeCommand(context(true, actor)); expect(reply).toHaveBeenCalledWith(expect.anything(), expected);
@@ -62,13 +62,13 @@ describe('production /close regression', () => {
   it('reports an owner change won by a concurrent write', async () => {
     closeLifecycle.mockResolvedValue({ outcome: 'stale', ticket: { ...ticket, assigned_to: '99' } });
     await closeCommand(context());
-    expect(reply).toHaveBeenCalledWith(expect.anything(), 'Состояние или владелец тикета изменились; тикет не закрыт.');
+    expect(reply).toHaveBeenCalledWith(expect.anything(), 'Состояние или владелец заявки изменились; заявка не закрыта.');
   });
 
   it('checks role before revealing a closed ticket state', async () => {
     getTicketByInternalId.mockResolvedValue({ ...ticket, status: 'closed' });
     await closeCommand(context(true, 77));
-    expect(reply).toHaveBeenCalledWith(expect.anything(), 'У вас нет прав закрывать тикеты.');
+    expect(reply).toHaveBeenCalledWith(expect.anything(), 'У вас нет прав закрывать заявки.');
   });
 
   it('allows only the configured private user-close compatibility path', async () => {

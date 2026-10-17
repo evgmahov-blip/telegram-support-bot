@@ -205,12 +205,13 @@ describe('ticketCommand (#85)', () => {
 
     expect(mockGetByTicketId).toHaveBeenCalledWith('1234');
     const text = mockReply.mock.calls[0][1] as string;
-    expect(text).toContain('Ticket details #T001234');
-    expect(text).toContain('Alice (5551)');
-    expect(text).toContain('status: open · telegram');
-    expect(text).toContain('category: Billing');
-    expect(text).toContain('priority: high');
-    expect(text).toContain('tags: #vip');
+    expect(text).toContain('Ticket details № 1234');
+    expect(text).toContain('customer: Alice');
+    expect(text).not.toContain('5551');
+    expect(text).toContain('Статус: открыта');
+    expect(text).toContain('Категория: Billing');
+    expect(text).toContain('Приоритет: высокий');
+    expect(text).toContain('Метки: #vip');
     expect(text).toContain('assigned to: Agent Smith');
     expect(text).toContain('Summary: Wants a refund');
     expect(text).toContain('Internal Note: 1');
@@ -228,7 +229,7 @@ describe('ticketCommand (#85)', () => {
   it('prints usage when no ticket can be resolved', async () => {
     mockGetByTicketId.mockResolvedValue(null);
     await commands.ticketCommand(makeCtx(true, { match: '9' } as Partial<Context>));
-    expect(mockReply).toHaveBeenCalledWith(expect.anything(), expect.stringContaining('Usage: /ticket'));
+    expect(mockReply).toHaveBeenCalledWith(expect.anything(), expect.stringContaining('Использование: /ticket'));
   });
 });
 
@@ -241,7 +242,7 @@ describe('broadcastCommand (#159)', () => {
   it('is disabled by default', async () => {
     await commands.broadcastCommand(makeCtx(true, { match: 'Maintenance tonight' } as Partial<Context>));
     expect(mockGetAllUsers).not.toHaveBeenCalled();
-    expect(mockReply).toHaveBeenCalledWith(expect.anything(), expect.stringContaining('allow_broadcast'));
+    expect(mockReply).toHaveBeenCalledWith(expect.anything(), 'Рассылка отключена в настройках.');
   });
 
   it('ignores non-staff even when enabled', async () => {
@@ -269,7 +270,7 @@ describe('broadcastCommand (#159)', () => {
   it('prints usage without text', async () => {
     cache.config.allow_broadcast = true;
     await commands.broadcastCommand(makeCtx(true, { match: '  ' } as Partial<Context>));
-    expect(mockReply).toHaveBeenCalledWith(expect.anything(), 'Usage: /broadcast <text>');
+    expect(mockReply).toHaveBeenCalledWith(expect.anything(), 'Использование: /broadcast <текст>');
   });
 });
 
@@ -356,7 +357,7 @@ describe('custom user commands (#84)', () => {
     commands.helpCommand(makeCtx(true));
     const text = mockReply.mock.calls[0][1] as string;
     expect(text).toContain('/ticket <id>');
-    expect(text).toContain('/broadcast <text>');
+    expect(text).toContain('/broadcast <текст>');
     cache.config.allow_broadcast = false;
   });
 });

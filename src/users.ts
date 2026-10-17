@@ -46,7 +46,7 @@ function createAutoReplyMessage(msg: string, ctx: Context): string {
   const senderName = ctx.message.from.first_name;
   return config.clean_replies
     ? msg
-    : `${config.language.dear} ${esc(senderName)},\n\n${msg}\n\n${config.language.regards}\n${config.language.automatedReplyAuthor}\n\n*${config.language.automatedReply}*`;
+    : `${config.language.dear} ${esc(senderName)}!\n\n${msg}\n\n${config.language.automatedReplyAuthor}\n\n*${config.language.automatedReply}*`;
 }
 
 /** Static configured replies may answer users. AI never does. */
@@ -156,7 +156,7 @@ async function chat(ctx: Context, chat: { id: string }) {
     ctx.session.lastOfflineNoticeDate < now - TIME_BETWEEN_CONFIRMATION_MESSAGES
   ) {
     ctx.session.lastOfflineNoticeDate = now;
-    const offlineMsg = config.language.businessHoursClosed || 'Our support team is currently offline. We will respond during business hours.';
+    const offlineMsg = config.language.businessHoursClosed || 'Сейчас поддержка не работает. Мы ответим в рабочее время.';
     await reply(ctx, offlineMsg);
   }
 }

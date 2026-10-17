@@ -68,22 +68,22 @@ const helpCommand = async (ctx: Context): Promise<void> => {
 
   // Append new staff commands to help if available
   if (ctx.session.admin) {
-    text += `\n\n*Team & Analytics:*\n`;
-    text += `/assign <user_id> — Assign ticket to staff member\n`;
-    text += `/unassign — Unassign current ticket\n`;
-    text += `/tag <tags> — Add tags (comma-separated)\n`;
-    text += `/untag <tag> — Remove a tag\n`;
-    text += `/priority <low|normal|high|urgent> — Set priority\n`;
-    text += `/mute — Mute ticket notifications\n`;
-    text += `/unmute — Unmute ticket notifications\n`;
-    text += `/note <text> — Add internal note\n`;
-    text += `/notes — Show all internal notes\n`;
-    text += `/staff — List staff members\n`;
-    text += `/stats — Show analytics stats\n`;
-    text += `/templates — List canned responses\n`;
-    text += `/ticket <id> — Show ticket details\n`;
+    text += `\n\n*Команда и статистика:*\n`;
+    text += `/assign <user_id> — назначить заявку сотруднику\n`;
+    text += `/unassign — снять назначение с заявки\n`;
+    text += `/tag <метки> — добавить метки через запятую\n`;
+    text += `/untag <метка> — удалить метку\n`;
+    text += `/priority <low|normal|high|urgent> — задать приоритет\n`;
+    text += `/mute — отключить уведомления по заявке\n`;
+    text += `/unmute — включить уведомления по заявке\n`;
+    text += `/note <текст> — добавить внутреннюю заметку\n`;
+    text += `/notes — показать внутренние заметки\n`;
+    text += `/staff — показать сотрудников\n`;
+    text += `/stats — показать статистику\n`;
+    text += `/templates — показать шаблоны ответов\n`;
+    text += `/ticket <id> — показать сведения о заявке\n`;
     if (cache.config.allow_broadcast) {
-      text += `/broadcast <text> — Message all users\n`;
+      text += `/broadcast <текст> — отправить сообщение всем пользователям\n`;
     }
   }
 
@@ -119,7 +119,7 @@ const clearCommand = async (ctx: Context): Promise<void> => {
   Object.keys(cache.ticketIDs).forEach(k => delete cache.ticketIDs[k]);
   Object.keys(cache.ticketStatus).forEach(key => delete cache.ticketStatus[key]);
   Object.keys(cache.ticketSent).forEach(key => delete cache.ticketSent[key]);
-  await middleware.reply(ctx, 'All tickets closed.');
+  await middleware.reply(ctx, 'Все заявки закрыты.');
 };
 
 /**
@@ -182,44 +182,44 @@ const closeCommand = async (ctx: Context): Promise<void> => {
   const { language } = cache.config;
 
   if (!ctx.message?.reply_to_message) {
-    await middleware.reply(ctx, 'Ответьте командой /close на сообщение тикета.');
+    await middleware.reply(ctx, 'Ответьте командой /close на сообщение заявки.');
     return;
   }
   const resolved = await resolveTicketFromContext(ctx, null);
   if (!resolved) {
-    await middleware.reply(ctx, 'Не удалось найти тикет по сообщению.');
+    await middleware.reply(ctx, 'Не удалось найти заявку по сообщению.');
     return;
   }
   const { ticket, ticketIdStr } = resolved;
   const actorId = ctx.from.id.toString();
   const role = team.getStaffRole(actorId);
   if (!role || !team.canPerformAction(actorId, 'reply')) {
-    await middleware.reply(ctx, 'У вас нет прав закрывать тикеты.');
+    await middleware.reply(ctx, 'У вас нет прав закрывать заявки.');
     return;
   }
   if (ticket.status !== 'open' && ticket.status !== 'waiting_user') {
-    await middleware.reply(ctx, 'Тикет уже закрыт.');
+    await middleware.reply(ctx, 'Заявка уже закрыта.');
     return;
   }
   if (!team.canManageTicket(actorId, ticket.assigned_to)) {
     await middleware.reply(ctx, ticket.assigned_to
-      ? 'Этот тикет назначен другому сотруднику.'
-      : 'Сначала возьмите тикет командой /take.');
+      ? 'Эта заявка назначена другому сотруднику.'
+      : 'Сначала возьмите заявку командой /take.');
     return;
   }
   const expectedOwner = role === 'agent' ? actorId : undefined;
   const result = await ticketState.closeTicketLifecycle(ticket, actorId, expectedOwner);
   if (result.outcome !== 'closed') {
     await middleware.reply(ctx, result.outcome === 'already_closed'
-      ? 'Тикет уже закрыт.'
-      : 'Состояние или владелец тикета изменились; тикет не закрыт.');
+      ? 'Заявка уже закрыта.'
+      : 'Состояние или владелец заявки изменились; заявка не закрыта.');
     return;
   }
 
   const userId = ticket.userid;
   const paddedTicket = ticketIdStr.toString().padStart(6, '0');
   await middleware.reply(ctx, `${language.ticket} #T${paddedTicket} ${language.closed}`);
-  if (result.notificationFailed) await middleware.reply(ctx, 'Тикет закрыт, но уведомление пользователю не доставлено.');
+  if (result.notificationFailed) await middleware.reply(ctx, 'Заявка закрыта, но уведомление пользователю не доставлено.');
   if (isManualTicket(ticket)) await middleware.reply(ctx, 'Ручная заявка: клиент не уведомлялся, канала доставки нет.');
   await refreshStaffCard(ticket.ticketId);
 };
@@ -272,7 +272,7 @@ const banCommand = async (ctx: Context): Promise<void> => {
 
   const resolved = await resolveTicketFromReply(replyText);
   if (!resolved) {
-    await middleware.reply(ctx, 'Could not find ticket in the replied message.');
+    await middleware.reply(ctx, 'Не удалось найти заявку по сообщению.');
     return;
   }
   const { ticket, ticketIdStr } = resolved;
@@ -301,14 +301,14 @@ const reopenCommand = async (ctx: Context): Promise<void> => {
 
   const resolved = await resolveTicketFromReply(replyText);
   if (!resolved) {
-    await middleware.reply(ctx, 'Could not find ticket in the replied message.');
+    await middleware.reply(ctx, 'Не удалось найти заявку по сообщению.');
     return;
   }
   const { ticket, ticketIdStr } = resolved;
 
   const reopened = await db.transitionTicketStatus(ticket.ticketId, 'open');
   if (!reopened) {
-    await middleware.reply(ctx, 'Ticket state changed before it could be reopened.');
+    await middleware.reply(ctx, 'Состояние заявки изменилось; открыть её снова не удалось.');
     return;
   }
   await middleware.sendMessage(
@@ -330,7 +330,7 @@ const unbanCommand = async (ctx: Context): Promise<void> => {
 
   const resolved = await resolveTicketFromReply(replyText);
   if (!resolved) {
-    await middleware.reply(ctx, 'Could not find ticket in the replied message.');
+    await middleware.reply(ctx, 'Не удалось найти заявку по сообщению.');
     return;
   }
   const { ticket, ticketIdStr } = resolved;
@@ -352,25 +352,25 @@ const assignCommand = async (ctx: Context): Promise<void> => {
   if (!ctx.session.admin) return;
   const args = ctx.match?.trim();
   if (!args) {
-    await middleware.reply(ctx, 'Usage: /assign <staff_telegram_id>');
+    await middleware.reply(ctx, 'Использование: /assign <telegram_id_сотрудника>');
     return;
   }
 
   // Check permission to assign
   if (!team.canPerformAction(ctx.from.id.toString(), 'assign')) {
-    await middleware.reply(ctx, 'You do not have permission to assign tickets.');
+    await middleware.reply(ctx, 'У вас нет прав назначать заявки.');
     return;
   }
 
   const replyText = ctx.message.reply_to_message?.text || ctx.message.reply_to_message?.caption;
   if (!replyText) {
-    await middleware.reply(ctx, 'Reply to a ticket message to assign it.');
+    await middleware.reply(ctx, 'Ответьте командой на сообщение заявки, чтобы назначить её.');
     return;
   }
 
   const resolved = await resolveTicketFromReply(replyText);
   if (!resolved) {
-    await middleware.reply(ctx, 'Could not find ticket ID in the replied message.');
+    await middleware.reply(ctx, 'Не удалось определить заявку по сообщению.');
     return;
   }
 
@@ -386,13 +386,13 @@ const unassignCommand = async (ctx: Context): Promise<void> => {
 
   const replyText = ctx.message.reply_to_message?.text || ctx.message.reply_to_message?.caption;
   if (!replyText) {
-    await middleware.reply(ctx, 'Reply to a ticket message to unassign it.');
+    await middleware.reply(ctx, 'Ответьте командой на сообщение заявки, чтобы снять назначение.');
     return;
   }
 
   const resolved = await resolveTicketFromReply(replyText);
   if (!resolved) {
-    await middleware.reply(ctx, 'Could not find ticket ID in the replied message.');
+    await middleware.reply(ctx, 'Не удалось определить заявку по сообщению.');
     return;
   }
 
@@ -407,19 +407,19 @@ const tagCommand = async (ctx: Context): Promise<void> => {
   if (!ctx.session.admin) return;
   const args = ctx.match?.trim();
   if (!args) {
-    await middleware.reply(ctx, 'Usage: /tag <tag1,tag2,...>');
+    await middleware.reply(ctx, 'Использование: /tag <метка1,метка2,...>');
     return;
   }
 
   const replyText = ctx.message.reply_to_message?.text || ctx.message.reply_to_message?.caption;
   if (!replyText) {
-    await middleware.reply(ctx, 'Reply to a ticket message to add tags.');
+    await middleware.reply(ctx, 'Ответьте командой на сообщение заявки, чтобы добавить метки.');
     return;
   }
 
   const resolved = await resolveTicketFromReply(replyText);
   if (!resolved) {
-    await middleware.reply(ctx, 'Could not find ticket ID in the replied message.');
+    await middleware.reply(ctx, 'Не удалось определить заявку по сообщению.');
     return;
   }
 
@@ -434,19 +434,19 @@ const untagCommand = async (ctx: Context): Promise<void> => {
   if (!ctx.session.admin) return;
   const args = ctx.match?.trim();
   if (!args) {
-    await middleware.reply(ctx, 'Usage: /untag <tag>');
+    await middleware.reply(ctx, 'Использование: /untag <метка>');
     return;
   }
 
   const replyText = ctx.message.reply_to_message?.text || ctx.message.reply_to_message?.caption;
   if (!replyText) {
-    await middleware.reply(ctx, 'Reply to a ticket message to remove a tag.');
+    await middleware.reply(ctx, 'Ответьте командой на сообщение заявки, чтобы удалить метку.');
     return;
   }
 
   const resolved = await resolveTicketFromReply(replyText);
   if (!resolved) {
-    await middleware.reply(ctx, 'Could not find ticket ID in the replied message.');
+    await middleware.reply(ctx, 'Не удалось определить заявку по сообщению.');
     return;
   }
 
@@ -461,19 +461,19 @@ const priorityCommand = async (ctx: Context): Promise<void> => {
   const args = ctx.match?.trim().toLowerCase() ?? '';
   const validPriorities = ['low', 'normal', 'high', 'urgent'];
   if (!args || !validPriorities.includes(args)) {
-    await middleware.reply(ctx, `Usage: /priority <${validPriorities.join('|')}>`);
+    await middleware.reply(ctx, `Использование: /priority <${validPriorities.join('|')}>`);
     return;
   }
 
   const replyText = ctx.message.reply_to_message?.text || ctx.message.reply_to_message?.caption;
   if (!replyText) {
-    await middleware.reply(ctx, 'Reply to a ticket message to set priority.');
+    await middleware.reply(ctx, 'Ответьте командой на сообщение заявки, чтобы задать приоритет.');
     return;
   }
 
   const resolved = await resolveTicketFromReply(replyText);
   if (!resolved) {
-    await middleware.reply(ctx, 'Could not find ticket ID in the replied message.');
+    await middleware.reply(ctx, 'Не удалось определить заявку по сообщению.');
     return;
   }
 
@@ -489,13 +489,13 @@ const muteCommand = async (ctx: Context): Promise<void> => {
 
   const replyText = ctx.message.reply_to_message?.text || ctx.message.reply_to_message?.caption;
   if (!replyText) {
-    await middleware.reply(ctx, 'Reply to a ticket message to mute it.');
+    await middleware.reply(ctx, 'Ответьте командой на сообщение заявки, чтобы отключить уведомления.');
     return;
   }
 
   const resolved = await resolveTicketFromReply(replyText);
   if (!resolved) {
-    await middleware.reply(ctx, 'Could not find ticket ID in the replied message.');
+    await middleware.reply(ctx, 'Не удалось определить заявку по сообщению.');
     return;
   }
 
@@ -510,13 +510,13 @@ const unmuteCommand = async (ctx: Context): Promise<void> => {
 
   const replyText = ctx.message.reply_to_message?.text || ctx.message.reply_to_message?.caption;
   if (!replyText) {
-    await middleware.reply(ctx, 'Reply to a ticket message to unmute it.');
+    await middleware.reply(ctx, 'Ответьте командой на сообщение заявки, чтобы включить уведомления.');
     return;
   }
 
   const resolved = await resolveTicketFromReply(replyText);
   if (!resolved) {
-    await middleware.reply(ctx, 'Could not find ticket ID in the replied message.');
+    await middleware.reply(ctx, 'Не удалось определить заявку по сообщению.');
     return;
   }
 
@@ -530,19 +530,19 @@ const noteCommand = async (ctx: Context): Promise<void> => {
   if (!ctx.session.admin) return;
   const args = ctx.match?.trim();
   if (!args) {
-    await middleware.reply(ctx, 'Usage: /note <internal note text>');
+    await middleware.reply(ctx, 'Использование: /note <текст внутренней заметки>');
     return;
   }
 
   const replyText = ctx.message.reply_to_message?.text || ctx.message.reply_to_message?.caption;
   if (!replyText) {
-    await middleware.reply(ctx, 'Reply to a ticket message to add an internal note.');
+    await middleware.reply(ctx, 'Ответьте командой на сообщение заявки, чтобы добавить внутреннюю заметку.');
     return;
   }
 
   const resolved = await resolveTicketFromReply(replyText);
   if (!resolved) {
-    await middleware.reply(ctx, 'Could not find ticket ID in the replied message.');
+    await middleware.reply(ctx, 'Не удалось определить заявку по сообщению.');
     return;
   }
 
@@ -558,13 +558,13 @@ const notesCommand = async (ctx: Context): Promise<void> => {
 
   const replyText = ctx.message.reply_to_message?.text || ctx.message.reply_to_message?.caption;
   if (!replyText) {
-    await middleware.reply(ctx, 'Reply to a ticket message to view its internal notes.');
+    await middleware.reply(ctx, 'Ответьте командой на сообщение заявки, чтобы посмотреть внутренние заметки.');
     return;
   }
 
   const resolved = await resolveTicketFromReply(replyText);
   if (!resolved) {
-    await middleware.reply(ctx, 'Could not find ticket ID in the replied message.');
+    await middleware.reply(ctx, 'Не удалось определить заявку по сообщению.');
     return;
   }
 
@@ -589,7 +589,7 @@ const statsCommand = async (ctx: Context): Promise<void> => {
 
   // Check permission to view analytics
   if (!team.canPerformAction(ctx.from.id.toString(), 'view_analytics')) {
-    await middleware.reply(ctx, 'You do not have permission to view analytics.');
+    await middleware.reply(ctx, 'У вас нет прав просматривать статистику.');
     return;
   }
 
@@ -627,30 +627,30 @@ const ticketCommand = async (ctx: Context): Promise<void> => {
     }
   }
   if (!ticket) {
-    await middleware.reply(ctx, 'Usage: /ticket <id> (or reply to a ticket message)');
+    await middleware.reply(ctx, 'Использование: /ticket <номер> или ответьте на сообщение заявки.');
     return;
   }
 
   const ticketId = ticket.ticketId;
-  const padded = ticketId.toString().padStart(6, '0');
   const lines: string[] = [];
-  lines.push(`*${esc(language.ticketDetails)} #T${padded}*`);
+  lines.push(`*${esc(language.ticketDetails)} № ${ticketId}*`);
   if (isManualTicket(ticket)) {
     // The synthetic manual userid is internal; staff see the recorded external client.
-    lines.push(`${esc(language.customer)}: ${esc(ticket.external_client ?? '-')} · ${esc(ticket.external_contact ?? '-')}`);
-    lines.push(`manual: ${esc(MANUAL_SOURCE_LABELS[ticket.manual_source ?? 'other'] ?? '-')} · ${esc(staffDisplayName(ticket.created_by))}`);
+    lines.push(`${esc(language.customer)}: ${esc(ticket.external_client ?? 'не указан')}`);
+    if (ticket.external_contact) lines.push(`Контакт: ${esc(ticket.external_contact)}`);
+    if (ticket.manual_source) lines.push(`Источник: ${esc(MANUAL_SOURCE_LABELS[ticket.manual_source] ?? 'Другой')}`);
   } else {
-    lines.push(`${esc(language.customer)}: ${anonymous_tickets ? esc(ticket.name ?? '-') : `${esc(ticket.name ?? '-')} (${esc(String(ticket.userid))})`}`);
+    lines.push(`${esc(language.customer)}: ${esc(ticket.name ?? 'не указан')}`);
   }
-  lines.push(`status: ${esc(ticket.status ?? '-')} · ${esc(String(ticket.messenger ?? '-'))}`);
-  if (ticket.category) lines.push(`category: ${esc(ticket.category)}`);
-  if (ticket.priority && ticket.priority !== 'normal') lines.push(`priority: ${esc(ticket.priority)}`);
-  if (Array.isArray(ticket.tags) && ticket.tags.length > 0) lines.push(`tags: ${esc(ticket.tags.map((t) => `#${t}`).join(' '))}`);
+  const statuses: Record<string, string> = { open: 'открыта', waiting_user: 'ожидает клиента', closed: 'закрыта' };
+  const priorities: Record<string, string> = { low: 'низкий', high: 'высокий', urgent: 'срочный' };
+  lines.push(`Статус: ${esc(statuses[ticket.status] ?? ticket.status ?? 'не указан')}`);
+  if (ticket.category && !/^(общая|general|common)$/i.test(ticket.category)) lines.push(`Категория: ${esc(ticket.category)}`);
+  if (ticket.priority && ticket.priority !== 'normal') lines.push(`Приоритет: ${esc(priorities[ticket.priority] ?? ticket.priority)}`);
+  if (Array.isArray(ticket.tags) && ticket.tags.length > 0) lines.push(`Метки: ${esc(ticket.tags.map((t) => `#${t}`).join(' '))}`);
   if (ticket.assigned_to) {
     lines.push(`${esc(language.ticketAssignedTo)}: ${esc(staffDisplayName(ticket.assigned_to))}`);
   }
-  if (ticket.first_response_at) lines.push(`first response: ${esc(new Date(ticket.first_response_at).toISOString())}`);
-  if (ticket.closed_at) lines.push(`closed: ${esc(new Date(ticket.closed_at).toISOString())}`);
   if (ticket.triage_summary) lines.push(`${esc(language.triageSummary)}: ${esc(ticket.triage_summary)}`);
 
   const notes = await db.getInternalNotes(ticketId);
@@ -660,9 +660,13 @@ const ticketCommand = async (ctx: Context): Promise<void> => {
   if (history.length > 0) {
     lines.push('');
     for (const entry of [...history].reverse()) {
-      const when = entry.timestamp ? new Date(entry.timestamp).toISOString().slice(0, 16).replace('T', ' ') : '';
+      const when = entry.timestamp ? new Date(entry.timestamp).toLocaleString('ru-RU', {
+        timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit', year: '2-digit',
+        hour: '2-digit', minute: '2-digit',
+      }) : '';
       const snippet = entry.text.length > 200 ? `${entry.text.slice(0, 200)}…` : entry.text;
-      lines.push(`_${esc(when)}_ *${esc(entry.sender)}*: ${esc(snippet)}`);
+      const sender = entry.sender === 'user' ? 'Клиент' : entry.sender === 'staff' ? 'Поддержка' : 'Событие';
+      lines.push(`_${esc(when)}_ *${sender}*: ${esc(snippet)}`);
     }
   }
 
@@ -676,12 +680,12 @@ const broadcastCommand = async (ctx: Context): Promise<void> => {
   if (!ctx.session.admin) return;
   const { language, allow_broadcast } = cache.config;
   if (!allow_broadcast) {
-    await middleware.reply(ctx, 'Broadcast is disabled. Set allow_broadcast: true in config.yaml to enable it.');
+    await middleware.reply(ctx, 'Рассылка отключена в настройках.');
     return;
   }
   const text = ctx.match?.trim();
   if (!text) {
-    await middleware.reply(ctx, 'Usage: /broadcast <text>');
+    await middleware.reply(ctx, 'Использование: /broadcast <текст>');
     return;
   }
 

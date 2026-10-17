@@ -46,7 +46,7 @@ async function fileHandler(type: string, bot: Addon, ctx: Context) {
   if (session.admin) {
     const actorId = ctx.from.id.toString();
     if (!team.canPerformAction(actorId, 'reply')) {
-      await reply(ctx, 'You do not have permission to reply to tickets.');
+      await reply(ctx, 'У вас нет прав отвечать по заявкам.');
       return;
     }
 
@@ -61,8 +61,8 @@ async function fileHandler(type: string, bot: Addon, ctx: Context) {
     }
     if (!team.canManageTicket(actorId, ticket.assigned_to)) {
       await reply(ctx, ticket.assigned_to
-        ? 'This ticket is owned by another engineer.'
-        : 'Take the ticket first with /take.');
+        ? 'Эта заявка назначена другому сотруднику.'
+        : 'Сначала возьмите заявку командой /take.');
       return;
     }
 
@@ -100,7 +100,7 @@ async function fileHandler(type: string, bot: Addon, ctx: Context) {
   // delivered and do not throw into ingress/retry for a transport that cannot
   // ever handle media.
   if (session.admin && ticket.userid.includes('WEB')) {
-    await reply(ctx, 'File delivery to web chat is not supported.');
+    await reply(ctx, 'Отправка файлов в веб-чат не поддерживается.');
     return;
   }
 

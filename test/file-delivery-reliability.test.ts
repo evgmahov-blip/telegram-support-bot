@@ -309,7 +309,7 @@ describe('file delivery reliability', () => {
 
     expect(mockReply).toHaveBeenCalledWith(
       ctx,
-      'File delivery to web chat is not supported.',
+      'Отправка файлов в веб-чат не поддерживается.',
     );
     expect(ctx.getFile).not.toHaveBeenCalled();
     expect(mockPersistTicketMessage).not.toHaveBeenCalled();

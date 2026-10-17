@@ -274,7 +274,7 @@ describe('Files Module', () => {
       await files.fileHandler('photo', bot, ctx);
 
       expect(bot.sendPhoto).not.toHaveBeenCalled();
-      expect(mockReply).toHaveBeenCalledWith(ctx, 'This ticket is owned by another engineer.');
+      expect(mockReply).toHaveBeenCalledWith(ctx, 'Эта заявка назначена другому сотруднику.');
     });
   });
 

@@ -5,13 +5,14 @@ const getTicketByInternalId = jest.fn();
 const answer = jest.fn().mockResolvedValue(undefined);
 const close = jest.fn();
 const timeline = jest.fn().mockResolvedValue([]);
+const latest = jest.fn().mockResolvedValue(null);
 const edit = jest.fn().mockResolvedValue(undefined);
 
 jest.mock('../src/middleware', () => ({ reply, sendMessage: send }));
 jest.mock('../src/db', () => ({
   getTicketById: getTicket, getTicketByInternalId, listUserTickets: jest.fn(), listStaffTickets: jest.fn(), addNewTicket: jest.fn().mockResolvedValue(9),
   requestNewTicket: jest.fn().mockResolvedValue(null),
-  getTicketMessageHistory: jest.fn().mockResolvedValue([]), getLatestTicketMessage: jest.fn().mockResolvedValue(null),
+  getTicketMessageHistory: jest.fn().mockResolvedValue([]), getLatestTicketMessage: latest,
   getTicketTimelinePage: timeline,
   getInternalNotes: jest.fn().mockResolvedValue([]), setReplyPrompt: jest.fn(), clearReplyPrompt: jest.fn(),
   claimStaffCard: jest.fn(), releaseStaffCardClaim: jest.fn(), bindStaffCard: jest.fn(), clearStaffCardBinding: jest.fn(),
@@ -26,11 +27,30 @@ jest.mock('../src/cache', () => ({ __esModule: true, default: { config: {
 }, staffMembers: new Map([['42',{ telegram_id:'42', name:'Иван', role:'agent' }],
   ['43',{ telegram_id:'43', name:'Пётр', role:'agent' }]]) } }));
 
-import { handleCallback, refreshStaffCard } from '../src/ticket-ui';
+import { cardText, handleCallback, refreshStaffCard } from '../src/ticket-ui';
 import { Context, Messenger } from '../src/interfaces';
 
 const ticket: any = { ticketId: 7, userid: 'client', messenger: 'telegram', status: 'open', assigned_to: '42',
   category: null, priority: 'normal', staff_card_chat_id: '-100', staff_card_message_id: 55, staff_card_thread_id: 7 };
+
+describe('concise Russian card rendering', () => {
+  beforeEach(() => { jest.clearAllMocks(); latest.mockResolvedValue({ text: 'Точный текст клиента' }); });
+
+  it('shows client and useful state while omitting routine clutter', async () => {
+    const rendered = await cardText({ ...ticket, name: 'Женя', created_at: new Date(), updated_at: new Date() });
+    expect(rendered).toContain('<b>Заявка #7</b>');
+    expect(rendered).toContain('Клиент: Женя');
+    expect(rendered).toContain('Инженер: Иван');
+    expect(rendered).toContain('Точный текст клиента');
+    expect(rendered).not.toMatch(/Создан|Обновлён|UTC|Приоритет|Категория/);
+  });
+
+  it('keeps nondefault priority and meaningful category', async () => {
+    const rendered = await cardText({ ...ticket, name: 'Женя', priority: 'urgent', category: 'Оплата' });
+    expect(rendered).toContain('Приоритет: Срочный');
+    expect(rendered).toContain('Категория: Оплата');
+  });
+});
 function ctx(data: string, chat=-100, thread=7, messageId=55, actor=42): Context {
   const update: any = { update_id: 900, callback_query: { data, from: { id: actor }, id: 'q',
     message: { message_id: messageId, chat: { id: chat, type: chat > 0 ? 'private' : 'supergroup' }, message_thread_id: thread } } };
@@ -93,13 +113,13 @@ describe('raw ticket card callbacks', () => {
 
   it('uses real numeric staff role checks and rejects an unknown actor exactly', async () => {
     await handleCallback(ctx('tc:reply:7', -100, 7, 55, 43));
-    expect(answer).toHaveBeenCalledWith('Сначала возьмите активный тикет.', true);
+    expect(answer).toHaveBeenCalledWith('Сначала возьмите активную заявку.', true);
     expect(send).not.toHaveBeenCalled();
   });
 
   it('edits a persisted card after restart without sending a duplicate', async () => {
     await refreshStaffCard(7);
-    expect(edit).toHaveBeenCalledWith('-100', 55, expect.stringContaining('#T000007'), expect.anything());
+    expect(edit).toHaveBeenCalledWith('-100', 55, expect.stringContaining('Заявка #7'), expect.anything());
     expect(send).not.toHaveBeenCalled();
   });
 
@@ -118,7 +138,7 @@ describe('raw ticket card callbacks', () => {
     await handleCallback(ctx('tc:take:7'));
     const db = jest.requireMock('../src/db');
     expect(db.recordAnalyticsEventBestEffort).not.toHaveBeenCalledWith('ticket.taken', 7, '42', expect.anything());
-    expect(answer).toHaveBeenCalledWith('Тикет уже взят или неактивен.', true);
+    expect(answer).toHaveBeenCalledWith('Заявка уже взята или неактивна.', true);
   });
 
   it('edits staff list pages and hides next on the last page', async () => {
@@ -158,8 +178,8 @@ describe('raw ticket card callbacks', () => {
     getTicketByInternalId.mockResolvedValue(ticket);
     db.setPendingTicketAction.mockResolvedValue(ticket);
     await handleCallback(ctx('tc:closeask:7'));
-    expect(edit).not.toHaveBeenCalledWith(-100, 55, expect.stringContaining('Закрыть тикет'), expect.anything());
-    expect(reply).toHaveBeenCalledWith(expect.anything(), expect.stringContaining('Закрыть тикет'), expect.anything());
+    expect(edit).not.toHaveBeenCalledWith(-100, 55, expect.stringContaining('Закрыть заявку'), expect.anything());
+    expect(reply).toHaveBeenCalledWith(expect.anything(), expect.stringContaining('Закрыть заявку'), expect.anything());
   });
 
   it('neutralizes a sent card candidate when durable binding loses the race', async () => {
@@ -224,7 +244,7 @@ describe('Home navigation on every ticket screen', () => {
   it('offers a client a new request, not a reopen, on their own closed ticket', async () => {
     getTicket.mockResolvedValue({ ...ticket, userid: '700', status: 'closed' });
     await handleCallback(userCtx('uc:open:7'));
-    const ids = data(rowsOf('Обращение #T7'));
+    const ids = data(rowsOf('Обращение № 7'));
     expect(ids).toEqual(expect.arrayContaining(['um:new:0', 'um:home:0']));
     expect(ids.join()).not.toContain('reopen');
   });
@@ -232,7 +252,7 @@ describe('Home navigation on every ticket screen', () => {
   it('puts staff Home on close confirmation, transfer picker and the reply/note waiting panel', async () => {
     db.setPendingTicketAction.mockResolvedValue(ticket); db.setReplyPrompt.mockResolvedValue(ticket);
     await handleCallback(ctx('tc:closeask:7'));
-    expect(data(rowsOf('Закрыть тикет'))).toEqual(expect.arrayContaining(['tc:open:7', 'tm:home:0']));
+    expect(data(rowsOf('Закрыть заявку'))).toEqual(expect.arrayContaining(['tc:open:7', 'tm:home:0']));
     await handleCallback(ctx('tc:transfer:7'));
     expect(data(rowsOf('Кому передать'))).toEqual(expect.arrayContaining(['tc:open:7', 'tm:home:0']));
     await handleCallback(ctx('tc:note:7'));
@@ -245,10 +265,10 @@ describe('Home navigation on every ticket screen', () => {
     db.consumePendingTicketAction.mockResolvedValue(ticket);
     close.mockResolvedValue({ outcome: 'closed', ticket: { ...ticket, status: 'closed' } });
     await handleCallback(ctx('tc:close:7:token', -100, 7, 900));
-    expect(data(rowsOf('Тикет закрыт: #T7'))).toEqual(['tc:open:7', 'tm:home:0']);
+    expect(data(rowsOf('Заявка закрыта: № 7'))).toEqual(['tc:open:7', 'tm:home:0']);
     jest.requireMock('../src/ticket-ownership').transferTicket.mockResolvedValueOnce(ticket);
     await handleCallback(ctx('tc:xfer:7:43:token', -100, 7, 901));
-    expect(data(rowsOf('Тикет передан: #T7'))).toEqual(['tc:open:7', 'tm:home:0']);
+    expect(data(rowsOf('Заявка передана: № 7'))).toEqual(['tc:open:7', 'tm:home:0']);
     getTicket.mockResolvedValue({ ...ticket, pending_reply_prompt_id: 88, pending_reply_staff_id: '42' });
     await handleCallback(ctx('tc:cancel:7:88', -100, 7, 902));
     expect(db.clearReplyPrompt).toHaveBeenCalledWith(7, '42');
@@ -258,10 +278,10 @@ describe('Home navigation on every ticket screen', () => {
   it('shows Home on an empty staff list and Back/Home on the ticket detail panel', async () => {
     db.listStaffTickets.mockResolvedValueOnce([]);
     await handleCallback(ctx('tm:closed:0', -100, 7, 900));
-    expect(data(rowsOf('Тикетов нет'))).toContain('tm:home:0');
+    expect(data(rowsOf('Заявок нет'))).toContain('tm:home:0');
     getTicket.mockResolvedValue({ ...ticket, status: 'closed' });
     await handleCallback(ctx('tc:open:7', -100, 7, 900));
-    const rows = rowsOf('Чтобы вернуть тикет в работу');
+    const rows = rowsOf('Чтобы вернуть заявку в работу');
     expect(rows[0][0]).toEqual({ text: 'Перейти к карточке → «Вернуть в работу»', url: expect.stringContaining('/55?thread=7') });
     expect(data(rows)).toEqual(expect.arrayContaining(['tm:closed:0', 'tm:home:0']));
   });
@@ -303,7 +323,7 @@ describe('staff «Вернуть в работу» on a closed canonical card', 
     expect(state.transitionTicketStateFrom).toHaveBeenCalledWith(7, 'closed', 'open', '42');
     expect(db.recordAnalyticsEventBestEffort).toHaveBeenCalledTimes(1);
     expect(db.recordAnalyticsEventBestEffort).toHaveBeenCalledWith('ticket.reopened', 7, '42');
-    expect(edit).toHaveBeenCalledWith('-100', 55, expect.stringContaining('#T000007'), expect.anything());
+    expect(edit).toHaveBeenCalledWith('-100', 55, expect.stringContaining('Заявка #7'), expect.anything());
     expect(send).not.toHaveBeenCalled(); expect(db.addNewTicket).not.toHaveBeenCalled();
     expect(answer).toHaveBeenCalledWith('Готово.');
   });
