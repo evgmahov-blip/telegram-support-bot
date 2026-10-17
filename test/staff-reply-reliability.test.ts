@@ -160,6 +160,17 @@ describe('staff reply delivery reliability', () => {
     expect(mockClearReplyPrompt).toHaveBeenCalledWith(42, 'agent1');
   });
 
+  it('sends the client an anonymous support reply without engineer name or id', async () => {
+    await chat(createContext());
+
+    const clientDeliveries = mockSendMessage.mock.calls.filter(call => call[0] === 'user123');
+    expect(clientDeliveries).toHaveLength(1);
+    expect(clientDeliveries[0][1]).toBe('telegram');
+    expect(clientDeliveries[0][2]).toContain('Support Team');
+    expect(clientDeliveries[0][2]).not.toContain('Engineer Name');
+    expect(clientDeliveries[0][2]).not.toContain('agent1');
+  });
+
   it('does not let another engineer cancel or use an active prompt', async () => {
     mockGetTicketByInternalId.mockResolvedValue({ ...openTicket(), assigned_to: 'agent1',
       pending_reply_prompt_id: 700, pending_reply_staff_id: 'agent1', pending_reply_expires_at: new Date(Date.now() + 60_000) });

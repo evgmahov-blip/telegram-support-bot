@@ -9,7 +9,6 @@ import * as webhooks from './webhooks';
 import * as workflows from './workflows';
 import { persistStaffMessageCorrelation } from './staff-correlation';
 import { refreshStaffCard } from './ticket-ui';
-import { staffDisplayName } from './staff-names';
 
 const TIME_BETWEEN_CONFIRMATION_MESSAGES = 86400000; // 24 hours
 function formatMessageAsTicket(
@@ -30,11 +29,6 @@ function formatMessageAsTicket(
     priorityPrefix = `${priorityIcons[ticketObj.priority] || ''} `;
   }
 
-  let assignPrefix = '';
-  if (ticketObj && ticketObj.assigned_to) {
-    assignPrefix = `📋 Assigned: ${esc(staffDisplayName(ticketObj.assigned_to))}\n`;
-  }
-
   let tagsPrefix = '';
   if (ticketObj && ticketObj.tags && ticketObj.tags.length > 0) {
     tagsPrefix = `🏷️ ${ticketObj.tags.map((t: string) => `#${t}`).join(' ')}\n`;
@@ -42,7 +36,7 @@ function formatMessageAsTicket(
 
   return `${priorityPrefix}${config.language.ticket} #T${ticket
     .toString()
-    .padStart(6, '0')} ${config.language.from} ${name} ${config.language.language}: ${ctx.message.from.language_code} ${ctx.session.groupTag}\n\n${assignPrefix}${tagsPrefix}${esc(
+    .padStart(6, '0')} ${config.language.from} ${name} ${config.language.language}: ${ctx.message.from.language_code} ${ctx.session.groupTag}\n\n${tagsPrefix}${esc(
       ctx.message.text,
     )}\n\n${autoReplyInfo ? `*${autoReplyInfo}*` : ''}`;
 }

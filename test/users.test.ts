@@ -96,6 +96,9 @@ describe('Users Module', () => {
     cache.ticketIDs = [];
     cache.ticketStatus = {};
     cache.ticketSent = [];
+    (cache as any).staffMembers = new Map([
+      ['engineer-42', { role: 'agent', name: 'Astra Engineer' }],
+    ]);
     Date.now = jest.fn(() => 1640995200000); // Fixed timestamp
   });
 
@@ -201,6 +204,32 @@ describe('Users Module', () => {
         'telegram',
         expect.stringContaining('#T001001')
       );
+    });
+
+    it('keeps client confirmation anonymous and omits duplicate assignment from staff forwarding', async () => {
+      const ctx = createMockContext('Identity boundary check');
+      mockGetTicketByUserId.mockResolvedValue({
+        ticketId: 1006,
+        userid: 'user123',
+        messenger: 'telegram',
+        status: 'open',
+        category: 'general',
+        assigned_to: 'engineer-42',
+      });
+      mockSendMessage.mockResolvedValue('msg_id_128');
+
+      await users.chat(ctx, { id: 'chat123' });
+
+      const clientDeliveries = mockSendMessage.mock.calls.filter(call => call[0] === 'chat123');
+      expect(clientDeliveries).toHaveLength(1);
+      expect(clientDeliveries[0][2]).toContain('Thank you for contacting us');
+      expect(clientDeliveries[0][2]).not.toContain('Astra Engineer');
+      expect(clientDeliveries[0][2]).not.toContain('engineer-42');
+
+      const staffDelivery = mockSendMessage.mock.calls.find(call => call[0] === 'staff123');
+      expect(staffDelivery?.[2]).not.toContain('Assigned:');
+      expect(staffDelivery?.[2]).not.toContain('Astra Engineer');
+      expect(staffDelivery?.[2]).not.toContain('engineer-42');
     });
 
     it('should wait for staff message correlation before completing', async () => {
