@@ -52,6 +52,20 @@ describe('ticket state compare-and-set transitions', () => {
     expect(result).toBeNull();
   });
 
+  it('reopens CLOSED -> OPEN in place, owner-guarded, and clears closed_at', async () => {
+    const reopened = { ticketId: 80, status: 'open', assigned_to: '42', closed_at: null };
+    mockFindOneAndUpdate.mockResolvedValueOnce(reopened).mockResolvedValueOnce(null);
+
+    expect(await ticketState.transitionTicketStateFrom(80, 'closed', 'open', '42')).toBe(reopened);
+    expect(mockFindOneAndUpdate).toHaveBeenCalledWith(
+      { ticketId: 80, status: { $in: ['closed'] }, assigned_to: '42' },
+      { $set: { status: 'open', closed_at: null } },
+      { new: true },
+    );
+    // A duplicate tap after the first reopen no longer matches status=closed.
+    expect(await ticketState.transitionTicketStateFrom(80, 'closed', 'open', '42')).toBeNull();
+  });
+
   it('keeps close side effects after a best-effort analytics failure', async () => {
     const ticket: any = { ticketId: 79, userid: '700', messenger: 'telegram', status: 'open', assigned_to: '42' };
     mockFindOneAndUpdate.mockResolvedValue({ ...ticket, status: 'closed' });
