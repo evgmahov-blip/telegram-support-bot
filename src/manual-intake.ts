@@ -69,7 +69,15 @@ async function showPreview(ctx: Context, d: any) {
 export async function startDraft(ctx: Context): Promise<boolean> {
   const actor = ctx.from.id.toString();
   if (!canCreate(actor)) { await ctx.answerCbQuery('Нет прав на создание заявок.', true); return true; }
-  const d = await db.startManualDraft(token(8), actor, String(cache.config.staffchat_id), threadOf(ctx), expires());
+  const thread = threadOf(ctx);
+  if (typeof db.clearExpiredReplyComposes === 'function')
+    await db.clearExpiredReplyComposes(actor, String(ctx.chat.id), thread);
+  if (typeof db.findActiveReplyCompose === 'function'
+    && await db.findActiveReplyCompose(actor, String(ctx.chat.id), thread)) {
+    await ctx.answerCbQuery('Сначала отправьте или отмените текущий ответ клиенту/заметку.', true);
+    return true;
+  }
+  const d = await db.startManualDraft(token(8), actor, String(cache.config.staffchat_id), thread, expires());
   await showSource(ctx, d);
   await ctx.answerCbQuery(); return true;
 }
@@ -77,6 +85,8 @@ export async function startDraft(ctx: Context): Promise<boolean> {
 export async function cancelActiveForHome(ctx: Context) {
   if (typeof db.cancelActiveManualDraft === 'function')
     await db.cancelActiveManualDraft(ctx.from.id.toString(), String(ctx.chat.id), threadOf(ctx));
+  if (typeof db.cancelActiveReplyCompose === 'function')
+    await db.cancelActiveReplyCompose(ctx.from.id.toString(), String(ctx.chat.id), threadOf(ctx));
 }
 
 export async function handleDraftCallback(ctx: Context, p: string[]): Promise<boolean> {

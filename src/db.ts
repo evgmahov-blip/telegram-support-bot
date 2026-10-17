@@ -45,6 +45,12 @@ export interface ISupportee extends mongoose.Document {
   pending_reply_staff_id: string | null;
   pending_reply_expires_at: Date | null;
   pending_reply_kind: 'reply' | 'note' | null;
+  pending_reply_chat_id: string | null;
+  pending_reply_thread_id: number | null;
+  pending_reply_origin_message_id: number | null;
+  pending_reply_version: number;
+  pending_reply_claim: string | null;
+  pending_reply_claimed_at: Date | null;
   staff_card_claim: string | null;
   staff_card_claimed_at: Date | null;
   pending_action_token: string | null;
@@ -86,6 +92,12 @@ export const SupporteeSchema = new mongoose.Schema<ISupportee>({
   pending_reply_staff_id: { type: String, default: null },
   pending_reply_expires_at: { type: Date, default: null },
   pending_reply_kind: { type: String, enum: ['reply', 'note'], default: null },
+  pending_reply_chat_id: { type: String, default: null },
+  pending_reply_thread_id: { type: Number, default: null },
+  pending_reply_origin_message_id: { type: Number, default: null },
+  pending_reply_version: { type: Number, default: 0 },
+  pending_reply_claim: { type: String, default: null },
+  pending_reply_claimed_at: { type: Date, default: null },
   staff_card_claim: { type: String, default: null },
   staff_card_claimed_at: { type: Date, default: null },
   pending_action_token: { type: String, default: null },
@@ -105,6 +117,10 @@ export const SupporteeSchema = new mongoose.Schema<ISupportee>({
 SupporteeSchema.index({ userid: 1, messenger: 1, ticketId: -1 });
 SupporteeSchema.index({ internalIds: 1 });
 SupporteeSchema.index({ status: 1, category: 1, assigned_to: 1 });
+SupporteeSchema.index(
+  { pending_reply_staff_id: 1, pending_reply_chat_id: 1, pending_reply_thread_id: 1 },
+  { unique: true, partialFilterExpression: { pending_reply_staff_id: { $type: 'string' } } },
+);
 // One confirmed intake draft can never produce a second ticket, even across crash/retry.
 SupporteeSchema.index(
   { manual_request_key: 1 },
@@ -608,8 +624,11 @@ export async function clearStaffCardBinding(ticketId: number, chatId: string, me
 }
 
 export async function setReplyPrompt(ticketId: number, staffId: string, promptId: number, expiresAt: Date,
-  kind: 'reply' | 'note', expectedOwner?: string) {
-  const query: Record<string, unknown> = { ticketId, status: { $in: ['open', 'waiting_user'] } };
+  kind: 'reply' | 'note', expectedOwner?: string, chatId?: string, threadId?: number | null, originMessageId?: number) {
+  const query: Record<string, unknown> = { ticketId, status: { $in: ['open', 'waiting_user'] }, $or: [
+    { pending_reply_staff_id: null }, { pending_reply_staff_id: { $exists: false } },
+    { pending_reply_expires_at: { $lte: new Date() } },
+  ] };
   if (expectedOwner !== undefined) query.assigned_to = expectedOwner;
   return await Supportee.findOneAndUpdate(
     query,
@@ -620,6 +639,10 @@ export async function setReplyPrompt(ticketId: number, staffId: string, promptId
       ] },
       pending_reply_staff_id: staffId, pending_reply_prompt_id: promptId,
       pending_reply_expires_at: expiresAt, pending_reply_kind: kind,
+      pending_reply_chat_id: chatId ?? null, pending_reply_thread_id: threadId ?? null,
+      pending_reply_origin_message_id: originMessageId ?? promptId,
+      pending_reply_claim: null, pending_reply_claimed_at: null,
+      pending_reply_version: { $add: [{ $ifNull: ['$pending_reply_version', 0] }, 1] },
     } }],
     { new: true },
   );
@@ -638,13 +661,64 @@ export async function consumePendingTicketAction(ticketId: number, type: string,
   } }, { new: false });
 }
 
-export async function clearReplyPrompt(ticketId: number, staffId?: string) {
+export async function clearReplyPrompt(ticketId: number, staffId?: string, version?: number) {
   const query: Record<string, unknown> = { ticketId };
   if (staffId) query.pending_reply_staff_id = staffId;
+  if (version !== undefined) {
+    query.pending_reply_version = version;
+    query.$or = [{ pending_reply_claim: null }, { pending_reply_claim: { $exists: false } }];
+  }
   return await Supportee.findOneAndUpdate(query, [{ $set: {
     internalIds: { $filter: { input: { $ifNull: ['$internalIds', []] }, as: 'id', cond: { $ne: ['$$id', '$pending_reply_prompt_id'] } } },
     pending_reply_staff_id: null, pending_reply_prompt_id: null, pending_reply_expires_at: null, pending_reply_kind: null,
+    pending_reply_chat_id: null, pending_reply_thread_id: null, pending_reply_origin_message_id: null,
+    pending_reply_claim: null, pending_reply_claimed_at: null,
   } }], { new: true });
+}
+
+/** Locate the actor's compose intent on exactly this Telegram surface. */
+export async function findActiveReplyCompose(staffId: string, chatId: string, threadId: number | null) {
+  return await Supportee.findOne({ pending_reply_staff_id: staffId, pending_reply_chat_id: chatId,
+    pending_reply_thread_id: threadId, pending_reply_expires_at: { $gt: new Date() },
+    pending_reply_kind: { $in: ['reply', 'note'] } }) as ISupportee | null;
+}
+
+export async function clearExpiredReplyComposes(staffId: string, chatId: string, threadId: number | null) {
+  return await Supportee.updateMany({ pending_reply_staff_id: staffId, pending_reply_chat_id: chatId,
+    pending_reply_thread_id: threadId, pending_reply_expires_at: { $lte: new Date() } }, [{ $set: {
+      internalIds: { $filter: { input: { $ifNull: ['$internalIds', []] }, as: 'id', cond: { $ne: ['$$id', '$pending_reply_prompt_id'] } } },
+      pending_reply_staff_id: null, pending_reply_prompt_id: null, pending_reply_expires_at: null, pending_reply_kind: null,
+      pending_reply_chat_id: null, pending_reply_thread_id: null, pending_reply_origin_message_id: null,
+      pending_reply_claim: null, pending_reply_claimed_at: null,
+    } }]);
+}
+
+/** Fence one ordinary message as the sole consumer without deleting the draft. */
+export async function claimReplyCompose(ticketId: number, staffId: string, chatId: string, threadId: number | null,
+  version: number, claim: string, expectedOwner?: string) {
+  const query: Record<string, unknown> = { ticketId, status: { $in: ['open', 'waiting_user'] }, pending_reply_staff_id: staffId,
+    pending_reply_chat_id: chatId, pending_reply_thread_id: threadId, pending_reply_version: version,
+    pending_reply_expires_at: { $gt: new Date() }, $or: [
+      { pending_reply_claim: null }, { pending_reply_claim: { $exists: false } },
+    ] };
+  if (expectedOwner !== undefined) query.assigned_to = expectedOwner;
+  return await Supportee.findOneAndUpdate(query, { $set: { pending_reply_claim: claim, pending_reply_claimed_at: new Date() } }, { new: true }) as ISupportee | null;
+}
+
+export async function releaseReplyCompose(ticketId: number, staffId: string, version: number, claim: string) {
+  return await Supportee.findOneAndUpdate({ ticketId, pending_reply_staff_id: staffId,
+    pending_reply_version: version, pending_reply_claim: claim },
+  { $set: { pending_reply_claim: null, pending_reply_claimed_at: null } }, { new: true }) as ISupportee | null;
+}
+
+export async function completeReplyCompose(ticketId: number, staffId: string, version: number, claim: string) {
+  return await Supportee.findOneAndUpdate({ ticketId, pending_reply_staff_id: staffId,
+    pending_reply_version: version, pending_reply_claim: claim }, [{ $set: {
+      internalIds: { $filter: { input: { $ifNull: ['$internalIds', []] }, as: 'id', cond: { $ne: ['$$id', '$pending_reply_prompt_id'] } } },
+      pending_reply_staff_id: null, pending_reply_prompt_id: null, pending_reply_expires_at: null, pending_reply_kind: null,
+      pending_reply_chat_id: null, pending_reply_thread_id: null, pending_reply_origin_message_id: null,
+      pending_reply_claim: null, pending_reply_claimed_at: null,
+    } }], { new: true }) as ISupportee | null;
 }
 
 /** Persist a single-use menu intent on the user's existing ticket; no second ticket store. */
@@ -691,6 +765,23 @@ export async function startManualDraft(token: string, actorId: string, chatId: s
 export async function findActiveManualDraft(actorId: string, chatId: string, threadId: number | null) {
   return await ManualIntakeDraft.findOne({ actor_id: actorId, chat_id: chatId, thread_id: threadId,
     status: 'input', expires_at: { $gt: new Date() } }) as IManualIntakeDraft | null;
+}
+
+export async function findAnyActiveManualDraft(actorId: string, chatId: string, threadId: number | null) {
+  return await ManualIntakeDraft.findOne({ actor_id: actorId, chat_id: chatId, thread_id: threadId,
+    status: { $in: OPEN_DRAFT_STATES }, expires_at: { $gt: new Date() } }) as IManualIntakeDraft | null;
+}
+
+export async function cancelActiveReplyCompose(staffId: string, chatId: string, threadId: number | null) {
+  return await Supportee.updateMany({ pending_reply_staff_id: staffId, pending_reply_chat_id: chatId,
+    pending_reply_thread_id: threadId, $or: [
+      { pending_reply_claim: null }, { pending_reply_claim: { $exists: false } },
+    ] }, [{ $set: {
+      internalIds: { $filter: { input: { $ifNull: ['$internalIds', []] }, as: 'id', cond: { $ne: ['$$id', '$pending_reply_prompt_id'] } } },
+      pending_reply_staff_id: null, pending_reply_prompt_id: null, pending_reply_expires_at: null, pending_reply_kind: null,
+      pending_reply_chat_id: null, pending_reply_thread_id: null, pending_reply_origin_message_id: null,
+      pending_reply_claim: null, pending_reply_claimed_at: null,
+    } }]);
 }
 
 /** All wizard navigation is compare-and-set by token/actor/version. */

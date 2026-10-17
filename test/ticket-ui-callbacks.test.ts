@@ -82,11 +82,12 @@ describe('raw ticket card callbacks', () => {
     expect(answer).toHaveBeenCalledWith('Не удалось создать подсказку ответа.', true);
   });
 
-  it('targets the selected engineer in the selective ForceReply prompt', async () => {
+  it('targets the selected engineer while accepting the next ordinary text', async () => {
     const db = jest.requireMock('../src/db'); db.setReplyPrompt.mockResolvedValue(ticket);
     await handleCallback(ctx('tc:reply:7'));
     expect(send).toHaveBeenCalledWith('-100', 'telegram', expect.stringContaining('tg://user?id=42'),
-      expect.objectContaining({ parse_mode: 'HTML', reply_markup: { force_reply: true, selective: true } }));
+      expect.objectContaining({ parse_mode: 'HTML' }));
+    expect(send.mock.calls.at(-1)[3].reply_markup).toBeUndefined();
     expect(db.setReplyPrompt).toHaveBeenCalledWith(7, '42', 88, expect.any(Date), 'reply', '42');
   });
 
@@ -235,8 +236,8 @@ describe('Home navigation on every ticket screen', () => {
     await handleCallback(ctx('tc:transfer:7'));
     expect(data(rowsOf('Кому передать'))).toEqual(expect.arrayContaining(['tc:open:7', 'tm:home:0']));
     await handleCallback(ctx('tc:note:7'));
-    // The ForceReply prompt itself stays keyboard-free; the inline panel carries cancel + Home.
-    expect(send.mock.calls.at(-1)[3].reply_markup).toEqual({ force_reply: true, selective: true });
+    // The ordinary-text prompt stays keyboard-free; the inline panel carries cancel + Home.
+    expect(send.mock.calls.at(-1)[3].reply_markup).toBeUndefined();
     expect(data(rowsOf('Ожидаю заметку'))).toEqual(['tc:cancel:7:88', 'tc:open:7', 'tm:home:0']);
   });
 

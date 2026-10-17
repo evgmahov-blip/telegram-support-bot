@@ -128,20 +128,27 @@ async function recordManualReply(ctx: Context, ticket: ISupportee, senderId: str
   const body = text.trim();
   if (!body) {
     await middleware.reply(ctx, 'Пустой ответ не записан.');
-    return;
+    return false;
   }
   if (body.length > MANUAL_REPLY_LIMIT) {
     await middleware.reply(ctx, `Ответ длиннее ${MANUAL_REPLY_LIMIT} символов и не записан. Сократите текст.`);
-    return;
+    return false;
   }
   // Keyed by Telegram update: a replayed update never writes a second history row.
   const created = await db.recordStaffWork(ticketId, senderId, body, deliveryKey);
-  if (!created) return;
+  if (!created) return true;
   if (!ticket.first_response_at) await db.setFirstResponseAt(ticketId);
   db.recordAnalyticsEventBestEffort('ticket.work_recorded', ticketId, senderId, { manual: true });
   await middleware.reply(ctx, `Ответ записан в историю ручной заявки #T${ticketId.toString().padStart(6, '0')}. Клиенту ничего не отправлено.`);
-  await db.clearReplyPrompt(ticketId, senderId);
+  await middleware.reply(ctx, 'Запись сохранена. Куда перейти?', {
+    message_thread_id: ctx.message.message_thread_id ?? undefined,
+    reply_markup: { inline_keyboard: [[
+      { text: '⬅️ К тикету', callback_data: `tc:open:${ticketId}` },
+      { text: '🏠 Главная', callback_data: 'tm:home:0' },
+    ]] },
+  });
   await refreshStaffCard(ticketId);
+  return true;
 }
 
 /** Handles replies written in the closed staff group. */
@@ -161,22 +168,35 @@ async function chat(ctx: Context) {
   }
 
   const replyMsg = ctx.message?.reply_to_message;
-  // Replies belong to the existing ticket/prompt router. Only an ordinary
-  // non-reply may be consumed by an explicitly active manual wizard step.
-  if (!replyMsg && typeof manualIntake.handleTextInput === 'function' && await manualIntake.handleTextInput(ctx)) return;
-  if (!replyMsg) return;
-
-  const replyText = replyMsg.text || replyMsg.caption || '';
-  const replyToMessageId = (replyMsg as typeof replyMsg & { message_id?: number }).message_id;
-  const correlatedMessageId = replyToMessageId ?? ctx.message.external_reply?.message_id;
-
+  const ordinaryText = !replyMsg && typeof ctx.message?.text === 'string' && !ctx.message.text.startsWith('/');
+  let composeInput = false;
   let ticket: ISupportee | null = null;
   let ticketId = 0;
+  // Replies belong to the existing ticket/prompt router. Only an ordinary
+  // non-reply may be consumed by an explicitly active manual wizard step.
+  if (ordinaryText && typeof db.findActiveReplyCompose === 'function') {
+    const chatId = String(ctx.chat.id), threadId = ctx.message?.message_thread_id ?? null;
+    const [compose, intake] = await Promise.all([
+      db.findActiveReplyCompose(senderId, chatId, threadId),
+      typeof db.findAnyActiveManualDraft === 'function' ? db.findAnyActiveManualDraft(senderId, chatId, threadId) : Promise.resolve(null),
+    ]);
+    if (compose && intake) {
+      await middleware.reply(ctx, 'Обнаружены два активных ввода. Текст не использован: отмените один через его панель или Главную.', { message_thread_id: threadId ?? undefined });
+      return;
+    }
+    if (compose) { ticket = compose; ticketId = compose.ticketId; composeInput = true; }
+  }
+  if (!composeInput && !replyMsg && typeof manualIntake.handleTextInput === 'function' && await manualIntake.handleTextInput(ctx)) return;
+  if (!replyMsg && !composeInput) return;
+
+  const replyText = replyMsg?.text || replyMsg?.caption || '';
+  const replyToMessageId = (replyMsg as typeof replyMsg & { message_id?: number } | undefined)?.message_id;
+  const correlatedMessageId = replyToMessageId ?? ctx.message.external_reply?.message_id;
 
   // Manual intake answers are bound to their own ForceReply prompt, never to a ticket.
   if (typeof replyToMessageId === 'number' && await manualIntake.handleFormReply(ctx, replyToMessageId)) return;
 
-  if (typeof correlatedMessageId === 'number') {
+  if (!ticket && typeof correlatedMessageId === 'number') {
     ticket = await db.getTicketByInternalId(correlatedMessageId);
     if (ticket) ticketId = ticket.ticketId;
   }
@@ -209,15 +229,32 @@ async function chat(ctx: Context) {
   const deliveryKey = `telegram:${ctx.update_id || ctx.message.message_id}:ticket:${ticketId}`;
 
   // Prompts are durable ticket state, so restart does not lose the selected ticket.
-  if (ticket.pending_reply_prompt_id === correlatedMessageId) {
+  if (composeInput || ticket.pending_reply_prompt_id === correlatedMessageId) {
     if (ticket.pending_reply_staff_id !== senderId || !ticket.pending_reply_expires_at || new Date(ticket.pending_reply_expires_at).getTime() < Date.now()) {
       const expired = !ticket.pending_reply_expires_at || new Date(ticket.pending_reply_expires_at).getTime() < Date.now();
-      if (expired) await db.clearReplyPrompt(ticketId, ticket.pending_reply_staff_id || undefined);
-      await middleware.reply(ctx, 'Запрос ответа истёк или принадлежит другому сотруднику. Нажмите «Ответить» снова.');
+      if (expired) {
+        if (ticket.pending_reply_version == null) await db.clearReplyPrompt(ticketId, ticket.pending_reply_staff_id || undefined);
+        else await db.clearReplyPrompt(ticketId, ticket.pending_reply_staff_id || undefined, ticket.pending_reply_version);
+      }
+      await middleware.reply(ctx, 'Запрос ответа истёк или принадлежит другому сотруднику. Нажмите кнопку ответа снова.');
       return;
     }
+    // New prompts are bound to their exact Telegram surface. Treat an explicit
+    // reply to one exactly like ordinary compose input so both routes share the
+    // same atomic claim, fresh status/owner CAS and completion semantics.
+    if (!composeInput && ticket.pending_reply_chat_id != null) {
+      const actualThread = ctx.message.message_thread_id ?? null;
+      if (ticket.pending_reply_chat_id !== String(ctx.chat.id)
+        || (ticket.pending_reply_thread_id ?? null) !== actualThread) {
+        await middleware.reply(ctx, 'Эта подсказка относится к другому чату или теме; текст не использован.',
+          { message_thread_id: actualThread ?? undefined });
+        return;
+      }
+      composeInput = true;
+    }
     if (ticket.pending_reply_kind !== 'reply' && ticket.pending_reply_kind !== 'note') {
-      await db.clearReplyPrompt(ticketId, senderId);
+      if (ticket.pending_reply_version == null) await db.clearReplyPrompt(ticketId, senderId);
+      else await db.clearReplyPrompt(ticketId, senderId, ticket.pending_reply_version);
       await middleware.reply(ctx, 'Тип подсказки не распознан. Нажмите «Ответить» или «Заметка» снова.');
       return;
     }
@@ -227,8 +264,17 @@ async function chat(ctx: Context) {
         await middleware.reply(ctx, 'Владелец или состояние тикета изменились; заметка не сохранена.');
         return;
       }
-      await team.addInternalNoteCommand(ctx, ticketId, staffMessage, deliveryKey);
-      await db.clearReplyPrompt(ticketId, senderId);
+      let claim: string | null = null;
+      if (composeInput && typeof db.claimReplyCompose === 'function') {
+        claim = deliveryKey;
+        const claimed = await db.claimReplyCompose(ticketId, senderId, String(ctx.chat.id), ctx.message.message_thread_id ?? null,
+          ticket.pending_reply_version, claim, team.getStaffRole(senderId) === 'agent' ? senderId : undefined);
+        if (!claimed) { await middleware.reply(ctx, 'Этот ввод уже обрабатывается или устарел; текст не использован.'); return; }
+      }
+      try { await team.addInternalNoteCommand(ctx, ticketId, staffMessage, deliveryKey); }
+      catch (err) { if (claim) await db.releaseReplyCompose(ticketId, senderId, ticket.pending_reply_version, claim); throw err; }
+      if (claim) await db.completeReplyCompose(ticketId, senderId, ticket.pending_reply_version, claim);
+      else await db.clearReplyPrompt(ticketId, senderId);
       await refreshStaffCard(ticketId);
       return;
     }
@@ -252,19 +298,48 @@ async function chat(ctx: Context) {
     return;
   }
 
+  if (composeInput && (!staffMessage.trim() || staffMessage.length > MANUAL_REPLY_LIMIT)) {
+    await middleware.reply(ctx, !staffMessage.trim()
+      ? 'Пустой текст не использован. Отправьте непустое сообщение или отмените ввод.'
+      : `Текст длиннее ${MANUAL_REPLY_LIMIT} символов и не использован. Сократите его или отмените ввод.`,
+    { message_thread_id: ctx.message.message_thread_id ?? undefined });
+    return;
+  }
+
+  let composeClaim: string | null = null;
+  if (composeInput && typeof db.claimReplyCompose === 'function') {
+    composeClaim = deliveryKey;
+    const claimed = await db.claimReplyCompose(ticketId, senderId, String(ctx.chat.id), ctx.message.message_thread_id ?? null,
+      ticket.pending_reply_version, composeClaim, team.getStaffRole(senderId) === 'agent' ? senderId : undefined);
+    if (!claimed) { await middleware.reply(ctx, 'Этот ввод уже обрабатывается или устарел; текст не использован.'); return; }
+    ticket = claimed;
+  }
+
   if (isManualTicket(ticket)) {
-    await recordManualReply(ctx, ticket, senderId, staffMessage, deliveryKey);
+    try {
+      const saved = await recordManualReply(ctx, ticket, senderId, staffMessage, deliveryKey);
+      if (!saved) { if (composeClaim) await db.releaseReplyCompose(ticketId, senderId, ticket.pending_reply_version, composeClaim); return; }
+      if (composeClaim) await db.completeReplyCompose(ticketId, senderId, ticket.pending_reply_version, composeClaim);
+      else await db.clearReplyPrompt(ticketId, senderId);
+    } catch (err) {
+      if (composeClaim) await db.releaseReplyCompose(ticketId, senderId, ticket.pending_reply_version, composeClaim);
+      throw err;
+    }
     return;
   }
 
   cache.ticketStatus[ticketId] = false;
 
+  try {
   if (ticket.userid.includes('WEB')) {
     // Persist before the external delivery side effect so a history failure is
     // safe to retry and can never replay an already delivered staff reply.
     const reserved = typeof db.reserveStaffReply === 'function'
       ? await db.reserveStaffReply(ticketId, senderId, staffMessage, deliveryKey) : null;
-    if (reserved?.delivered_at) return;
+    if (reserved?.delivered_at) {
+      if (composeClaim) await db.completeReplyCompose(ticketId, senderId, ticket.pending_reply_version, composeClaim);
+      return;
+    }
     if (!reserved) await db.persistTicketMessage(ticketId, 'staff', senderId, staffMessage);
     try {
       const socketId = ticket.userid.split('WEB')[1];
@@ -277,7 +352,7 @@ async function chat(ctx: Context) {
         'Web chat already closed.',
       ).catch(log.error);
       log.error('Web reply delivery failed', e);
-      return;
+      throw e;
     }
   } else {
     let replyContent = ticketMsg(name, ctx.message);
@@ -293,10 +368,20 @@ async function chat(ctx: Context) {
     // before the delivery boundary is the delivery itself.
     const reserved = typeof db.reserveStaffReply === 'function'
       ? await db.reserveStaffReply(ticketId, senderId, staffMessage, deliveryKey) : null;
-    if (reserved?.delivered_at) return;
+    if (reserved?.delivered_at) {
+      if (composeClaim) await db.completeReplyCompose(ticketId, senderId, ticket.pending_reply_version, composeClaim);
+      return;
+    }
     if (!reserved) await db.persistTicketMessage(ticketId, 'staff', senderId, staffMessage);
     await middleware.sendMessage(ticket.userid, ticket.messenger, replyContent);
     if (reserved) await markDeliveredWithRetry(deliveryKey);
+  }
+
+  // The client transport has accepted the message. Retire only this fenced
+  // compose version now; later analytics/navigation failures must not replay it.
+  if (composeClaim) {
+    await db.completeReplyCompose(ticketId, senderId, ticket.pending_reply_version, composeClaim);
+    composeClaim = null;
   }
 
   if (!ticket.first_response_at) {
@@ -309,6 +394,15 @@ async function chat(ctx: Context) {
     cache.config.staffchat_type,
     `${cache.config.language.msg_sent} ${middleware.strictEscape(name)}`,
   ).catch(log.error);
+  if (composeInput) {
+    await middleware.reply(ctx, `✅ Ответ по #T${ticketId} отправлен клиенту ${name}.`, {
+      message_thread_id: ctx.message.message_thread_id ?? undefined,
+      reply_markup: { inline_keyboard: [[
+        { text: '⬅️ К тикету', callback_data: `tc:open:${ticketId}` },
+        { text: '🏠 Главная', callback_data: 'tm:home:0' },
+      ]] },
+    }).catch(log.error);
+  }
 
   log.info(`Staff reply sent for #T${ticketId}`);
   delete cache.ticketSent[ticketId];
@@ -327,8 +421,13 @@ async function chat(ctx: Context) {
       });
     }
   }
-  if (typeof db.clearReplyPrompt === 'function') await db.clearReplyPrompt(ticketId, senderId);
+  if (!composeInput && typeof db.clearReplyPrompt === 'function') await db.clearReplyPrompt(ticketId, senderId);
   await refreshStaffCard(ticketId);
+  } catch (err) {
+    if (composeClaim && typeof db.releaseReplyCompose === 'function')
+      await db.releaseReplyCompose(ticketId, senderId, ticket.pending_reply_version, composeClaim).catch(log.error);
+    throw err;
+  }
 }
 
 export { chat, ticketMsg, extractSupporteeId, findParentCategory, forwardReplyToParent };

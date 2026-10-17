@@ -46,7 +46,7 @@ function staffButtons(t: ISupportee) {
   ]);
   return kb([
     // A manual ticket has no client channel: «reply» only records work in its history.
-    [{ text: '🙋 Взять', callback_data: `tc:take:${id}` }, { text: isManualTicket(t) ? '✍️ Записать ответ' : '✍️ Ответить', callback_data: `tc:reply:${id}` }],
+    [{ text: '🙋 Взять', callback_data: `tc:take:${id}` }, { text: isManualTicket(t) ? '📝 Записать ответ' : '✉️ Написать клиенту', callback_data: `tc:reply:${id}` }],
     [{ text: t.status === 'waiting_user' ? '▶️ Продолжить работу' : '⏳ Ждём клиента', callback_data: `tc:${t.status === 'waiting_user' ? 'resume' : 'wait'}:${id}` }, { text: '👤 Передать', callback_data: `tc:transfer:${id}` }],
     [{ text: '📜 История', callback_data: `tc:h:${id}:0` }, { text: '📝 Заметка', callback_data: `tc:note:${id}` }],
     [{ text: '🔒 Закрыть', callback_data: `tc:closeask:${id}` }],
@@ -366,29 +366,62 @@ export async function handleCallback(ctx: Context): Promise<boolean> {
   }
   else if (action === 'reply' || action === 'note') {
     if (!team.canManageTicket(actor, ticket.assigned_to) || ticket.status === 'closed') { await ctx.answerCbQuery('Сначала возьмите активный тикет.', true); return true; }
+    const chatId = String(qmsg!.chat.id), threadId = qmsg!.message_thread_id || null;
+    if (typeof db.clearExpiredReplyComposes === 'function')
+      await db.clearExpiredReplyComposes(actor, chatId, threadId);
+    if (typeof db.findAnyActiveManualDraft === 'function'
+      && await db.findAnyActiveManualDraft(actor, chatId, threadId)) {
+      await ctx.answerCbQuery('Сначала завершите или отмените создание ручной заявки.', true); return true;
+    }
+    if (typeof db.findActiveReplyCompose === 'function') {
+      const active = await db.findActiveReplyCompose(actor, chatId, threadId);
+      if (active) {
+        await ctx.answerCbQuery(`У вас уже ожидается текст для #T${active.ticketId}. Сначала отправьте или отмените его.`, true);
+        return true;
+      }
+    }
     const mention = `<a href="tg://user?id=${e(actor)}">${e(staffDisplayName(actor))}</a>`;
     const manual = isManualTicket(ticket);
+    const recipient = manual ? (ticket.external_client || ticket.name || 'ручная заявка') : (ticket.name || `ID ${ticket.userid}`);
     const prompt = await middleware.sendMessage(cache.config.staffchat_id, cache.config.staffchat_type,
-      action === 'note' ? `${mention}, 🔒 заметка для #T${id}: ответьте на это сообщение текстом заметки.`
-        : manual ? `${mention}, запишите ответ/результат по ручной заявке #T${id}: ответьте на это сообщение. Текст сохранится в истории; клиенту ничего не отправляется.`
-        : `${mention}, ответ для #T${id}: ответьте на это сообщение. Другие сообщения группы не будут отправлены клиенту.`,
-      { parse_mode: 'HTML', reply_markup: { force_reply: true, selective: true }, reply_parameters: { message_id: qmsg!.message_id },
-        message_thread_id: cache.config.staffchat_thread_id || undefined });
+      action === 'note' ? `${mention}, 🔒 заметка для #T${id} (${e(recipient)}). Отправьте следующим обычным текстовым сообщением в этой теме. Заметка останется внутри команды.`
+        : manual ? `${mention}, запишите результат по ручной заявке #T${id} (${e(recipient)}). Отправьте следующим обычным текстовым сообщением в этой теме. Клиенту ничего не отправляется.`
+        : `${mention}, ответ клиенту по #T${id} (${e(recipient)}). Отправьте следующим обычным текстовым сообщением в этой теме — отвечать на сообщение Telegram не требуется.`,
+      { parse_mode: 'HTML', reply_parameters: { message_id: qmsg!.message_id },
+        message_thread_id: threadId || undefined });
     if (!prompt) { await ctx.answerCbQuery('Не удалось создать подсказку ответа.', true); return true; }
-    const bound = await db.setReplyPrompt(id, actor, Number(prompt), new Date(Date.now()+PROMPT_MS), action,
-      team.getStaffRole(actor)==='agent'?actor:undefined);
+    const expectedOwner = team.getStaffRole(actor)==='agent'?actor:undefined;
+    let bound: ISupportee | null = null;
+    try {
+      bound = typeof db.findActiveReplyCompose === 'function'
+        ? await db.setReplyPrompt(id, actor, Number(prompt), new Date(Date.now()+PROMPT_MS), action,
+          expectedOwner, chatId, threadId, qmsg!.message_id)
+        : await db.setReplyPrompt(id, actor, Number(prompt), new Date(Date.now()+PROMPT_MS), action, expectedOwner);
+    } catch (err) {
+      await TelegramAddon.getInstance().editMessage(cache.config.staffchat_id, Number(prompt),
+        'Эта подсказка отменена: у вас уже есть активный ввод на этой поверхности.').catch(log.error);
+      await ctx.answerCbQuery('У вас уже есть активный ввод. Сначала отправьте или отмените его.', true);
+      return true;
+    }
     if (!bound) {
       await TelegramAddon.getInstance().editMessage(cache.config.staffchat_id, Number(prompt), 'Эта подсказка отменена: владелец или состояние тикета изменились.').catch(log.error);
       await ctx.answerCbQuery('Владелец или состояние тикета изменились.', true); return true;
     }
-    // Telegram cannot attach inline buttons to the ForceReply prompt, so this separate panel carries cancel/navigation.
-    await answer(ctx, `${action === 'note' ? 'Ожидаю заметку' : manual ? 'Ожидаю запись ответа' : 'Ожидаю ответ'} для #T${id} 15 минут: ответьте на подсказку бота.`, [
-      [{text:'Отменить',callback_data:`tc:cancel:${id}:${prompt}`}],
+    // A separate panel keeps cancellation/navigation visible while the next ordinary text is awaited.
+    const fence = bound.pending_reply_version ?? prompt;
+    await answer(ctx, `${action === 'note' ? 'Ожидаю заметку' : manual ? 'Ожидаю запись ответа' : 'Ожидаю ответ'} для #T${id} (${e(recipient)}) 15 минут: отправьте следующий обычный текст в этой теме.`, [
+      [{text:'✖️ Отменить',callback_data:`tc:cancel:${id}:${fence}`}],
       [{ text: '⬅️ К тикету', callback_data: `tc:open:${id}` }, STAFF_HOME],
     ]); await ctx.answerCbQuery(); return true;
   } else if (action === 'cancel') {
-    if (ticket.pending_reply_prompt_id !== Number(p[3]) || ticket.pending_reply_staff_id !== actor) { await ctx.answerCbQuery('Эта кнопка отмены устарела.', true); return true; }
-    await db.clearReplyPrompt(id, actor);
+    const fence = Number(p[3]);
+    const matches = ticket.pending_reply_staff_id === actor
+      && (ticket.pending_reply_version === fence || (ticket.pending_reply_version == null && ticket.pending_reply_prompt_id === fence));
+    if (!matches) { await ctx.answerCbQuery('Эта кнопка отмены устарела.', true); return true; }
+    const cleared = ticket.pending_reply_version == null
+      ? await db.clearReplyPrompt(id, actor)
+      : await db.clearReplyPrompt(id, actor, fence);
+    if (ticket.pending_reply_version != null && !cleared) { await ctx.answerCbQuery('Эта кнопка отмены устарела.', true); return true; }
   }
   else { await ctx.answerCbQuery('Действие недоступно или нет прав.', true); return true; }
   await refreshStaffCard(id);
