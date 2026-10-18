@@ -68,7 +68,8 @@ export async function handleCallback(ctx: Context, p: string[]): Promise<boolean
   if (action === 'edit') {
     if (!cache.staffMembers.has(p[2])) { await ctx.answerCbQuery('Сотрудник больше не зарегистрирован.', true); return true; }
     if ((typeof db.findActiveReplyCompose === 'function' && await db.findActiveReplyCompose(actor, chat, thread))
-      || (typeof db.findAnyActiveManualDraft === 'function' && await db.findAnyActiveManualDraft(actor, chat, thread))) {
+      || (typeof db.findAnyActiveManualDraft === 'function' && await db.findAnyActiveManualDraft(actor, chat, thread))
+      || (typeof db.findResolutionIntent === 'function' && await db.findResolutionIntent(actor, chat, thread))) {
       await ctx.answerCbQuery('Сначала завершите или отмените текущий ввод заявки.', true); return true;
     }
     const intent = await db.startStaffNameEdit(actor, chat, thread, p[2], expires());

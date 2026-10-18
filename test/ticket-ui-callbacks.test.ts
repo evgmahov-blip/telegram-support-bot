@@ -7,6 +7,7 @@ const close = jest.fn();
 const timeline = jest.fn().mockResolvedValue([]);
 const latest = jest.fn().mockResolvedValue(null);
 const edit = jest.fn().mockResolvedValue(undefined);
+const getResolution = jest.fn().mockResolvedValue(null);
 
 jest.mock('../src/middleware', () => ({ reply, sendMessage: send }));
 jest.mock('../src/db', () => ({
@@ -14,6 +15,7 @@ jest.mock('../src/db', () => ({
   requestNewTicket: jest.fn().mockResolvedValue(null),
   getTicketMessageHistory: jest.fn().mockResolvedValue([]), getLatestTicketMessage: latest,
   getTicketTimelinePage: timeline,
+  getTicketResolution: getResolution,
   getInternalNotes: jest.fn().mockResolvedValue([]), setReplyPrompt: jest.fn(), clearReplyPrompt: jest.fn(),
   claimStaffCard: jest.fn(), releaseStaffCardClaim: jest.fn(), bindStaffCard: jest.fn(), clearStaffCardBinding: jest.fn(),
   setPendingTicketAction: jest.fn(), consumePendingTicketAction: jest.fn(), clearPendingTicketAction: jest.fn(), recordAnalyticsEventBestEffort: jest.fn(),
@@ -378,13 +380,21 @@ describe('staff «Вернуть в работу» on a closed canonical card', 
   const db = jest.requireMock('../src/db');
   const state = jest.requireMock('../src/ticket-state');
   const closed = { ...ticket, status: 'closed', closed_at: new Date('2026-10-01T00:00:00Z') };
-  beforeEach(() => { jest.clearAllMocks(); resetRenderStateForTests(); getTicket.mockResolvedValue(closed); getTicketByInternalId.mockResolvedValue(null); });
+  beforeEach(() => { jest.clearAllMocks(); resetRenderStateForTests(); getTicket.mockResolvedValue(closed); getTicketByInternalId.mockResolvedValue(null); getResolution.mockResolvedValue(null); });
 
   it('renders the reopen button and a Back to closed list on the canonical card', async () => {
     await refreshStaffCard(7);
     const rows = edit.mock.calls.at(-1)[3].reply_markup.inline_keyboard.flat();
     expect(rows).toEqual(expect.arrayContaining([{ text: '🔓 Вернуть в работу', callback_data: 'tc:reopen:7' },
+      { text: '💾 Сохранить решение', callback_data: 'rs:start:7' },
       { text: '⬅️ Назад', callback_data: 'tm:closed:0' }, { text: '🏠 Главная', callback_data: 'tm:home:0' }]));
+  });
+
+  it('changes the closed-card action to view after a case is saved', async () => {
+    getResolution.mockResolvedValue({ current_version: 1, versions: [{}] });
+    await refreshStaffCard(7);
+    const rows = edit.mock.calls.at(-1)[3].reply_markup.inline_keyboard.flat();
+    expect(rows).toContainEqual({ text: '📘 Решение', callback_data: 'rs:view:7' });
   });
 
   it('reopens the same ticket via owner-guarded CAS, audits once and refreshes the canonical card', async () => {

@@ -11,6 +11,7 @@ import { ISupportee } from './db';
 import * as ticketAudit from './ticket-audit';
 import * as manualIntake from './manual-intake';
 import * as staffNameEditor from './staff-name-editor';
+import * as resolutionCase from './ticket-resolution-case';
 import { staffDisplayName } from './staff-names';
 import { isManualTicket, MANUAL_SOURCE_LABELS } from './manual-ticket-guard';
 import { randomUUID } from 'crypto';
@@ -30,6 +31,7 @@ const eventName: Record<string, string> = {
   'ticket.taken': 'Заявка взята в работу', 'ticket.assigned': 'Назначен инженер',
   'ticket.transferred': 'Заявка передана', 'ticket.waiting': 'Ожидание клиента',
   'ticket.resumed': 'Работа продолжена', 'ticket.created': 'Заявка создана',
+  'ticket.resolution_saved': 'Сохранено решение заявки',
 };
 const doneText: Record<string, string> = { close: 'Заявка закрыта:', xfer: 'Заявка передана:', cancel: 'Ожидание ответа отменено:' };
 const renderedMessages = new Map<string, string>();
@@ -74,12 +76,16 @@ const fmt = (d: unknown) => d ? new Date(d as string).toLocaleString('ru-RU', {
   hour: '2-digit', minute: '2-digit',
 }) : '—';
 
-function staffButtons(t: ISupportee) {
+async function staffButtons(t: ISupportee) {
   const id = t.ticketId;
-  if (t.status === 'closed') return kb([
+  if (t.status === 'closed') {
+    const saved = typeof db.getTicketResolution === 'function' && await db.getTicketResolution(id);
+    return kb([
     [{ text: '📜 История', callback_data: `tc:h:${id}:0` }, { text: '🔓 Вернуть в работу', callback_data: `tc:reopen:${id}` }],
+    [{ text: saved ? '📘 Решение' : '💾 Сохранить решение', callback_data: `rs:${saved ? 'view' : 'start'}:${id}` }],
     [{ text: '⬅️ Назад', callback_data: 'tm:closed:0' }, STAFF_HOME],
   ]);
+  }
   return kb([
     // A manual ticket has no client channel: «reply» only records work in its history.
     [{ text: '🙋 Взять', callback_data: `tc:take:${id}` }, { text: isManualTicket(t) ? '📝 Записать ответ' : '✉️ Написать клиенту', callback_data: `tc:reply:${id}` }],
@@ -121,7 +127,7 @@ export async function refreshStaffCard(ticketId: number): Promise<void> {
       try {
       for (let attempt = 0; attempt < 2; attempt += 1) {
         const text = await cardText(ticket);
-        const opts = { parse_mode: 'HTML', reply_markup: staffButtons(ticket) };
+        const opts = { parse_mode: 'HTML', reply_markup: await staffButtons(ticket) };
         const rows = (opts.reply_markup as { inline_keyboard: Button[][] }).inline_keyboard;
         await editRendered(cardChatId, cardMessageId, text, rows);
         const current = await db.getTicketById(ticketId, null);
@@ -144,7 +150,7 @@ export async function refreshStaffCard(ticketId: number): Promise<void> {
       }
     }
     const text = await cardText(ticket);
-    const opts = { parse_mode: 'HTML', reply_markup: staffButtons(ticket) };
+    const opts = { parse_mode: 'HTML', reply_markup: await staffButtons(ticket) };
     if (typeof db.claimStaffCard !== 'function') return;
     const claim = randomUUID();
     const claimed = await db.claimStaffCard(ticketId, claim);
@@ -246,7 +252,7 @@ async function renderTicketOnClickedCard(ctx: Context, ticket: ISupportee, outco
   const q = ctx.callbackQuery.message!;
   const text = await cardText(ticket) + (outcome ? `\n\n${e(outcome)}` : '');
   await editRendered(q.chat.id, q.message_id, text,
-    (staffButtons(ticket).inline_keyboard as Button[][]));
+    ((await staffButtons(ticket)).inline_keyboard as Button[][]));
 }
 
 async function staffList(ctx: Context, view: 'new'|'mine'|'active'|'closed', page: number) {
@@ -365,11 +371,15 @@ export async function handleCallback(ctx: Context): Promise<boolean> {
     if (!staffSurface(ctx)) { await ctx.answerCbQuery('Недоступно вне рабочей группы/темы.', true); return true; }
     if (p[1] === 'manual') return await manualIntake.startDraft(ctx);
     await ctx.answerCbQuery();
-    if (p[1] === 'home') { await Promise.all([manualIntake.cancelActiveForHome(ctx), staffNameEditor.cancelForHome(ctx)]); await showStaffHome(ctx); }
+    if (p[1] === 'home') { await Promise.all([manualIntake.cancelActiveForHome(ctx), staffNameEditor.cancelForHome(ctx), resolutionCase.cancelForHome(ctx)]); await showStaffHome(ctx); }
     else await staffList(ctx, p[1] as never, Number(p[2]) || 0);
     return true;
   }
   if (p[0] === 'sn') return staffNameEditor.handleCallback(ctx, p);
+  if (p[0] === 'rs') {
+    if (!staffSurface(ctx)) { await ctx.answerCbQuery('Недоступно вне рабочей группы/темы.', true); return true; }
+    return resolutionCase.handleCallback(ctx, p);
+  }
   if (p[0] === 'mi') {
     if (!staffSurface(ctx)) { await ctx.answerCbQuery('Недоступно вне рабочей группы/темы.', true); return true; }
     return await manualIntake.handleDraftCallback(ctx, p);
@@ -496,6 +506,9 @@ export async function handleCallback(ctx: Context): Promise<boolean> {
     }
     if (typeof db.findStaffNameEdit === 'function' && await db.findStaffNameEdit(actor, chatId, threadId)) {
       await ctx.answerCbQuery('Сначала сохраните или отмените изменение имени.', true); return true;
+    }
+    if (typeof db.findResolutionIntent === 'function' && await db.findResolutionIntent(actor, chatId, threadId)) {
+      await ctx.answerCbQuery('Сначала сохраните или отмените запись решения.', true); return true;
     }
     const mention = `<a href="tg://user?id=${e(actor)}">${e(staffDisplayName(actor))}</a>`;
     const manual = isManualTicket(ticket);

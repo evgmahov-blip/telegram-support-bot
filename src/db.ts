@@ -349,6 +349,40 @@ StaffNameEditIntentSchema.index({ actor_id: 1, chat_id: 1, thread_id: 1 }, { uni
 StaffNameEditIntentSchema.index({ purge_at: 1 }, { expireAfterSeconds: 0 });
 const StaffNameEditIntent = mongoose.model('StaffNameEditIntent', StaffNameEditIntentSchema);
 
+export type ResolutionStep = 'cause' | 'actions' | 'check' | null;
+export type ResolutionIntentStatus = 'input' | 'preview' | 'saving' | 'saved' | 'cancelled';
+export interface IResolutionIntent extends mongoose.Document {
+  token: string; actor_id: string; chat_id: string; thread_id: number | null; ticketId: number;
+  status: ResolutionIntentStatus; step: ResolutionStep; version: number; base_version: number;
+  cause: string | null; actions: string | null; check: string | null;
+  last_consumed_message_id: number | null; edit_return: boolean; expires_at: Date; purge_at: Date;
+}
+const ResolutionIntentSchema = new mongoose.Schema<IResolutionIntent>({
+  token: { type: String, required: true, unique: true }, actor_id: { type: String, required: true },
+  chat_id: { type: String, required: true }, thread_id: { type: Number, default: null },
+  ticketId: { type: Number, required: true }, status: { type: String, enum: ['input','preview','saving','saved','cancelled'], required: true },
+  step: { type: String, enum: ['cause','actions','check',null], default: null }, version: { type: Number, default: 1 },
+  base_version: { type: Number, default: 0 }, cause: { type: String, default: null }, actions: { type: String, default: null },
+  check: { type: String, default: null }, last_consumed_message_id: { type: Number, default: null },
+  edit_return: { type: Boolean, default: false }, expires_at: { type: Date, required: true }, purge_at: { type: Date, required: true },
+});
+ResolutionIntentSchema.index({ actor_id: 1, chat_id: 1, thread_id: 1 }, { unique: true });
+ResolutionIntentSchema.index({ purge_at: 1 }, { expireAfterSeconds: 0 });
+const ResolutionIntent = mongoose.model('ResolutionIntent', ResolutionIntentSchema);
+
+export interface IResolutionVersion {
+  version: number; cause: string; actions: string; check: string; author_id: string; saved_at: Date; intent_token: string;
+}
+export interface ITicketResolution extends mongoose.Document {
+  ticketId: number; current_version: number; versions: IResolutionVersion[]; created_at: Date; updated_at: Date;
+}
+const TicketResolutionSchema = new mongoose.Schema<ITicketResolution>({
+  ticketId: { type: Number, required: true, unique: true }, current_version: { type: Number, required: true, default: 0 },
+  versions: { type: [{ version: Number, cause: String, actions: String, check: String, author_id: String,
+    saved_at: Date, intent_token: String }], default: [] },
+}, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } });
+const TicketResolution = mongoose.model('TicketResolution', TicketResolutionSchema);
+
 export async function connect() {
   mongoose.connection.on('open', () => {
     log.info('Connected to mongo server.');
@@ -1659,7 +1693,93 @@ export async function listTicketsAssignedTo(telegramId: string): Promise<number[
   return rows.map((row) => row.ticketId);
 }
 
+// --- Human-recorded solved-ticket cases ---
+const RESOLUTION_PURGE_MS = 24 * 60 * 60 * 1000;
+export async function getTicketResolution(ticketId: number) {
+  return TicketResolution.findOne({ ticketId }) as Promise<ITicketResolution | null>;
+}
+
+export async function startResolutionIntent(token: string, actorId: string, chatId: string, threadId: number | null,
+  ticketId: number, expiresAt: Date) {
+  const existing = await TicketResolution.findOne({ ticketId }) as ITicketResolution | null;
+  const latest = existing?.versions?.[existing.versions.length - 1];
+  return ResolutionIntent.findOneAndUpdate(
+    { actor_id: actorId, chat_id: chatId, thread_id: threadId },
+    { $set: { token, ticketId, status: 'input', step: 'cause', base_version: existing?.current_version || 0,
+      cause: latest?.cause || null, actions: latest?.actions || null, check: latest?.check || null,
+      last_consumed_message_id: null, edit_return: false, expires_at: expiresAt,
+      purge_at: new Date(expiresAt.getTime() + RESOLUTION_PURGE_MS) }, $inc: { version: 1 } },
+    { upsert: true, new: true, setDefaultsOnInsert: false },
+  ) as Promise<IResolutionIntent>;
+}
+
+export async function findResolutionIntent(actorId: string, chatId: string, threadId: number | null) {
+  return ResolutionIntent.findOne({ actor_id: actorId, chat_id: chatId, thread_id: threadId,
+    status: { $in: ['input','preview','saving'] }, expires_at: { $gt: new Date() } }) as Promise<IResolutionIntent | null>;
+}
+
+export async function getResolutionIntent(token: string) {
+  return ResolutionIntent.findOne({ token }) as Promise<IResolutionIntent | null>;
+}
+
+export async function transitionResolutionIntent(token: string, actorId: string, chatId: string, threadId: number | null,
+  version: number, expected: Record<string, unknown>, set: Record<string, unknown>, expiresAt: Date) {
+  return ResolutionIntent.findOneAndUpdate(
+    { token, actor_id: actorId, chat_id: chatId, thread_id: threadId, version, expires_at: { $gt: new Date() }, ...expected },
+    { $set: { ...set, expires_at: expiresAt }, $inc: { version: 1 } }, { new: true },
+  ) as Promise<IResolutionIntent | null>;
+}
+
+export async function consumeResolutionInput(token: string, actorId: string, chatId: string, threadId: number | null,
+  version: number, step: Exclude<ResolutionStep, null>, messageId: number, value: string, nextStep: ResolutionStep, expiresAt: Date) {
+  return ResolutionIntent.findOneAndUpdate(
+    { token, actor_id: actorId, chat_id: chatId, thread_id: threadId, version, status: 'input', step,
+      expires_at: { $gt: new Date() }, $or: [{ last_consumed_message_id: null },
+        { last_consumed_message_id: { $exists: false } }, { last_consumed_message_id: { $lt: messageId } }] },
+    { $set: { [step]: value, step: nextStep, status: nextStep ? 'input' : 'preview', edit_return: false,
+      last_consumed_message_id: messageId, expires_at: expiresAt }, $inc: { version: 1 } }, { new: true },
+  ) as Promise<IResolutionIntent | null>;
+}
+
+export async function cancelResolutionIntent(actorId: string, chatId: string, threadId: number | null, version?: number) {
+  return ResolutionIntent.findOneAndUpdate({ actor_id: actorId, chat_id: chatId, thread_id: threadId,
+    status: { $in: ['input','preview'] }, ...(version === undefined ? {} : { version }) },
+  { $set: { status: 'cancelled' }, $inc: { version: 1 } }, { new: true });
+}
+
+export async function claimResolutionSave(token: string, actorId: string, chatId: string, threadId: number | null, version: number) {
+  return ResolutionIntent.findOneAndUpdate({ token, actor_id: actorId, chat_id: chatId, thread_id: threadId,
+    version, status: { $in: ['preview','saving'] }, expires_at: { $gt: new Date() }, cause: { $type: 'string' }, actions: { $type: 'string' }, check: { $type: 'string' } },
+  { $set: { status: 'saving' } }, { new: true }) as Promise<IResolutionIntent | null>;
+}
+
+export async function abandonClaimedResolution(token: string, actorId: string, version: number) {
+  return ResolutionIntent.findOneAndUpdate({ token, actor_id: actorId, version, status: 'saving' },
+    { $set: { status: 'cancelled' }, $inc: { version: 1 } }, { new: true });
+}
+
+/** Append exactly one immutable version; base_version is the edit CAS fence and token is the replay fence. */
+export async function saveClaimedResolution(intent: IResolutionIntent) {
+  const replay = await TicketResolution.findOne({ ticketId: intent.ticketId, 'versions.intent_token': intent.token });
+  if (replay) return replay as ITicketResolution;
+  const next = intent.base_version + 1; const savedAt = new Date();
+  let result = await TicketResolution.findOneAndUpdate(
+    { ticketId: intent.ticketId, current_version: intent.base_version, 'versions.intent_token': { $ne: intent.token } },
+    { $push: { versions: { version: next, cause: intent.cause!, actions: intent.actions!, check: intent.check!,
+      author_id: intent.actor_id, saved_at: savedAt, intent_token: intent.token } }, $set: { current_version: next } }, { new: true },
+  ) as ITicketResolution | null;
+  if (!result && intent.base_version === 0) {
+    try { result = await TicketResolution.create({ ticketId: intent.ticketId, current_version: 1, versions: [{ version: 1,
+      cause: intent.cause!, actions: intent.actions!, check: intent.check!, author_id: intent.actor_id, saved_at: savedAt,
+      intent_token: intent.token }] }); } catch (err) { if ((err as {code?:number}).code !== 11000) throw err; }
+  }
+  if (!result) result = await TicketResolution.findOne({ ticketId: intent.ticketId, 'versions.intent_token': intent.token }) as ITicketResolution | null;
+  if (!result) return null;
+  await ResolutionIntent.updateOne({ token: intent.token, status: 'saving' }, { $set: { status: 'saved' } });
+  return result;
+}
+
 // --- Export models for use in other modules ---
 
 export { TicketMessage, AnalyticsEvent, WebhookCursor, InternalNote, TicketCounter, UserBan, ManualIntakeDraft,
-  StaffDisplayNameOverride, StaffNameEditIntent };
+  StaffDisplayNameOverride, StaffNameEditIntent, ResolutionIntent, TicketResolution };
