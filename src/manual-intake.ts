@@ -77,6 +77,11 @@ export async function startDraft(ctx: Context): Promise<boolean> {
     await ctx.answerCbQuery('Сначала отправьте или отмените текущий ответ клиенту/заметку.', true);
     return true;
   }
+  if (typeof db.findStaffNameEdit === 'function'
+    && await db.findStaffNameEdit(actor, String(ctx.chat.id), thread)) {
+    await ctx.answerCbQuery('Сначала сохраните или отмените изменение имени.', true);
+    return true;
+  }
   const d = await db.startManualDraft(token(8), actor, String(cache.config.staffchat_id), thread, expires());
   await showSource(ctx, d);
   await ctx.answerCbQuery(); return true;

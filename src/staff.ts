@@ -9,6 +9,7 @@ import * as analytics from './analytics';
 import * as team from './team';
 import { refreshStaffCard } from './ticket-ui';
 import * as manualIntake from './manual-intake';
+import * as staffNameEditor from './staff-name-editor';
 import { isManualTicket } from './manual-ticket-guard';
 
 /**
@@ -170,6 +171,7 @@ async function chat(ctx: Context) {
 
   const replyMsg = ctx.message?.reply_to_message;
   const ordinaryText = !replyMsg && typeof ctx.message?.text === 'string' && !ctx.message.text.startsWith('/');
+  if (ordinaryText && await staffNameEditor.handleTextInput(ctx)) return;
   let composeInput = false;
   let ticket: ISupportee | null = null;
   let ticketId = 0;

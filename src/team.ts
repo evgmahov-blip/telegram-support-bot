@@ -5,20 +5,29 @@ import * as ownership from './ticket-ownership';
 import * as middleware from './middleware';
 import * as log from './logger'
 import { staffDisplayName } from './staff-names';
+const safeStaffName = (id: string) => middleware.strictEscape(staffDisplayName(id));
 
 /**
  * Initializes staff member cache from config on startup.
  */
-export function initStaffCache(): void {
+export async function initStaffCache(): Promise<void> {
     const staffRoles = cache.config.staff_roles || [];
     cache.staffMembers = new Map();
     cache.mutedTickets = new Set();
+    cache.staffNameOverrides = new Map();
 
     for (const member of staffRoles) {
         cache.staffMembers.set(member.telegram_id, member);
     }
 
-    log.info(`Loaded ${cache.staffMembers.size} staff members from config.`);
+    const overrides = await db.getStaffDisplayNameOverrides([...cache.staffMembers.keys()]);
+    for (const override of overrides) {
+        if (cache.staffMembers.has(override.telegram_id)) {
+            cache.staffNameOverrides.set(override.telegram_id, override.display_name);
+        }
+    }
+
+    log.info(`Loaded ${cache.staffMembers.size} staff members from config and ${cache.staffNameOverrides.size} display-name overrides.`);
 }
 
 /**
@@ -80,14 +89,14 @@ export async function takeTicketCommand(ctx: Context, ticketId: number): Promise
     if (!ticket) {
         const current = await db.getTicketById(ticketId, null);
         if (current?.assigned_to) {
-            await middleware.reply(ctx, `Заявка уже назначена сотруднику ${staffDisplayName(current.assigned_to)}.`);
+            await middleware.reply(ctx, `Заявка уже назначена сотруднику ${safeStaffName(current.assigned_to)}.`);
         } else {
             await middleware.reply(ctx, 'Заявка неактивна или её состояние изменилось.');
         }
         return;
     }
 
-    const actorName = staffDisplayName(actorId);
+    const actorName = safeStaffName(actorId);
     await middleware.reply(ctx, `Заявка № ${ticketId} взята в работу сотрудником ${actorName}.`);
     await db.recordAnalyticsEvent('ticket.taken', ticketId, actorId, { owner: actorId });
 }
@@ -131,7 +140,7 @@ export async function transferTicketCommand(
         return;
     }
 
-    const targetName = staffDisplayName(targetId);
+    const targetName = safeStaffName(targetId);
     await middleware.reply(ctx, `Заявка № ${ticketId} передана сотруднику ${targetName}.`);
 
     if (targetId !== actorId) {
@@ -192,7 +201,7 @@ export async function assignTicketCommand(ctx: Context, targetId: string, ticket
 
     await db.assignTicket(ticketId, targetId);
 
-    const memberName = staffDisplayName(targetId);
+    const memberName = safeStaffName(targetId);
     await middleware.reply(ctx, `${cache.config.language.ticketAssignedTo} ${memberName}`);
 
     // Notify the assigned agent
@@ -314,7 +323,7 @@ export async function listStaffCommand(ctx: Context): Promise<void> {
     for (const [id, member] of cache.staffMembers) {
         const roleIcons: Record<string, string> = { admin: '👑', supervisor: '⭐', agent: '🔧' };
         const roleNames = { admin: 'администратор', supervisor: 'руководитель', agent: 'инженер' };
-        output += `${roleIcons[member.role] || ''} ${staffDisplayName(id)} (${roleNames[member.role]})\n`;
+        output += `${roleIcons[member.role] || ''} ${safeStaffName(id)} (${roleNames[member.role]})\n`;
     }
 
     await middleware.reply(ctx, output.trim(), { parse_mode: cache.config.parse_mode });

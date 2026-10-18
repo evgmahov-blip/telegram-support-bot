@@ -310,6 +310,45 @@ ManualIntakeDraftSchema.index({ purge_at: 1 }, { expireAfterSeconds: 0 });
 
 const ManualIntakeDraft = mongoose.model('ManualIntakeDraft', ManualIntakeDraftSchema);
 
+export interface IStaffDisplayNameOverride extends mongoose.Document {
+  telegram_id: string;
+  display_name: string;
+  updated_by: string;
+  created_at: Date;
+  updated_at: Date;
+}
+
+const StaffDisplayNameOverrideSchema = new mongoose.Schema<IStaffDisplayNameOverride>({
+  telegram_id: { type: String, required: true, unique: true },
+  display_name: { type: String, required: true },
+  updated_by: { type: String, required: true },
+}, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } });
+const StaffDisplayNameOverride = mongoose.model('StaffDisplayNameOverride', StaffDisplayNameOverrideSchema);
+
+export type StaffNameEditStatus = 'input' | 'preview' | 'saving' | 'saved' | 'cancelled';
+export interface IStaffNameEditIntent extends mongoose.Document {
+  actor_id: string;
+  chat_id: string;
+  thread_id: number | null;
+  target_id: string;
+  draft_name: string | null;
+  status: StaffNameEditStatus;
+  version: number;
+  expires_at: Date;
+  purge_at: Date;
+}
+const StaffNameEditIntentSchema = new mongoose.Schema<IStaffNameEditIntent>({
+  actor_id: { type: String, required: true }, chat_id: { type: String, required: true },
+  thread_id: { type: Number, default: null }, target_id: { type: String, required: true },
+  draft_name: { type: String, default: null },
+  status: { type: String, enum: ['input', 'preview', 'saving', 'saved', 'cancelled'], required: true },
+  version: { type: Number, required: true, default: 1 }, expires_at: { type: Date, required: true },
+  purge_at: { type: Date, required: true },
+});
+StaffNameEditIntentSchema.index({ actor_id: 1, chat_id: 1, thread_id: 1 }, { unique: true });
+StaffNameEditIntentSchema.index({ purge_at: 1 }, { expireAfterSeconds: 0 });
+const StaffNameEditIntent = mongoose.model('StaffNameEditIntent', StaffNameEditIntentSchema);
+
 export async function connect() {
   mongoose.connection.on('open', () => {
     log.info('Connected to mongo server.');
@@ -1547,6 +1586,72 @@ export async function recordCSAT(
   await recordAnalyticsEvent('csat.rated', ticketId, null, { rating, comment });
 }
 
+// --- Staff display-name overrides and editor intents ---
+
+export async function getStaffDisplayNameOverrides(ids: string[]): Promise<Array<{ telegram_id: string; display_name: string }>> {
+  if (!ids.length) return [];
+  return StaffDisplayNameOverride.find({ telegram_id: { $in: ids } })
+    .select('telegram_id display_name -_id').lean<Array<{ telegram_id: string; display_name: string }>>();
+}
+
+export async function startStaffNameEdit(actorId: string, chatId: string, threadId: number | null, targetId: string, expiresAt: Date) {
+  return StaffNameEditIntent.findOneAndUpdate(
+    { actor_id: actorId, chat_id: chatId, thread_id: threadId },
+    { $set: { target_id: targetId, draft_name: null, status: 'input', expires_at: expiresAt,
+      purge_at: new Date(expiresAt.getTime() + 24 * 60 * 60 * 1000) }, $inc: { version: 1 } },
+    { upsert: true, new: true, setDefaultsOnInsert: false },
+  );
+}
+
+export async function findStaffNameEdit(actorId: string, chatId: string, threadId: number | null) {
+  return StaffNameEditIntent.findOne({ actor_id: actorId, chat_id: chatId, thread_id: threadId,
+    status: { $in: ['input', 'preview'] }, expires_at: { $gt: new Date() } });
+}
+
+export async function stageStaffNameEdit(actorId: string, chatId: string, threadId: number | null, version: number, name: string) {
+  return StaffNameEditIntent.findOneAndUpdate(
+    { actor_id: actorId, chat_id: chatId, thread_id: threadId, version, status: 'input', expires_at: { $gt: new Date() } },
+    { $set: { draft_name: name, status: 'preview' }, $inc: { version: 1 } }, { new: true },
+  );
+}
+
+export async function reviseStaffNameEdit(actorId: string, chatId: string, threadId: number | null, version: number) {
+  return StaffNameEditIntent.findOneAndUpdate(
+    { actor_id: actorId, chat_id: chatId, thread_id: threadId, version, status: 'preview', expires_at: { $gt: new Date() } },
+    { $set: { status: 'input' }, $inc: { version: 1 } }, { new: true },
+  );
+}
+
+export async function cancelStaffNameEdit(actorId: string, chatId: string, threadId: number | null, version?: number) {
+  const query: Record<string, unknown> = { actor_id: actorId, chat_id: chatId, thread_id: threadId,
+    status: { $in: ['input', 'preview'] } };
+  if (version !== undefined) query.version = version;
+  return StaffNameEditIntent.findOneAndUpdate(query, { $set: { status: 'cancelled' }, $inc: { version: 1 } }, { new: true });
+}
+
+/** Atomically consumes one preview; the durable override is written before completion. */
+export async function saveStaffNameEdit(actorId: string, chatId: string, threadId: number | null, version: number) {
+  const claimed = await StaffNameEditIntent.findOneAndUpdate(
+    { actor_id: actorId, chat_id: chatId, thread_id: threadId, version, status: 'preview', expires_at: { $gt: new Date() } },
+    { $set: { status: 'saving' }, $inc: { version: 1 } }, { new: true },
+  );
+  if (!claimed?.draft_name) return null;
+  await StaffDisplayNameOverride.findOneAndUpdate(
+    { telegram_id: claimed.target_id },
+    { $set: { display_name: claimed.draft_name, updated_by: actorId } },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  );
+  claimed.status = 'saved';
+  await claimed.save();
+  return { telegram_id: claimed.target_id, display_name: claimed.draft_name };
+}
+
+export async function listTicketsAssignedTo(telegramId: string): Promise<number[]> {
+  const rows = await Supportee.find({ assigned_to: telegramId, staff_card_message_id: { $ne: null } }).select('ticketId').lean<Array<{ticketId:number}>>();
+  return rows.map((row) => row.ticketId);
+}
+
 // --- Export models for use in other modules ---
 
-export { TicketMessage, AnalyticsEvent, WebhookCursor, InternalNote, TicketCounter, UserBan, ManualIntakeDraft };
+export { TicketMessage, AnalyticsEvent, WebhookCursor, InternalNote, TicketCounter, UserBan, ManualIntakeDraft,
+  StaffDisplayNameOverride, StaffNameEditIntent };

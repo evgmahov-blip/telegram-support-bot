@@ -16,6 +16,7 @@ const cache: Cache = {
   io: {} as SocketTo,
   config: {} as Config,
   staffMembers: new Map(),
+  staffNameOverrides: new Map(),
   mutedTickets: new Set(),
   recoveryBaseline: 0,
 };

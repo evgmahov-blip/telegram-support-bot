@@ -102,7 +102,7 @@ async function main(logs = true) {
   }
 
   // Initialize staff member cache from config
-  team.initStaffCache();
+  await team.initStaffCache();
 
   // Create and store all enabled addons.
   const addons = createAddons();

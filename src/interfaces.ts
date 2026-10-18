@@ -348,6 +348,7 @@ export interface Cache {
   config: Config;
   // Team collaboration cache
   staffMembers: Map<string, StaffMemberConfig>;
+  staffNameOverrides?: Map<string, string>;
   mutedTickets: Set<string>;
   // Recovery baseline — highest ticket ID discovered from chat history on startup
   recoveryBaseline: number;
@@ -494,4 +495,3 @@ export enum Messenger {
   /** Staff-recorded external ticket; never a delivery transport (see manual-ticket-guard). */
   MANUAL = 'manual',
 }
-

@@ -10,6 +10,7 @@ import { Context } from './interfaces';
 import { ISupportee } from './db';
 import * as ticketAudit from './ticket-audit';
 import * as manualIntake from './manual-intake';
+import * as staffNameEditor from './staff-name-editor';
 import { staffDisplayName } from './staff-names';
 import { isManualTicket, MANUAL_SOURCE_LABELS } from './manual-ticket-guard';
 import { randomUUID } from 'crypto';
@@ -176,11 +177,13 @@ export async function showUserHome(ctx: Context) {
 }
 
 export async function showStaffHome(ctx: Context) {
-  await answer(ctx, '<b>Панель поддержки</b>', [
+  const rows: Button[][] = [
     [{ text: '🆕 Новые', callback_data: 'tm:new:0' }, { text: '🙋 Мои заявки', callback_data: 'tm:mine:0' }],
     [{ text: '📂 Все активные', callback_data: 'tm:active:0' }, { text: '✅ Закрытые', callback_data: 'tm:closed:0' }],
     [{ text: '📝 Создать заявку вручную', callback_data: 'tm:manual:0' }],
-  ]);
+  ];
+  if (team.canPerformAction(ctx.from.id.toString(), 'manage_team')) rows.push([{ text: '👥 Инженеры', callback_data: 'sn:list:0' }]);
+  await answer(ctx, '<b>Панель поддержки</b>', rows);
 }
 
 async function staffList(ctx: Context, view: 'new'|'mine'|'active'|'closed', page: number) {
@@ -294,10 +297,11 @@ export async function handleCallback(ctx: Context): Promise<boolean> {
   if (p[0] === 'tm') {
     if (!staffSurface(ctx)) { await ctx.answerCbQuery('Недоступно вне рабочей группы/темы.', true); return true; }
     if (p[1] === 'manual') return await manualIntake.startDraft(ctx);
-    if (p[1] === 'home') { await manualIntake.cancelActiveForHome(ctx); await showStaffHome(ctx); }
+    if (p[1] === 'home') { await Promise.all([manualIntake.cancelActiveForHome(ctx), staffNameEditor.cancelForHome(ctx)]); await showStaffHome(ctx); }
     else await staffList(ctx, p[1] as never, Number(p[2]) || 0);
     await ctx.answerCbQuery(); return true;
   }
+  if (p[0] === 'sn') return staffNameEditor.handleCallback(ctx, p);
   if (p[0] === 'mi') {
     if (!staffSurface(ctx)) { await ctx.answerCbQuery('Недоступно вне рабочей группы/темы.', true); return true; }
     return await manualIntake.handleDraftCallback(ctx, p);
@@ -386,6 +390,9 @@ export async function handleCallback(ctx: Context): Promise<boolean> {
         await ctx.answerCbQuery(`У вас уже ожидается текст для #T${active.ticketId}. Сначала отправьте или отмените его.`, true);
         return true;
       }
+    }
+    if (typeof db.findStaffNameEdit === 'function' && await db.findStaffNameEdit(actor, chatId, threadId)) {
+      await ctx.answerCbQuery('Сначала сохраните или отмените изменение имени.', true); return true;
     }
     const mention = `<a href="tg://user?id=${e(actor)}">${e(staffDisplayName(actor))}</a>`;
     const manual = isManualTicket(ticket);
