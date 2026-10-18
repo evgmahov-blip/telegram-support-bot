@@ -16,8 +16,14 @@ type BotContext = GrammyContext & SessionFlavor<SessionData>;
 export function bindTelegramCompatibility(ctx: BotContext): Context {
   const typedCtx = ctx as unknown as Context;
   typedCtx.messenger = Messenger.TELEGRAM;
-  typedCtx.answerCbQuery = (text?: string, showAlert = false) =>
-    ctx.answerCallbackQuery({ text, show_alert: showAlert }).then(() => undefined);
+  typedCtx.answerCbQuery = async (text?: string, showAlert = false) => {
+    const started = Date.now();
+    try { await ctx.answerCallbackQuery({ text, show_alert: showAlert }); }
+    finally {
+      const duration = Date.now() - started;
+      if (duration >= 1000) log.info(`Slow Telegram API wait method=answerCallbackQuery duration_ms=${duration} stage=callback_ack`);
+    }
+  };
   return typedCtx;
 }
 
@@ -27,6 +33,15 @@ class TelegramAddon implements Addon {
 
   private static instance: TelegramAddon | null = null;
   private started = false;
+
+  private async timedApi<T>(method: string, stage: string, operation: () => Promise<T>): Promise<T> {
+    const started = Date.now();
+    try { return await operation(); }
+    finally {
+      const duration = Date.now() - started;
+      if (duration >= 1000) log.info(`Slow Telegram API wait method=${method} duration_ms=${duration} stage=${stage}`);
+    }
+  }
 
   private constructor(token: string) {
     this.bot = new Bot<BotContext>(token);
@@ -104,7 +119,7 @@ class TelegramAddon implements Addon {
     }
     let response;
     try {
-      response = await this.bot.api.sendMessage(chatId.toString(), text, options);
+      response = await this.timedApi('sendMessage', 'delivery', () => this.bot.api.sendMessage(chatId.toString(), text, options));
     } catch (err) {
       const telegramError = err as { error_code?: number; description?: string };
       const isEntityParseError = telegramError.error_code === 400
@@ -115,7 +130,7 @@ class TelegramAddon implements Addon {
       const plainOptions = { ...options };
       delete plainOptions.parse_mode;
       delete plainOptions.entities;
-      response = await this.bot.api.sendMessage(chatId.toString(), text, plainOptions);
+      response = await this.timedApi('sendMessage', 'plain_retry', () => this.bot.api.sendMessage(chatId.toString(), text, plainOptions));
     }
     return response.message_id.toString();
   }
@@ -124,7 +139,7 @@ class TelegramAddon implements Addon {
     const validModes = ['HTML', 'MarkdownV2'];
     if (!validModes.includes(options.parse_mode as string)) delete options.parse_mode;
     try {
-      await this.bot.api.editMessageText(chatId, messageId, text, { ...options, disable_web_page_preview: true } as never);
+      await this.timedApi('editMessageText', 'render', () => this.bot.api.editMessageText(chatId, messageId, text, { ...options, disable_web_page_preview: true } as never));
     } catch (err) {
       const description = String((err as { description?: string }).description || err);
       if (!/message is not modified/i.test(description)) throw err;

@@ -49,6 +49,26 @@ describe('staff display-name editor', () => {
     expect(agent.answerCbQuery).toHaveBeenCalledWith(expect.stringContaining('администратору'), true);
   });
 
+  it('omits singleton pagination and shows page text only with real destinations', async () => {
+    const original = [...cache.staffMembers.entries()];
+    try {
+      cache.staffMembers = new Map([original[0]]) as any;
+      await showList(context(), 0);
+      expect(JSON.stringify(answer.mock.calls.at(-1)?.[2])).not.toContain('callback_data":"noop');
+      expect(answer.mock.calls.at(-1)?.[1]).not.toContain('Страница');
+      cache.staffMembers = new Map(Array.from({ length: 7 }, (_, i) => [String(i + 1),
+        { telegram_id: String(i + 1), role: i ? 'agent' : 'admin', name: `N${i}` }])) as any;
+      await showList(context(), 0);
+      const first = JSON.stringify(answer.mock.calls.at(-1)?.[2]);
+      expect(first).not.toContain('callback_data":"noop'); expect(first).toContain('sn:list:1'); expect(first).not.toContain('sn:list:-1');
+      expect(answer.mock.calls.at(-1)?.[1]).toContain('Страница 1');
+      await showList(context(), 1);
+      const second = JSON.stringify(answer.mock.calls.at(-1)?.[2]);
+      expect(second).toContain('sn:list:0'); expect(second).not.toContain('sn:list:2');
+      expect(answer.mock.calls.at(-1)?.[1]).toContain('Страница 2');
+    } finally { cache.staffMembers = new Map(original) as any; }
+  });
+
   it('binds ordinary text to actor/chat/topic, validates it, and escapes preview HTML', async () => {
     findIntent.mockResolvedValue({ actor_id: '1', target_id: '2', version: 4 });
     stage.mockResolvedValue({ target_id: '2', draft_name: '<b>Иван & Co</b>', version: 5 });

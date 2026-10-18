@@ -151,6 +151,15 @@ export function registerCommonHandlers(addon: Addon, keys?: string[][]) {
 
   // Register event handlers for callback queries and file types.
   addon.on('callback_query', async (ctx: Context) => {
+    const callbackStarted = Date.now();
+    const callbackStage = String(ctx.callbackQuery.data || '').split(':').slice(0, 2).join(':') || 'unknown';
+    const answerCallback = ctx.answerCbQuery.bind(ctx);
+    let callbackAnswered = false;
+    ctx.answerCbQuery = async (text?: string, showAlert?: boolean) => {
+      if (callbackAnswered) return;
+      await answerCallback(text, showAlert);
+      callbackAnswered = true;
+    };
     try {
       // Handle CSAT rating callbacks
       if (ctx.callbackQuery.data && ctx.callbackQuery.data.startsWith('csat:')) {
@@ -165,11 +174,18 @@ export function registerCommonHandlers(addon: Addon, keys?: string[][]) {
     } catch (err) {
       log.error('Callback query failed:', err);
       try {
-        await ctx.answerCbQuery('Не удалось выполнить действие. Обновите карточку и повторите.', true);
+        if (callbackAnswered) {
+          await middleware.reply(ctx, 'Не удалось выполнить действие. Обновите карточку и повторите.');
+        } else {
+          await ctx.answerCbQuery('Не удалось выполнить действие. Обновите карточку и повторите.', true);
+        }
       } catch (answerErr) {
         const cause = (answerErr as { error?: unknown }).error || answerErr;
         log.error('Could not answer failed callback query:', cause);
       }
+    } finally {
+      const duration = Date.now() - callbackStarted;
+      if (duration >= 1000) log.info(`Slow callback duration_ms=${duration} stage=${callbackStage}`);
     }
   });
   addon.on([':photo'], (ctx: Context) => files.fileHandler('photo', addon, ctx));

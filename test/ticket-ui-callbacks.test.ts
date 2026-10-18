@@ -27,14 +27,14 @@ jest.mock('../src/cache', () => ({ __esModule: true, default: { config: {
 }, staffMembers: new Map([['42',{ telegram_id:'42', name:'Иван', role:'agent' }],
   ['43',{ telegram_id:'43', name:'Пётр', role:'agent' }]]) } }));
 
-import { cardText, handleCallback, refreshStaffCard } from '../src/ticket-ui';
+import { cardText, handleCallback, refreshStaffCard, resetRenderStateForTests } from '../src/ticket-ui';
 import { Context, Messenger } from '../src/interfaces';
 
 const ticket: any = { ticketId: 7, userid: 'client', messenger: 'telegram', status: 'open', assigned_to: '42',
   category: null, priority: 'normal', staff_card_chat_id: '-100', staff_card_message_id: 55, staff_card_thread_id: 7 };
 
 describe('concise Russian card rendering', () => {
-  beforeEach(() => { jest.clearAllMocks(); latest.mockResolvedValue({ text: 'Точный текст клиента' }); });
+  beforeEach(() => { jest.clearAllMocks(); resetRenderStateForTests(); latest.mockResolvedValue({ text: 'Точный текст клиента' }); });
 
   it('shows client and useful state while omitting routine clutter', async () => {
     const rendered = await cardText({ ...ticket, name: 'Женя', created_at: new Date(), updated_at: new Date() });
@@ -60,7 +60,7 @@ function ctx(data: string, chat=-100, thread=7, messageId=55, actor=42): Context
 }
 
 describe('raw ticket card callbacks', () => {
-  beforeEach(() => { jest.clearAllMocks(); getTicket.mockResolvedValue(ticket); getTicketByInternalId.mockResolvedValue(null); });
+  beforeEach(() => { jest.clearAllMocks(); resetRenderStateForTests(); getTicket.mockResolvedValue(ticket); getTicketByInternalId.mockResolvedValue(null); });
   it('rejects staff actions in the wrong group or topic', async () => {
     await handleCallback(ctx('tc:take:7', -999)); await handleCallback(ctx('tc:take:7', -100, 8));
     expect(answer).toHaveBeenCalledTimes(2); expect(close).not.toHaveBeenCalled();
@@ -147,7 +147,45 @@ describe('raw ticket card callbacks', () => {
     expect(db.listStaffTickets).toHaveBeenCalledWith('active', '42', 0, 7, 6);
     const markup = edit.mock.calls.at(-1)?.[3]?.reply_markup;
     expect(JSON.stringify(markup)).not.toContain('tm:active:1');
+    expect(JSON.stringify(markup)).not.toContain('callback_data":"noop');
     expect(reply).not.toHaveBeenCalled();
+  });
+
+  it('acknowledges list navigation before waiting for its database query', async () => {
+    const db = jest.requireMock('../src/db');
+    let release!: (tickets: any[]) => void;
+    db.listStaffTickets.mockReturnValueOnce(new Promise(resolve => { release = resolve; }));
+    const pending = handleCallback(ctx('tm:active:0'));
+    await Promise.resolve();
+    expect(answer).toHaveBeenCalledWith();
+    expect(edit).not.toHaveBeenCalled();
+    release([]); await pending;
+  });
+
+  it('explains historical page-number callbacks instead of silently acknowledging them', async () => {
+    await handleCallback(ctx('noop'));
+    expect(answer).toHaveBeenCalledWith(expect.stringContaining('номер страницы'), true);
+  });
+
+  it('deduplicates only unchanged successful renders', async () => {
+    const c = ctx('tm:active:0', -100, 7, 900);
+    const render = require('../src/ticket-ui').answer;
+    await render(c, 'same', [[{ text: 'A', callback_data: 'a' }]]);
+    await render(c, 'same', [[{ text: 'A', callback_data: 'a' }]]);
+    expect(edit).toHaveBeenCalledTimes(1);
+    await render(c, 'changed', [[{ text: 'A', callback_data: 'a' }]]);
+    await render(c, 'changed', [[{ text: 'B', callback_data: 'b' }]]);
+    expect(edit).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not cache a failed edit', async () => {
+    const c = ctx('tm:active:0', -100, 7, 900);
+    edit.mockRejectedValueOnce(new Error('temporary')).mockResolvedValue(undefined);
+    const render = require('../src/ticket-ui').answer;
+    await render(c, 'screen', []);
+    resetRenderStateForTests();
+    await render(c, 'screen', []);
+    expect(edit).toHaveBeenCalledTimes(2);
   });
 
   it('traverses staff pagination forward and back with stable six-item offsets', async () => {
@@ -179,7 +217,7 @@ describe('raw ticket card callbacks', () => {
     db.setPendingTicketAction.mockResolvedValue(ticket);
     await handleCallback(ctx('tc:closeask:7'));
     expect(edit).not.toHaveBeenCalledWith(-100, 55, expect.stringContaining('Закрыть заявку'), expect.anything());
-    expect(reply).toHaveBeenCalledWith(expect.anything(), expect.stringContaining('Закрыть заявку'), expect.anything());
+    expect(send).toHaveBeenCalledWith(-100, 'telegram', expect.stringContaining('Закрыть заявку'), expect.anything());
   });
 
   it('neutralizes a sent card candidate when durable binding loses the race', async () => {
@@ -227,7 +265,7 @@ describe('Home navigation on every ticket screen', () => {
     return hit[1].reply_markup.inline_keyboard as { text: string; callback_data?: string }[][];
   };
   const data = (rows: { callback_data?: string }[][]) => rows.flat().map(b => b.callback_data);
-  beforeEach(() => { jest.clearAllMocks(); getTicket.mockResolvedValue(ticket); getTicketByInternalId.mockResolvedValue(null); });
+  beforeEach(() => { jest.clearAllMocks(); resetRenderStateForTests(); getTicket.mockResolvedValue(ticket); getTicketByInternalId.mockResolvedValue(null); });
 
   it('puts private Home on new-request instructions, help and an empty list without empty rows', async () => {
     await handleCallback(userCtx('um:new:0'));
@@ -289,8 +327,8 @@ describe('Home navigation on every ticket screen', () => {
   it('opens Home from the canonical card as a new panel without overwriting the card', async () => {
     getTicketByInternalId.mockResolvedValue(ticket);
     await handleCallback(ctx('tm:home:0'));
-    expect(edit).not.toHaveBeenCalled();
-    expect(reply).toHaveBeenCalledWith(expect.anything(), expect.stringContaining('Панель поддержки'), expect.anything());
+    expect(edit).not.toHaveBeenCalledWith(-100, 55, expect.anything(), expect.anything());
+    expect(send).toHaveBeenCalledWith(-100, 'telegram', expect.stringContaining('Панель поддержки'), expect.anything());
   });
 
   it('keeps role/chat/topic checks on Home', async () => {
@@ -308,7 +346,7 @@ describe('staff «Вернуть в работу» on a closed canonical card', 
   const db = jest.requireMock('../src/db');
   const state = jest.requireMock('../src/ticket-state');
   const closed = { ...ticket, status: 'closed', closed_at: new Date('2026-10-01T00:00:00Z') };
-  beforeEach(() => { jest.clearAllMocks(); getTicket.mockResolvedValue(closed); getTicketByInternalId.mockResolvedValue(null); });
+  beforeEach(() => { jest.clearAllMocks(); resetRenderStateForTests(); getTicket.mockResolvedValue(closed); getTicketByInternalId.mockResolvedValue(null); });
 
   it('renders the reopen button and a Back to closed list on the canonical card', async () => {
     await refreshStaffCard(7);
@@ -379,7 +417,7 @@ it('keeps a canonical-card fallback answer in its originating topic', async () =
     getTicketByInternalId.mockResolvedValueOnce({ staff_card_message_id: 55, staff_card_chat_id: '-100', staff_card_thread_id: 9 });
     const c = ctx('tm:home:0', -100, 9);
     await require('../src/ticket-ui').answer(c, 'Меню', []);
-    expect(reply).toHaveBeenLastCalledWith(c, 'Меню',
+    expect(send).toHaveBeenLastCalledWith(-100, 'telegram', 'Меню',
       expect.objectContaining({ message_thread_id: 9 }));
   } finally { cache.config.staffchat_thread_id = previous; }
 });

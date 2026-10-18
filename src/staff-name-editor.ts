@@ -32,13 +32,14 @@ export async function showList(ctx: Context, page = 0): Promise<boolean> {
   const names = labels(members); const start = Math.max(0, page) * PAGE; const visible = members.slice(start, start + PAGE);
   const nav: ticketUi.Button[] = [];
   if (page > 0) nav.push({ text: '◀️', callback_data: `sn:list:${page - 1}` });
-  nav.push({ text: `${page + 1}`, callback_data: 'noop' });
   if (start + PAGE < members.length) nav.push({ text: '▶️', callback_data: `sn:list:${page + 1}` });
-  await ticketUi.answer(ctx, '<b>Инженеры</b>\nВыберите сотрудника:', [
+  await ctx.answerCbQuery();
+  const pageText = page > 0 || start + PAGE < members.length ? `\nСтраница ${page + 1}` : '';
+  await ticketUi.answer(ctx, `<b>Инженеры</b>\nВыберите сотрудника:${pageText}`, [
     ...visible.map((member) => [{ text: names.get(member.telegram_id)!, callback_data: `sn:pick:${member.telegram_id}:${page}` }]),
     ...(nav.length ? [nav] : []), [ticketUi.STAFF_HOME],
   ]);
-  await ctx.answerCbQuery(); return true;
+  return true;
 }
 
 async function showMember(ctx: Context, targetId: string, page: number) {
@@ -62,7 +63,7 @@ export async function handleCallback(ctx: Context, p: string[]): Promise<boolean
   if (action === 'list') return showList(ctx, Number(p[2]) || 0);
   if (action === 'pick') {
     if (!cache.staffMembers.has(p[2])) { await ctx.answerCbQuery('Сотрудник больше не зарегистрирован.', true); return true; }
-    await showMember(ctx, p[2], Number(p[3]) || 0); await ctx.answerCbQuery(); return true;
+    await ctx.answerCbQuery(); await showMember(ctx, p[2], Number(p[3]) || 0); return true;
   }
   if (action === 'edit') {
     if (!cache.staffMembers.has(p[2])) { await ctx.answerCbQuery('Сотрудник больше не зарегистрирован.', true); return true; }
