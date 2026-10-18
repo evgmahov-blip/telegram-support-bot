@@ -185,7 +185,7 @@ function staffSurface(ctx: Context): boolean {
   return !cache.config.staffchat_thread_id || q.message_thread_id === cache.config.staffchat_thread_id;
 }
 
-export async function answer(ctx: Context, text: string, rows: Button[][]) {
+export async function answer(ctx: Context, text: string, rows: Button[][], visibleFlow = false) {
   const q = ctx.callbackQuery?.message;
   if (q) {
     try {
@@ -198,7 +198,7 @@ export async function answer(ctx: Context, text: string, rows: Button[][]) {
         boundedSet(navigationPanels, panelKey(ctx), q.message_id);
         return;
       }
-      const existingPanel = navigationPanels.get(panelKey(ctx));
+      const existingPanel = visibleFlow ? undefined : navigationPanels.get(panelKey(ctx));
       if (existingPanel) {
         try { await editRendered(q.chat.id, existingPanel, text, rows); return; }
         catch (err) {
@@ -232,14 +232,21 @@ export async function showUserHome(ctx: Context) {
   ]);
 }
 
-export async function showStaffHome(ctx: Context) {
+export async function showStaffHome(ctx: Context, visibleFlow = false) {
   const rows: Button[][] = [
     [{ text: '🆕 Новые', callback_data: 'tm:new:0' }, { text: '🙋 Мои заявки', callback_data: 'tm:mine:0' }],
     [{ text: '📂 Все активные', callback_data: 'tm:active:0' }, { text: '✅ Закрытые', callback_data: 'tm:closed:0' }],
     [{ text: '📝 Создать заявку вручную', callback_data: 'tm:manual:0' }],
   ];
   if (team.canPerformAction(ctx.from.id.toString(), 'manage_team')) rows.push([{ text: '👥 Инженеры', callback_data: 'sn:list:0' }]);
-  await answer(ctx, '<b>Панель поддержки</b>', rows);
+  await answer(ctx, '<b>Панель поддержки</b>', rows, visibleFlow);
+}
+
+async function renderTicketOnClickedCard(ctx: Context, ticket: ISupportee, outcome?: string) {
+  const q = ctx.callbackQuery.message!;
+  const text = await cardText(ticket) + (outcome ? `\n\n${e(outcome)}` : '');
+  await editRendered(q.chat.id, q.message_id, text,
+    (staffButtons(ticket).inline_keyboard as Button[][]));
 }
 
 async function staffList(ctx: Context, view: 'new'|'mine'|'active'|'closed', page: number) {
@@ -375,7 +382,7 @@ export async function handleCallback(ctx: Context): Promise<boolean> {
   const qmsg = ctx.callbackQuery.message;
   const canonicalBinding = ticket.staff_card_message_id === qmsg?.message_id && String(ticket.staff_card_chat_id) === String(qmsg?.chat.id)
     && (ticket.staff_card_thread_id || null) === (qmsg?.message_thread_id || null);
-  if (!['open','h','xfer','close','cancel'].includes(action) && !canonicalBinding) {
+  if (!['open','h','xfer','close','closecancel','closehome','cancel'].includes(action) && !canonicalBinding) {
     await refreshStaffCard(id); await ctx.answerCbQuery('Кнопка устарела. Откройте актуальную карточку.', true); return true;
   }
   if (action === 'open') {
@@ -407,14 +414,48 @@ export async function handleCallback(ctx: Context): Promise<boolean> {
   } else if (action === 'closeask') {
     if (!team.canManageTicket(actor, ticket.assigned_to) || ticket.status === 'closed') { await ctx.answerCbQuery('Нет прав или заявка уже закрыта.', true); return true; }
     const token = randomUUID().replace(/-/g,'').slice(0,12);
-    await db.setPendingTicketAction(id, 'close', token, actor, new Date(Date.now()+PROMPT_MS));
-    await answer(ctx, `Закрыть заявку № ${id}?`, [[{text:'Да, закрыть',callback_data:`tc:close:${id}:${token}`},{text:'Отмена',callback_data:`tc:open:${id}`}], [STAFF_HOME]]); await ctx.answerCbQuery(); return true;
+    const pending = await db.setPendingTicketAction(id, 'close', token, actor, new Date(Date.now()+PROMPT_MS));
+    if (!pending) { await ctx.answerCbQuery('Состояние изменилось. Карточка обновлена.', true); await refreshStaffCard(id); return true; }
+    try {
+      await editRendered(qmsg!.chat.id, qmsg!.message_id,
+        `${await cardText(ticket)}\n\n<b>Закрыть заявку № ${id}?</b>`, [
+          [{text:'Да, закрыть',callback_data:`tc:close:${id}:${token}`},{text:'Отмена',callback_data:`tc:closecancel:${id}:${token}`}],
+          [{text:'🏠 Главная',callback_data:`tc:closehome:${id}:${token}`}],
+        ]);
+    } catch (err) {
+      await db.clearPendingTicketAction(id, 'close', token, actor).catch(log.error);
+      throw err;
+    }
+    await ctx.answerCbQuery(); return true;
+  } else if (action === 'closecancel' || action === 'closehome') {
+    if (!await db.clearPendingTicketAction(id, 'close', p[3], actor)) {
+      await ctx.answerCbQuery('Подтверждение устарело.', true); return true;
+    }
+    const current = await db.getTicketById(id, null) || ticket;
+    await renderTicketOnClickedCard(ctx, current);
+    await ctx.answerCbQuery(action === 'closecancel' ? 'Закрытие отменено.' : undefined);
+    if (action === 'closehome') await showStaffHome(ctx, true);
+    return true;
   } else if (action === 'close' && team.canManageTicket(actor, ticket.assigned_to)) {
     if (!await db.consumePendingTicketAction(id, 'close', p[3], actor)) { await ctx.answerCbQuery('Подтверждение устарело.', true); return true; }
-    const result = await ticketState.closeTicketLifecycle(ticket, actor, team.getStaffRole(actor)==='agent'?actor:undefined);
-    if (result.outcome !== 'closed') { await refreshStaffCard(id); await ctx.answerCbQuery(result.outcome === 'already_closed' ? 'Заявка уже закрыта.' : 'Владелец или состояние изменились.', true); return true; }
+    let result;
+    try {
+      result = await ticketState.closeTicketLifecycle(ticket, actor, team.getStaffRole(actor)==='agent'?actor:undefined);
+    } catch (err) {
+      log.error(`Не удалось закрыть заявку #T${id}:`, err);
+      const current = await db.getTicketById(id, null) || ticket;
+      await renderTicketOnClickedCard(ctx, current, 'Не удалось закрыть заявку. Попробуйте ещё раз.');
+      await ctx.answerCbQuery('Не удалось закрыть заявку.', true); return true;
+    }
+    if (result.outcome !== 'closed') {
+      const current = await db.getTicketById(id, null) || result.ticket || ticket;
+      await renderTicketOnClickedCard(ctx, current);
+      await ctx.answerCbQuery(result.outcome === 'already_closed' ? 'Заявка уже закрыта.' : 'Владелец или состояние изменились.', true); return true;
+    }
+    await renderTicketOnClickedCard(ctx, result.ticket!, 'Заявка закрыта.');
     if (result.notificationFailed) await middleware.reply(ctx, 'Заявка закрыта, но уведомление клиенту не доставлено.');
     if (isManualTicket(ticket)) await middleware.reply(ctx, `Ручная заявка #T${id} закрыта. Клиент не уведомлялся: канала доставки нет.`);
+    await ctx.answerCbQuery('Готово.'); return true;
   }
   else if (action === 'reopen' && team.canPerformAction(actor, 'reply') && team.canManageTicket(actor, ticket.assigned_to)) {
     const changed = await ticketState.transitionTicketStateFrom(id, 'closed', 'open', team.getStaffRole(actor)==='agent'?actor:undefined);

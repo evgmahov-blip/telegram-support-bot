@@ -700,6 +700,14 @@ export async function consumePendingTicketAction(ticketId: number, type: string,
   } }, { new: false });
 }
 
+/** Retire exactly one actor-bound intent without clearing a newer replacement. */
+export async function clearPendingTicketAction(ticketId: number, type: string, token: string, actorId: string) {
+  return await Supportee.findOneAndUpdate({ ticketId, pending_action_type: type, pending_action_token: token,
+    pending_action_actor_id: actorId }, { $set: {
+    pending_action_type: null, pending_action_token: null, pending_action_actor_id: null, pending_action_expires_at: null,
+  } }, { new: false });
+}
+
 export async function clearReplyPrompt(ticketId: number, staffId?: string, version?: number) {
   const query: Record<string, unknown> = { ticketId };
   if (staffId) query.pending_reply_staff_id = staffId;

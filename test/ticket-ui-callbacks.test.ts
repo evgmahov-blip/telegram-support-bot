@@ -16,7 +16,7 @@ jest.mock('../src/db', () => ({
   getTicketTimelinePage: timeline,
   getInternalNotes: jest.fn().mockResolvedValue([]), setReplyPrompt: jest.fn(), clearReplyPrompt: jest.fn(),
   claimStaffCard: jest.fn(), releaseStaffCardClaim: jest.fn(), bindStaffCard: jest.fn(), clearStaffCardBinding: jest.fn(),
-  setPendingTicketAction: jest.fn(), consumePendingTicketAction: jest.fn(), recordAnalyticsEventBestEffort: jest.fn(),
+  setPendingTicketAction: jest.fn(), consumePendingTicketAction: jest.fn(), clearPendingTicketAction: jest.fn(), recordAnalyticsEventBestEffort: jest.fn(),
 }));
 jest.mock('../src/ticket-audit', () => ({ getTicketAuditHistory: jest.fn().mockResolvedValue([]) }));
 jest.mock('../src/ticket-state', () => ({ transitionTicketStateFrom: jest.fn(), closeTicketLifecycle: close }));
@@ -91,6 +91,35 @@ describe('raw ticket card callbacks', () => {
     close.mockResolvedValue({ outcome: 'stale', ticket: { ...ticket, assigned_to: '99' } });
     await handleCallback(ctx('tc:close:7:token', -100, 7, 99, 42));
     expect(answer).toHaveBeenCalledWith('Владелец или состояние изменились.', true);
+  });
+  it('cancels only the matching actor-bound intent and invalidates the confirmation render cache', async () => {
+    const db = jest.requireMock('../src/db');
+    db.setPendingTicketAction.mockResolvedValue(ticket); db.clearPendingTicketAction.mockResolvedValue(ticket);
+    await handleCallback(ctx('tc:closeask:7', -100, 7, 55, 42));
+    const buttons = edit.mock.calls.at(-1)?.[3].reply_markup.inline_keyboard.flat();
+    const cancelData = buttons.find((button: any) => button.text === 'Отмена').callback_data;
+    const token = cancelData.split(':')[3];
+    await handleCallback(ctx(cancelData, -100, 7, 55, 42));
+    expect(db.clearPendingTicketAction).toHaveBeenCalledWith(7, 'close', token, '42');
+    expect(edit).toHaveBeenCalledTimes(2);
+    expect(edit.mock.calls[1][0]).toBe(-100); expect(edit.mock.calls[1][1]).toBe(55);
+    expect(edit.mock.calls[1][2]).toContain('Заявка #7'); expect(edit.mock.calls[1][2]).not.toContain('Закрыть заявку №');
+    expect(send).not.toHaveBeenCalled();
+  });
+  it.each([
+    ['replayed', '42'], ['cross-actor', '43'],
+  ])('rejects a %s close cancellation without redrawing or clearing another intent', async (_label, actorId) => {
+    const db = jest.requireMock('../src/db'); db.clearPendingTicketAction.mockResolvedValue(null);
+    await handleCallback(ctx('tc:closecancel:7:old', -100, 7, 55, Number(actorId)));
+    expect(answer).toHaveBeenCalledWith('Подтверждение устарело.', true);
+    expect(edit).not.toHaveBeenCalled();
+  });
+  it('restores the exact clicked card when closing fails', async () => {
+    const db = jest.requireMock('../src/db'); db.consumePendingTicketAction.mockResolvedValue(ticket);
+    close.mockRejectedValueOnce(new Error('temporary'));
+    await handleCallback(ctx('tc:close:7:token', -100, 7, 55, 42));
+    expect(edit).toHaveBeenCalledWith(-100, 55, expect.stringContaining('Не удалось закрыть заявку'), expect.anything());
+    expect(send).not.toHaveBeenCalled();
   });
   it('rejects a transfer target that is not current staff', async () => {
     await handleCallback(ctx('tc:xfer:7:evil:token', -100, 7, 99, 42));
@@ -211,13 +240,14 @@ describe('raw ticket card callbacks', () => {
     expect(second).toContain('tc:h:7:0'); expect(second).not.toContain('tc:h:7:2');
   });
 
-  it('never overwrites a bound canonical card with transient navigation', async () => {
+  it('renders close confirmation in place on the exact canonical card', async () => {
     const db = jest.requireMock('../src/db');
     getTicketByInternalId.mockResolvedValue(ticket);
     db.setPendingTicketAction.mockResolvedValue(ticket);
     await handleCallback(ctx('tc:closeask:7'));
-    expect(edit).not.toHaveBeenCalledWith(-100, 55, expect.stringContaining('Закрыть заявку'), expect.anything());
-    expect(send).toHaveBeenCalledWith(-100, 'telegram', expect.stringContaining('Закрыть заявку'), expect.anything());
+    expect(edit).toHaveBeenCalledWith(-100, 55, expect.stringContaining('Закрыть заявку № 7?'), expect.anything());
+    expect(edit.mock.calls.at(-1)?.[2]).toContain('Точный текст клиента');
+    expect(send).not.toHaveBeenCalled();
   });
 
   it('neutralizes a sent card candidate when durable binding loses the race', async () => {
@@ -290,7 +320,9 @@ describe('Home navigation on every ticket screen', () => {
   it('puts staff Home on close confirmation, transfer picker and the reply/note waiting panel', async () => {
     db.setPendingTicketAction.mockResolvedValue(ticket); db.setReplyPrompt.mockResolvedValue(ticket);
     await handleCallback(ctx('tc:closeask:7'));
-    expect(data(rowsOf('Закрыть заявку'))).toEqual(expect.arrayContaining(['tc:open:7', 'tm:home:0']));
+    expect(data(rowsOf('Закрыть заявку'))).toEqual(expect.arrayContaining([
+      expect.stringMatching(/^tc:close:7:/), expect.stringMatching(/^tc:closecancel:7:/), expect.stringMatching(/^tc:closehome:7:/),
+    ]));
     await handleCallback(ctx('tc:transfer:7'));
     expect(data(rowsOf('Кому передать'))).toEqual(expect.arrayContaining(['tc:open:7', 'tm:home:0']));
     await handleCallback(ctx('tc:note:7'));
@@ -303,7 +335,7 @@ describe('Home navigation on every ticket screen', () => {
     db.consumePendingTicketAction.mockResolvedValue(ticket);
     close.mockResolvedValue({ outcome: 'closed', ticket: { ...ticket, status: 'closed' } });
     await handleCallback(ctx('tc:close:7:token', -100, 7, 900));
-    expect(data(rowsOf('Заявка закрыта: № 7'))).toEqual(['tc:open:7', 'tm:home:0']);
+    expect(data(rowsOf('Заявка закрыта.'))).toEqual(expect.arrayContaining(['tc:reopen:7', 'tm:home:0']));
     jest.requireMock('../src/ticket-ownership').transferTicket.mockResolvedValueOnce(ticket);
     await handleCallback(ctx('tc:xfer:7:43:token', -100, 7, 901));
     expect(data(rowsOf('Заявка передана: № 7'))).toEqual(['tc:open:7', 'tm:home:0']);
