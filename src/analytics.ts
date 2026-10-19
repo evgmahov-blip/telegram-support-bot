@@ -184,7 +184,6 @@ export async function getAgentStats(startDate?: Date, endDate?: Date): Promise<A
  */
 export async function generateDailySummary(): Promise<string> {
     const now = new Date();
-    const yesterday = new Date(now.getTime() - 86400000);
     const weekAgo = new Date(now.getTime() - 7 * 86400000);
 
     const todayCount = await getTicketCount(new Date(now.toDateString()), now);
@@ -193,18 +192,22 @@ export async function generateDailySummary(): Promise<string> {
     const avgResolutionTime = await getAverageResolutionTime(weekAgo, now);
     const avgCSAT = await getAverageCSAT(weekAgo, now);
 
-    let summary = `📊 *Daily Support Summary*\n\n`;
-    summary += `📋 Tickets today: ${todayCount}\n`;
-    summary += `📈 Tickets this week: ${weekCount}\n`;
+    let summary = `📊 Ежедневная сводка поддержки МОСТ\n\n`;
+    summary += `📋 Обращения сегодня: ${todayCount}\n\n`;
+    summary += `За последние 7 дней:\n`;
+    summary += `📈 Обращения: ${weekCount}\n`;
 
     if (avgResponseTime !== null) {
-        summary += `⏱️ Avg first response: ${avgResponseTime} min\n`;
+        summary += `⏱️ Среднее время первого ответа: ${avgResponseTime} мин\n`;
     }
     if (avgResolutionTime !== null) {
-        summary += `✅ Avg resolution: ${Math.round(avgResolutionTime / 60)}h ${Math.round(avgResolutionTime % 60)}m\n`;
+        const resolutionMinutes = Math.round(avgResolutionTime);
+        const resolutionHours = Math.floor(resolutionMinutes / 60);
+        const remainingMinutes = resolutionMinutes % 60;
+        summary += `✅ Среднее время решения: ${resolutionHours} ч ${remainingMinutes} мин\n`;
     }
     if (avgCSAT !== null) {
-        summary += `⭐ CSAT score: ${avgCSAT}/5.0\n`;
+        summary += `⭐ Удовлетворённость клиентов: ${avgCSAT}/5.0\n`;
     }
 
     return summary;
@@ -220,7 +223,7 @@ export async function sendDailySummary(): Promise<void> {
             cache.config.staffchat_id,
             cache.config.staffchat_type,
             summary,
-            { parse_mode: cache.config.parse_mode },
+            {},
         );
         log.info('Daily summary sent to staff chat.');
     } catch (err) {
