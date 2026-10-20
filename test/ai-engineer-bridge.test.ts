@@ -15,6 +15,7 @@ describe('fixed AI bridge protocol', () => {
     job = ai.createTask(ticket, policy, '1', binding, ai.snapshotInput('PRIVATE_GOAL', 'PRIVATE_HISTORY', 'PRIVATE_FEEDBACK'), now);
     job = ai.acknowledge(job, job.projection_pending!.id);
     d = { policy: () => policy, clock: () => now, findQueued: jest.fn(async () => ({ ...ticket, ai_engineer: job })),
+      findSummarizer: jest.fn(async () => null),
       findClaim: jest.fn(async () => null), bindingAllowed: jest.fn(async () => undefined),
       publishCatalog: jest.fn(), store: {
         read: jest.fn(async () => ({ ...ticket, ai_engineer: job })),
@@ -89,5 +90,134 @@ describe('binding catalog wire contract', () => {
     expect(() => validateCatalog({ ...catalog, token: 'secret' }, policy.scope, now)).toThrow('unexpected_fields');
     expect(() => validateCatalog({ ...catalog, entries: [binding, binding] }, policy.scope, now)).toThrow('binding_duplicate');
     expect(() => validateCatalog({ ...catalog, entries: [{ ...binding, profile_id: 'shell' }] }, policy.scope, now)).toThrow('profile_denied');
+  });
+});
+
+describe('support-conclusion-v1 bridge', () => {
+  let clock: number, liveTicket: any, job: ai.EngineerTask, d: BridgeDependencies;
+  const claim = '10000000-0000-4000-8000-000000000001';
+  const conclusion: ai.Conclusion = { summary: 'Host is reachable',
+    verified_findings: [{ text: 'Reachability was verified', evidence_refs: ['check-1'] }],
+    hypotheses: [], unknowns: ['Application state was not inspected'],
+    recommended_next_steps: ['Inspect the application with an approved workflow'],
+    customer_reply_draft: 'We are continuing the investigation.' };
+  beforeEach(() => {
+    clock = now;
+    job = ai.createTask(ticket, policy, '1', binding,
+      ai.snapshotInput('Check token=super-secret-value and https://private.invalid', '', 'password=hunter2-secret'), clock);
+    job = ai.acknowledge(job, job.projection_pending!.id);
+    job.state = 'summarizing';
+    job.checks = { status: 'partial', facts: [{ ref: 'check-1', check_id: ai.PROFILE, observed_at: clock,
+      values: { reachable: true, uptime_seconds: null } }], unknowns: ['uptime unavailable'],
+    completed_at: clock, execution_allowed: false };
+    liveTicket = { ...ticket, ai_engineer: job };
+    const store: any = {
+      read: jest.fn(async () => liveTicket), repair: jest.fn(async () => null),
+      claimSummarizer: jest.fn(async (_t, _r, c, snapshot) => {
+        job = ai.claim(job, 'summarizer', c, clock, snapshot); liveTicket.ai_engineer = job; return job;
+      }),
+      renewSummarizer: jest.fn(async (_t, _r, c, snapshot) => {
+        job = ai.renewSummarizer(job, c, snapshot, clock); liveTicket.ai_engineer = job; return job;
+      }),
+      publishConclusion: jest.fn(async (_t, _r, c, result) => {
+        if (job.conclusion && job.summarizer_receipt === c && ai.digest(job.conclusion) === ai.digest(result)) return job;
+        job = ai.finishConclusion(job, c, result, clock); liveTicket.ai_engineer = job; return job;
+      }),
+      failConclusion: jest.fn(async (_t, _r, c, code) => {
+        job = ai.failConclusion(job, c, code, clock); liveTicket.ai_engineer = job; return job;
+      }),
+    };
+    d = { policy: () => policy, clock: () => clock, findQueued: jest.fn(async () => null),
+      findSummarizer: jest.fn(async () => liveTicket), findClaim: jest.fn(async id => id === claim ? liveTicket : null),
+      bindingAllowed: jest.fn(async () => undefined), publishCatalog: jest.fn(), store };
+  });
+  const claimRequest = () => ({ ...scope, protocol: ai.CONCLUSION_PROTOCOL, claim_id: claim });
+  const boundRequest = (snapshot: string) => ({ ...scope, protocol: ai.CONCLUSION_PROTOCOL, ticket_id: 42,
+    request_id: job.request_id, claim_id: claim, revision: job.revision, authority_digest: job.authority_digest,
+    policy_fingerprint: job.policy_fingerprint, snapshot_digest: snapshot });
+
+  it('returns only a redacted frozen model projection and a canonical digest', async () => {
+    d.findClaim = jest.fn(async () => null);
+    const result: any = await executeBridge('claim-summarizer', claimRequest(), d);
+    expect(result.status).toBe('claimed'); expect(result.protocol).toBe(ai.CONCLUSION_PROTOCOL);
+    expect(result.input).toEqual(expect.objectContaining({ history: '' }));
+    expect(JSON.stringify(result.input)).not.toMatch(/super-secret-value|hunter2-secret|private\.invalid/);
+    expect(result.checks.facts[0].ref).toBe('check-1');
+    expect(result.snapshot_digest).toBe(ai.digest({ task: result.task, input: result.input, checks: result.checks }));
+    expect(JSON.stringify(result)).not.toMatch(/expected_owner|PRIVATE_HISTORY/);
+  });
+  it('replays the same live claim and heartbeat without consuming an attempt', async () => {
+    d.findClaim = jest.fn(async () => null);
+    const first: any = await executeBridge('claim-summarizer', claimRequest(), d);
+    const attempts = job.attempts, initial = job.summarizer!.until;
+    clock += 10_000; d.findClaim = jest.fn(async () => liveTicket);
+    const duplicate: any = await executeBridge('claim-summarizer', claimRequest(), d);
+    expect(duplicate.snapshot_digest).toBe(first.snapshot_digest);
+    const status: any = await executeBridge('summarizer-status', boundRequest(first.snapshot_digest), d);
+    expect(job.attempts).toBe(attempts); expect(status.eligible).toBe(true);
+    expect(status.lease_until).toBeGreaterThan(initial);
+  });
+  it('does not revive an expired claim', async () => {
+    d.findClaim = jest.fn(async () => null);
+    const first: any = await executeBridge('claim-summarizer', claimRequest(), d);
+    clock = job.summarizer!.until;
+    await expect(executeBridge('summarizer-status', boundRequest(first.snapshot_digest), d)).rejects.toThrow('lease_stale');
+  });
+  it('publishes an exact six-key conclusion idempotently and rejects conflicting replay', async () => {
+    d.findClaim = jest.fn(async () => null);
+    const first: any = await executeBridge('claim-summarizer', claimRequest(), d);
+    const request = { ...boundRequest(first.snapshot_digest), result: conclusion };
+    expect((await executeBridge('publish-conclusion', request, d) as any).status).toBe('awaiting_operator');
+    expect((await executeBridge('publish-conclusion', request, d) as any).status).toBe('awaiting_operator');
+    await expect(executeBridge('publish-conclusion', { ...request,
+      result: { ...conclusion, summary: 'conflict' } }, d)).rejects.toThrow('projection_pending');
+  });
+  it.each([
+    ['revision', () => ({ revision: job.revision + 1 }), 'result_binding_changed'],
+    ['policy', () => ({ policy_fingerprint: 'changed' }), 'result_binding_changed'],
+    ['snapshot', () => ({ snapshot_digest: '0'.repeat(64) }), 'snapshot_changed'],
+  ])('rejects changed %s binding', async (_name, mutation, code) => {
+    d.findClaim = jest.fn(async () => null);
+    const first: any = await executeBridge('claim-summarizer', claimRequest(), d);
+    await expect(executeBridge('publish-conclusion', { ...boundRequest(first.snapshot_digest), ...mutation(), result: conclusion }, d))
+      .rejects.toThrow(code);
+  });
+  it.each(['closed', 'owner', 'epoch'])('rejects live authority mutation: %s', async change => {
+    d.findClaim = jest.fn(async () => null);
+    const first: any = await executeBridge('claim-summarizer', claimRequest(), d);
+    if (change === 'closed') liveTicket.status = 'closed';
+    if (change === 'owner') liveTicket.assigned_to = '9';
+    if (change === 'epoch') liveTicket.ai_epoch = 1;
+    await expect(executeBridge('publish-conclusion', { ...boundRequest(first.snapshot_digest), result: conclusion }, d))
+      .rejects.toThrow('authority_changed');
+  });
+  it('rejects mixed protocols, extra fields, invalid failure codes and invented evidence', async () => {
+    await expect(executeBridge('claim-summarizer', { ...claimRequest(), protocol: 'support-conclusion-v0' }, d))
+      .rejects.toThrow('protocol_denied');
+    await expect(executeBridge('claim-summarizer', { ...claimRequest(), extra: true }, d)).rejects.toThrow('unexpected_fields');
+    d.findClaim = jest.fn(async () => null);
+    const first: any = await executeBridge('claim-summarizer', claimRequest(), d);
+    await expect(executeBridge('fail-conclusion', { ...boundRequest(first.snapshot_digest), code: 'provider_error' }, d))
+      .rejects.toThrow('failure_code_denied');
+    await expect(executeBridge('publish-conclusion', { ...boundRequest(first.snapshot_digest), result: { ...conclusion,
+      verified_findings: [{ text: 'invented', evidence_refs: ['unknown-ref'] }] } }, d)).rejects.toThrow('evidence_unknown');
+  });
+  it.each(['input', 'checks'])('rejects a frozen %s projection mutation', async changed => {
+    d.findClaim = jest.fn(async () => null);
+    const first: any = await executeBridge('claim-summarizer', claimRequest(), d);
+    if (changed === 'input') job.input.goal = 'mutated after claim';
+    else job.checks!.unknowns = ['mutated after claim'];
+    await expect(executeBridge('summarizer-status', boundRequest(first.snapshot_digest), d)).rejects.toThrow('snapshot_changed');
+  });
+  it('rejects cancelled/expired work, stale facts, and an expired catalog', async () => {
+    d.findClaim = jest.fn(async () => null);
+    const first: any = await executeBridge('claim-summarizer', claimRequest(), d);
+    job.state = 'cancelled'; job.summarizer = null;
+    await expect(executeBridge('summarizer-status', boundRequest(first.snapshot_digest), d)).rejects.toThrow('lease_stale');
+    job.state = 'summarizing'; job.summarizer = { claim_id: claim, until: clock + ai.SUMMARIZER_MS };
+    clock = job.expires_at;
+    await expect(executeBridge('summarizer-status', boundRequest(first.snapshot_digest), d)).rejects.toThrow('facts_stale');
+    clock = now; d.bindingAllowed = jest.fn(async () => { throw new ai.EngineerError('catalog_expired'); });
+    await expect(executeBridge('summarizer-status', boundRequest(first.snapshot_digest), d)).rejects.toThrow('catalog_expired');
   });
 });

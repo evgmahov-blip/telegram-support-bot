@@ -1,10 +1,7 @@
-import { randomUUID } from 'crypto';
 import * as db from './db';
 import * as ai from './ai-engineer';
 import { EngineerStore, initializeEngineerIndexes } from './ai-engineer-store';
 import { engineerPolicy } from './ai-engineer-bridge';
-import { getEngineerConclusion } from './addons/llm';
-import { requireCatalogBinding, readCatalog } from './ai-engineer-catalog';
 import { AsyncWorkTracker } from './async-work';
 import * as log from './logger';
 import { setEngineerReady } from './ai-engineer-readiness';
@@ -13,7 +10,6 @@ import { refreshStaffCard } from './ticket-ui';
 export class EngineerWorker {
   private stopped = false;
   private busy = false;
-  private activeRequest: AbortController | null = null;
   private repairCursor: unknown = null;
   private tracker = new AsyncWorkTracker();
   private store = new EngineerStore(engineerPolicy);
@@ -38,11 +34,11 @@ export class EngineerWorker {
     if (!this.stopped && !this.busy) this.tracker.track(this.tick(), () => log.error('AI engineer worker unavailable'));
   }
   async stop(): Promise<void> {
-    this.stopped = true; setEngineerReady(false); this.activeRequest?.abort();
+    this.stopped = true; setEngineerReady(false);
     await this.tracker.drain(5000);
   }
 
-  async tick(generate = true): Promise<void> {
+  async tick(_generate = true): Promise<void> {
     if (this.busy || this.stopped) return;
     this.busy = true;
     try {
@@ -78,44 +74,9 @@ export class EngineerWorker {
           if (job?.continuation && !job.projection_pending && ai.current(job, ticket, engineerPolicy())) {
             await this.store.continueRevision(ticket.ticketId, job.request_id);
           }
+          if (job) await refreshStaffCard(ticket.ticketId);
         } catch { log.error('AI engineer state repair deferred'); }
       }
-      if (!generate || !engineerPolicy().enabled || this.stopped) return;
-      const catalog = await readCatalog(policy.scope);
-      if (!catalog.entries.length) return;
-      const candidate = await db.Supportee.findOne({ 'ai_engineer.state': 'summarizing',
-        status: { $in: [...ai.ACTIVE_TICKETS] }, 'ai_engineer.scope': policy.scope,
-        'ai_engineer.policy_fingerprint': fingerprint,
-        'ai_engineer.projection_pending': null, 'ai_engineer.expires_at': { $gt: Date.now() },
-        'ai_engineer.attempts': { $lt: 2 }, $and: [
-          { $or: [{ 'ai_engineer.summarizer': null }, { 'ai_engineer.summarizer.until': { $lte: Date.now() } }] },
-          { $or: catalog.entries.map(b => ({ 'ai_engineer.binding.binding_id': b.binding_id,
-            'ai_engineer.binding.binding_version': b.binding_version, 'ai_engineer.binding.profile_id': b.profile_id })) },
-          { $expr: { $and: [epochEqual,
-            { $eq: [{ $ifNull: ['$assigned_to', null] }, '$ai_engineer.expected_owner'] },
-          ] } },
-        ] }).sort({ 'ai_engineer.created_at': 1 }).lean();
-      if (!candidate?.ai_engineer) return;
-      const request = candidate.ai_engineer.request_id, claim = randomUUID();
-      let claimed = false;
-      try {
-        await requireCatalogBinding(engineerPolicy().scope, candidate.ai_engineer.binding);
-        const job = await this.store.claim(candidate.ticketId, request, 'summarizer', claim); claimed = true;
-        if (this.stopped) return;
-        this.activeRequest = new AbortController();
-        const result = await getEngineerConclusion(job, this.activeRequest.signal);
-        if (this.stopped) return;
-        await requireCatalogBinding(engineerPolicy().scope, job.binding);
-        await this.store.publishConclusion(candidate.ticketId, request, claim, result);
-        await refreshStaffCard(candidate.ticketId);
-      } catch (error) {
-        if (claimed && !this.stopped) {
-          const code = error instanceof SyntaxError || (error instanceof ai.EngineerError
-            && !['model_unavailable', 'authority_changed', 'lease_stale'].includes(error.code))
-            ? 'model_output_invalid' : 'model_unavailable';
-          await this.store.failConclusion(candidate.ticketId, request, claim, code).catch(() => undefined);
-        }
-      }
-    } finally { this.activeRequest = null; this.busy = false; }
+    } finally { this.busy = false; }
   }
 }

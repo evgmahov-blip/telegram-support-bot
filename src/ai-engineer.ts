@@ -10,6 +10,8 @@ export const COLLECTOR_MS = 180_000;
 export const SUMMARIZER_MS = 120_000;
 export const FACTS_MS = 5 * 60_000;
 export const PROFILE = 'host-info-v1';
+export const CONCLUSION_PROTOCOL = 'support-conclusion-v1';
+export const GENERATION_BACKEND = 'ainoc-aor';
 
 export class EngineerError extends Error {
   constructor(public readonly code: string) { super(code); this.name = 'EngineerError'; }
@@ -61,7 +63,8 @@ export interface EngineerPolicy {
 }
 export function policyFingerprint(policy: EngineerPolicy): string {
   return digest({ enabled: policy.enabled, scope: policy.scope,
-    staff: [...policy.staff].sort((a, b) => a.telegram_id.localeCompare(b.telegram_id)), profiles: [PROFILE] });
+    staff: [...policy.staff].sort((a, b) => a.telegram_id.localeCompare(b.telegram_id)), profiles: [PROFILE],
+    generation_backend: GENERATION_BACKEND, conclusion_protocol: CONCLUSION_PROTOCOL });
 }
 export interface TicketAuthority {
   ticketId: number; status: string; assigned_to: string | null; ai_epoch?: number;
@@ -99,6 +102,7 @@ export interface EngineerTask {
   policy_fingerprint: string; input: TaskInput; input_digest: string; authority_digest: string;
   created_at: number; expires_at: number; state: EngineerState;
   collector: Lease | null; summarizer: Lease | null; attempts: number;
+  summarizer_snapshot_digest: string | null;
   collector_receipt: string | null; summarizer_receipt: string | null;
   checks: CheckResult | null; conclusion: Conclusion | null; failure_code: string | null;
   projection_pending: Projection | null; continuation: Continuation | null;
@@ -140,6 +144,7 @@ export function createTask(ticket: TicketAuthority, policy: EngineerPolicy, acto
     expected_owner: ticket.assigned_to ?? null, binding: validatedBinding, policy_fingerprint: policyFingerprint(policy),
     input: validatedInput, input_digest: digest(validatedInput), authority_digest: digest(authority),
     created_at: now, expires_at: now + REQUEST_MS, state: 'queued', collector: null, summarizer: null, attempts: 0,
+    summarizer_snapshot_digest: null,
     checks: null, conclusion: null, failure_code: null, continuation: null, execution_allowed: false,
     collector_receipt: null, summarizer_receipt: null,
     projection_pending: projection(ids.request_id, 1, 'ai.task_submitted', actor, now) };
@@ -157,19 +162,36 @@ export function acknowledge(task: EngineerTask, id: string): EngineerTask {
   requireEngineer(task.projection_pending?.id === id, 'projection_changed');
   return changed(task, {});
 }
-export function claim(task: EngineerTask, stage: 'collector' | 'summarizer', claimId: string, now: number): EngineerTask {
+export function claim(task: EngineerTask, stage: 'collector' | 'summarizer', claimId: string, now: number,
+  snapshotDigest?: string): EngineerTask {
   ready(task, now); uuid(claimId);
   requireEngineer(stage === 'collector' || stage === 'summarizer', 'invalid_stage');
   const state = stage === 'collector' ? 'collecting' : 'summarizing';
   requireEngineer(stage === 'collector' ? ['queued', 'collecting'].includes(task.state) : task.state === state, 'invalid_state');
   requireEngineer(!task[stage] || task[stage]!.until <= now, 'lease_busy');
   if (stage === 'summarizer') {
+    requireEngineer(typeof snapshotDigest === 'string' && /^[0-9a-f]{64}$/.test(snapshotDigest), 'snapshot_invalid');
     requireEngineer(task.attempts < 2, 'attempts_exhausted');
     requireEngineer(task.checks && ['completed', 'partial'].includes(task.checks.status), 'facts_missing');
     requireEngineer(task.checks.facts.length > 0 && task.checks.facts.every(f => f.observed_at >= now - FACTS_MS), 'facts_stale');
   }
-  return changed(task, { state, [stage]: { claim_id: claimId, until: now + (stage === 'collector' ? COLLECTOR_MS : SUMMARIZER_MS) },
-    attempts: task.attempts + (stage === 'summarizer' ? 1 : 0) });
+  const until = stage === 'summarizer'
+    ? Math.min(now + SUMMARIZER_MS, task.expires_at, ...task.checks!.facts.map(f => f.observed_at + FACTS_MS))
+    : now + COLLECTOR_MS;
+  return changed(task, { state, [stage]: { claim_id: claimId, until },
+    attempts: task.attempts + (stage === 'summarizer' ? 1 : 0),
+    ...(stage === 'summarizer' ? { summarizer_snapshot_digest: snapshotDigest! } : {}) });
+}
+export function renewSummarizer(task: EngineerTask, claimId: string, snapshotDigest: string, now: number): EngineerTask {
+  ready(task, now); uuid(claimId);
+  requireEngineer(task.state === 'summarizing' && task.summarizer?.claim_id === claimId
+    && task.summarizer.until > now, 'lease_stale');
+  requireEngineer(task.summarizer_snapshot_digest === snapshotDigest, 'snapshot_changed');
+  requireEngineer(task.checks && task.checks.facts.length > 0, 'facts_missing');
+  const factsUntil = Math.min(...task.checks.facts.map(f => f.observed_at + FACTS_MS));
+  const until = Math.min(now + SUMMARIZER_MS, task.expires_at, factsUntil);
+  requireEngineer(until > now, 'facts_stale');
+  return changed(task, { summarizer: { claim_id: claimId, until } });
 }
 function lease(task: EngineerTask, stage: 'collector' | 'summarizer', claimId: string, now: number): void {
   ready(task, now);
@@ -228,7 +250,8 @@ export function finishConclusion(task: EngineerTask, claimId: string, result: un
 }
 export function failConclusion(task: EngineerTask, claimId: string, code: 'model_unavailable' | 'model_output_invalid', now: number): EngineerTask {
   lease(task, 'summarizer', claimId, now); requireEngineer(task.state === 'summarizing', 'invalid_state');
-  return changed(task, { state: 'failed', summarizer: null, failure_code: code }, 'ai.failed', task.requested_by, now);
+  return changed(task, { state: 'failed', summarizer: null, summarizer_receipt: claimId, failure_code: code },
+    'ai.failed', task.requested_by, now);
 }
 export function handoff(task: EngineerTask, actor: string, now: number): EngineerTask {
   ready(task, now, false); requireEngineer(task.state === 'awaiting_operator', 'invalid_state');

@@ -5,7 +5,8 @@ import * as ai from './ai-engineer';
 import { EngineerStore, EngineerTicket, initializeEngineerIndexes } from './ai-engineer-store';
 import * as catalog from './ai-engineer-catalog';
 
-export const OPERATIONS = ['publish-catalog', 'claim-checks', 'publish-checks', 'request-status', 'cancel-checks'] as const;
+export const OPERATIONS = ['publish-catalog', 'claim-checks', 'publish-checks', 'request-status', 'cancel-checks',
+  'claim-summarizer', 'summarizer-status', 'publish-conclusion', 'fail-conclusion'] as const;
 export function engineerPolicy(): ai.EngineerPolicy {
   const config = cache.config;
   return { enabled: config.ai_engineer_enabled === true, scope: config.ai_engineer_scope || 'most-support-vm3902',
@@ -20,10 +21,24 @@ export function publicEnvelope(job: ai.EngineerTask) {
     policy_fingerprint: job.policy_fingerprint, created_at: job.created_at, expires_at: job.expires_at,
     execution_allowed: false };
 }
+function knownBotSecrets(): string[] {
+  const c = cache.config;
+  return [c.bot_token, c.llm_api_key, c.slack_bot_token, c.discord_bot_token, c.api_token, c.mongodb_uri]
+    .filter((v): v is string => typeof v === 'string' && v.length >= 8);
+}
+export function summarizerProjection(job: ai.EngineerTask, now: number, secrets: string[] = knownBotSecrets()) {
+  ai.requireEngineer(job.checks, 'facts_missing');
+  const input = { goal: ai.redactEngineerText(job.input.goal, secrets), history: '',
+    feedback: ai.redactEngineerText(job.input.feedback, secrets) };
+  const checks = ai.validateChecks(job.checks, now);
+  const task = publicEnvelope(job);
+  return { task, input, checks, snapshot_digest: ai.digest({ task, input, checks }) };
+}
 export interface BridgeDependencies {
   policy: () => ai.EngineerPolicy; store: EngineerStore;
   findClaim: (claimId: string) => Promise<EngineerTicket | null>;
   findQueued: (excluded: string[]) => Promise<EngineerTicket | null>;
+  findSummarizer: (excluded: string[]) => Promise<EngineerTicket | null>;
   publishCatalog: typeof catalog.publishCatalog;
   bindingAllowed: typeof catalog.requireCatalogBinding;
   clock: () => number;
@@ -32,6 +47,7 @@ export function bridgeDependencies(): BridgeDependencies {
   return { policy: engineerPolicy, store: new EngineerStore(engineerPolicy),
     findClaim: async claimId => await db.Supportee.findOne({ $or: [
       { 'ai_engineer.collector.claim_id': claimId }, { 'ai_engineer.collector_receipt': claimId },
+      { 'ai_engineer.summarizer.claim_id': claimId }, { 'ai_engineer.summarizer_receipt': claimId },
     ] }).lean() as unknown as EngineerTicket | null,
     findQueued: async excluded => {
       const now = Date.now();
@@ -51,6 +67,25 @@ export function bridgeDependencies(): BridgeDependencies {
           ] } },
         ] }).sort({ 'ai_engineer.created_at': 1 }).lean() as unknown as EngineerTicket | null;
     },
+    findSummarizer: async excluded => {
+      const now = Date.now();
+      const allowed = await catalog.readCatalog(engineerPolicy().scope, now);
+      if (!allowed.entries.length) return null;
+      return await db.Supportee.findOne({ 'ai_engineer.scope': engineerPolicy().scope,
+        status: { $in: [...ai.ACTIVE_TICKETS] }, 'ai_engineer.request_id': { $nin: excluded },
+        'ai_engineer.state': 'summarizing', 'ai_engineer.projection_pending': null,
+        'ai_engineer.policy_fingerprint': ai.policyFingerprint(engineerPolicy()),
+        'ai_engineer.expires_at': { $gt: now }, 'ai_engineer.attempts': { $lt: 2 }, $and: [
+          { $or: allowed.entries.map(b => ({ 'ai_engineer.binding.binding_id': b.binding_id,
+            'ai_engineer.binding.binding_version': b.binding_version, 'ai_engineer.binding.profile_id': b.profile_id })) },
+          { $or: [{ 'ai_engineer.summarizer': null }, { 'ai_engineer.summarizer.until': { $lte: now } }] },
+          { 'ai_engineer.checks.facts': { $elemMatch: { observed_at: { $gte: now - ai.FACTS_MS } } } },
+          { $expr: { $and: [
+            { $eq: [{ $ifNull: ['$ai_epoch', 0] }, '$ai_engineer.ticket_epoch'] },
+            { $eq: [{ $ifNull: ['$assigned_to', null] }, '$ai_engineer.expected_owner'] },
+          ] } },
+        ] }).sort({ 'ai_engineer.created_at': 1 }).lean() as unknown as EngineerTicket | null;
+    },
     publishCatalog: catalog.publishCatalog, bindingAllowed: catalog.requireCatalogBinding, clock: Date.now };
 }
 export async function executeBridge(operation: string, payload: unknown, d: BridgeDependencies): Promise<unknown> {
@@ -61,6 +96,73 @@ export async function executeBridge(operation: string, payload: unknown, d: Brid
   ai.requireEngineer(payload !== null && typeof payload === 'object' && !Array.isArray(payload), 'invalid_object');
   const p = payload as Record<string, unknown>;
   ai.requireEngineer(p.deployment_scope === policy.scope, 'scope_denied');
+  const central = ['claim-summarizer', 'summarizer-status', 'publish-conclusion', 'fail-conclusion'].includes(operation);
+  if (central) ai.requireEngineer(p.protocol === ai.CONCLUSION_PROTOCOL, 'protocol_denied');
+  if (operation === 'claim-summarizer') {
+    ai.exact(p, ['deployment_scope', 'protocol', 'claim_id']); ai.uuid(p.claim_id);
+    const prior = await d.findClaim(p.claim_id);
+    if (prior) {
+      const ticket = await d.store.read(prior.ticketId), job = ticket.ai_engineer;
+      ai.requireEngineer(job && ai.current(job, ticket, policy), 'authority_changed');
+      await d.bindingAllowed(policy.scope, job.binding, now);
+      ai.requireEngineer(job.summarizer?.claim_id === p.claim_id && job.summarizer.until > now
+        && job.expires_at > now && job.state === 'summarizing', 'lease_stale');
+      const projection = summarizerProjection(job, now);
+      ai.requireEngineer(job.summarizer_snapshot_digest === projection.snapshot_digest, 'snapshot_changed');
+      return { protocol: ai.CONCLUSION_PROTOCOL, status: 'claimed', claim_id: p.claim_id,
+        lease_until: job.summarizer.until, ...projection, execution_allowed: false };
+    }
+    const excluded: string[] = [];
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const ticket = await d.findSummarizer(excluded), job = ticket?.ai_engineer;
+      if (!ticket || !job) break;
+      excluded.push(job.request_id);
+      if (!ai.current(job, ticket, policy)) { await d.store.repair(ticket.ticketId); continue; }
+      try {
+        await d.bindingAllowed(policy.scope, job.binding, now);
+        const projection = summarizerProjection(job, now);
+        const claimed = await d.store.claimSummarizer(ticket.ticketId, job.request_id, p.claim_id, projection.snapshot_digest);
+        return { protocol: ai.CONCLUSION_PROTOCOL, status: 'claimed', claim_id: p.claim_id,
+          lease_until: claimed.summarizer!.until, ...projection, execution_allowed: false };
+      } catch (error) {
+        if (!(error instanceof ai.EngineerError) || !['binding_unavailable', 'authority_changed', 'state_changed',
+          'lease_busy', 'facts_stale'].includes(error.code)) throw error;
+      }
+    }
+    return { protocol: ai.CONCLUSION_PROTOCOL, status: 'idle', execution_allowed: false };
+  }
+  if (['summarizer-status', 'publish-conclusion', 'fail-conclusion'].includes(operation)) {
+    const base = ['deployment_scope', 'protocol', 'ticket_id', 'request_id', 'claim_id', 'revision',
+      'authority_digest', 'policy_fingerprint', 'snapshot_digest'];
+    ai.exact(p, operation === 'publish-conclusion' ? [...base, 'result']
+      : operation === 'fail-conclusion' ? [...base, 'code'] : base);
+    ai.uuid(p.request_id); ai.uuid(p.claim_id);
+    ai.requireEngineer(Number.isSafeInteger(p.ticket_id) && Number(p.ticket_id) > 0, 'invalid_ticket');
+    const ticket = await d.store.read(Number(p.ticket_id)), job = ticket.ai_engineer;
+    ai.requireEngineer(job?.request_id === p.request_id && job.revision === p.revision
+      && job.authority_digest === p.authority_digest && job.policy_fingerprint === p.policy_fingerprint,
+    'result_binding_changed');
+    ai.requireEngineer(ai.current(job, ticket, policy), 'authority_changed');
+    await d.bindingAllowed(policy.scope, job.binding, now);
+    const projection = summarizerProjection(job, now);
+    ai.requireEngineer(job.summarizer_snapshot_digest === p.snapshot_digest
+      && projection.snapshot_digest === p.snapshot_digest, 'snapshot_changed');
+    if (operation === 'summarizer-status') {
+      const renewed = await d.store.renewSummarizer(Number(p.ticket_id), p.request_id, p.claim_id, p.snapshot_digest);
+      return { protocol: ai.CONCLUSION_PROTOCOL, status: renewed.state, eligible: true,
+        lease_until: renewed.summarizer!.until, task: publicEnvelope(renewed), snapshot_digest: p.snapshot_digest,
+        execution_allowed: false };
+    }
+    if (operation === 'publish-conclusion') {
+      const completed = await d.store.publishConclusion(Number(p.ticket_id), p.request_id, p.claim_id, p.result);
+      return { protocol: ai.CONCLUSION_PROTOCOL, status: completed.state, request_id: completed.request_id,
+        revision: completed.revision, snapshot_digest: p.snapshot_digest, execution_allowed: false };
+    }
+    ai.requireEngineer(p.code === 'model_unavailable' || p.code === 'model_output_invalid', 'failure_code_denied');
+    const failed = await d.store.failConclusion(Number(p.ticket_id), p.request_id, p.claim_id, p.code);
+    return { protocol: ai.CONCLUSION_PROTOCOL, status: failed.state, request_id: failed.request_id,
+      revision: failed.revision, snapshot_digest: p.snapshot_digest, execution_allowed: false };
+  }
   if (operation === 'publish-catalog') return d.publishCatalog(p, policy.scope, now);
   if (operation === 'claim-checks') {
     ai.exact(p, ['deployment_scope', 'claim_id']); ai.uuid(p.claim_id);

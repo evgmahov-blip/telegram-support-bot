@@ -151,9 +151,17 @@ export class EngineerStore {
     task.requireEngineer(task.current(job, ticket, this.policy()), 'authority_changed');
     return { ticket, job };
   }
-  async claim(ticketId: number, requestId: string, stage: 'collector' | 'summarizer', claimId: string): Promise<EngineerTask> {
+  async claim(ticketId: number, requestId: string, stage: 'collector', claimId: string): Promise<EngineerTask> {
     const { ticket, job } = await this.active(ticketId, requestId);
     return this.commit(ticket, job, task.claim(job, stage, claimId, this.clock()));
+  }
+  async claimSummarizer(ticketId: number, requestId: string, claimId: string, snapshotDigest: string): Promise<EngineerTask> {
+    const { ticket, job } = await this.active(ticketId, requestId);
+    return this.commit(ticket, job, task.claim(job, 'summarizer', claimId, this.clock(), snapshotDigest));
+  }
+  async renewSummarizer(ticketId: number, requestId: string, claimId: string, snapshotDigest: string): Promise<EngineerTask> {
+    const { ticket, job } = await this.active(ticketId, requestId);
+    return this.commit(ticket, job, task.renewSummarizer(job, claimId, snapshotDigest, this.clock()));
   }
   async publishChecks(ticketId: number, requestId: string, claimId: string, result: unknown): Promise<EngineerTask> {
     const { ticket, job } = await this.active(ticketId, requestId);
@@ -168,6 +176,8 @@ export class EngineerStore {
   async failConclusion(ticketId: number, requestId: string, claimId: string,
     code: 'model_unavailable' | 'model_output_invalid'): Promise<EngineerTask> {
     const { ticket, job } = await this.active(ticketId, requestId);
+    if (job.state === 'failed' && job.summarizer_receipt === claimId && job.failure_code === code
+      && job.summarizer === null) return job;
     return this.commit(ticket, job, task.failConclusion(job, claimId, code, this.clock()));
   }
   async handoff(ticketId: number, requestId: string, actor: string): Promise<EngineerTask> {

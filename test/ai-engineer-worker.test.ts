@@ -1,16 +1,13 @@
-const mockFind = jest.fn(), mockFindOne = jest.fn(), mockRepair = jest.fn(), mockClaim = jest.fn();
-const mockPublish = jest.fn(), mockFail = jest.fn(), mockContinue = jest.fn(), mockIndexes = jest.fn();
-const mockGenerate = jest.fn(), mockBinding = jest.fn(), mockCatalog = jest.fn();
+const mockFind = jest.fn(), mockRepair = jest.fn(), mockContinue = jest.fn(), mockIndexes = jest.fn();
 const mockEpochFence = jest.fn();
+const mockRefresh = jest.fn();
 let mockPolicy: any;
-jest.mock('../src/db', () => ({ Supportee: { find: mockFind, findOne: mockFindOne, updateMany: mockEpochFence } }));
+jest.mock('../src/db', () => ({ Supportee: { find: mockFind, updateMany: mockEpochFence } }));
 jest.mock('../src/ai-engineer-store', () => ({
-  EngineerStore: jest.fn(() => ({ repair: mockRepair, claim: mockClaim, publishConclusion: mockPublish,
-    failConclusion: mockFail, continueRevision: mockContinue })), initializeEngineerIndexes: mockIndexes,
+  EngineerStore: jest.fn(() => ({ repair: mockRepair, continueRevision: mockContinue })), initializeEngineerIndexes: mockIndexes,
 }));
 jest.mock('../src/ai-engineer-bridge', () => ({ engineerPolicy: () => mockPolicy }));
-jest.mock('../src/ai-engineer-catalog', () => ({ requireCatalogBinding: mockBinding, readCatalog: mockCatalog }));
-jest.mock('../src/addons/llm', () => ({ getEngineerConclusion: mockGenerate }));
+jest.mock('../src/ticket-ui', () => ({ refreshStaffCard: mockRefresh }));
 import * as ai from '../src/ai-engineer';
 import { EngineerWorker } from '../src/ai-engineer-worker';
 
@@ -23,47 +20,23 @@ describe('durable engineer worker', () => {
     mockPolicy = { enabled: true, scope: 'most-support-vm3902', staff: [{ telegram_id: '1', role: 'admin' }] };
     job = ai.createTask({ ticketId: 42, status: 'open', assigned_to: null }, mockPolicy, '1', binding, ai.snapshotInput('Проверить'), Date.now());
     job.state = 'summarizing'; job.projection_pending = null;
-    mockFind.mockReturnValue(chain([])); mockFindOne.mockReturnValue(chain({ ticketId: 42, ai_engineer: job }));
-    mockClaim.mockResolvedValue(job); mockPublish.mockResolvedValue(job); mockFail.mockResolvedValue(job);
-    mockGenerate.mockResolvedValue({ summary: 'test' }); mockBinding.mockResolvedValue(undefined);
-    mockCatalog.mockResolvedValue({ entries: [binding] }); mockRepair.mockResolvedValue(null);
+    mockFind.mockReturnValue(chain([])); mockRepair.mockResolvedValue(null);
     mockEpochFence.mockResolvedValue({ modifiedCount: 0 });
   });
-  it('reserves one claim and publishes only after generation and binding recheck', async () => {
+  it('does not claim or invoke a local model for summarization', async () => {
     await new EngineerWorker().tick();
-    expect(mockClaim).toHaveBeenCalledWith(42, job.request_id, 'summarizer', expect.any(String));
-    expect(mockGenerate).toHaveBeenCalledTimes(1); expect(mockBinding).toHaveBeenCalledTimes(2);
-    expect(mockPublish).toHaveBeenCalledTimes(1);
+    expect(mockFind).toHaveBeenCalledTimes(1);
+    expect(mockRepair).not.toHaveBeenCalled();
   });
   it('repairs audit even while disabled, but never generates', async () => {
     mockPolicy.enabled = false; mockFind.mockReturnValue(chain([{ ticketId: 42, ai_engineer: job }]));
     await new EngineerWorker().tick();
-    expect(mockRepair).toHaveBeenCalledWith(42); expect(mockGenerate).not.toHaveBeenCalled();
+    expect(mockRepair).toHaveBeenCalledWith(42);
   });
-  it('records a bounded failure after a model error without sending a client message', async () => {
-    mockGenerate.mockRejectedValueOnce(new Error('private provider response'));
+  it('refreshes the staff card after durable repair only', async () => {
+    mockFind.mockReturnValue(chain([{ _id: 1, ticketId: 42, ai_engineer: job }])); mockRepair.mockResolvedValue(job);
     await new EngineerWorker().tick();
-    expect(mockFail).toHaveBeenCalledWith(42, job.request_id, expect.any(String), 'model_unavailable');
-    expect(mockPublish).not.toHaveBeenCalled();
-  });
-  it('filters poisoned summary heads by active lifecycle, epoch, owner and current catalog', async () => {
-    await new EngineerWorker().tick();
-    const query = mockFindOne.mock.calls[0][0];
-    expect(query.status).toEqual({ $in: ['open', 'waiting_user'] });
-    expect(query['ai_engineer.policy_fingerprint']).toBe(ai.policyFingerprint(mockPolicy));
-    expect(JSON.stringify(query.$and)).toMatch(/ticket_epoch/);
-    expect(JSON.stringify(query.$and)).toMatch(/expected_owner/);
-    expect(JSON.stringify(query.$and)).toMatch(/binding_version/);
-  });
-  it('does not publish after shutdown starts and drains the tracked request', async () => {
-    let resolve: (v: any) => void = () => undefined;
-    mockGenerate.mockImplementationOnce(() => new Promise(r => { resolve = r; }));
-    const worker = new EngineerWorker(); worker.schedule();
-    for (let n = 0; n < 10 && !mockGenerate.mock.calls.length; n++) await new Promise(r => setImmediate(r));
-    const stopped = worker.stop(); resolve({ summary: 'late' }); await stopped;
-    expect(mockGenerate.mock.calls[0][1].aborted).toBe(true);
-    expect(mockPublish).not.toHaveBeenCalled(); worker.schedule();
-    expect(mockGenerate).toHaveBeenCalledTimes(1);
+    expect(mockRefresh).toHaveBeenCalledWith(42);
   });
   it('round-robins beyond ten waiting jobs so a later pending revision gets repaired', async () => {
     const rows = Array.from({ length: 11 }, (_, i) => ({ _id: i + 1, ticketId: i + 1,
@@ -75,7 +48,6 @@ describe('durable engineer worker', () => {
       const q: any = { sort: () => q, limit: (n: number) => { selected = selected.slice(0, n); return q; }, lean: async () => selected };
       return q;
     });
-    mockFindOne.mockReturnValue(chain(null));
     const worker = new EngineerWorker(); await worker.tick(); await worker.tick();
     expect(mockRepair).toHaveBeenCalledWith(11);
     expect(mockFind.mock.calls[1][0]._id).toEqual({ $gt: 10 });

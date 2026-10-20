@@ -29,7 +29,7 @@ flowchart TD
 | Сохранение | `src/ai-engineer-store.ts`: CAS, immutable archive, стабильный outbox и continuation для доработки |
 | Authority | `src/ai-engineer-authority.ts` и существующие mutations lifecycle/ownership: epoch и запрет поздних результатов |
 | Bridge | `src/ai-engineer-bridge.ts`, `src/ai-engineer-catalog.ts`: фиксированные stdin JSON операции, scope/binding, свежий каталог, индексы, watchdog |
-| Генерация | `src/ai-engineer-worker.ts`, существующий `src/addons/llm.ts`: repair, claim, SDK timeout 45s, maxRetries=0, максимум две попытки |
+| Генерация | Центральный AOR через `support-conclusion-v1`; bot worker выполняет только repair/outbox/readiness/card refresh, без локального вызова модели |
 | Интерфейс | `src/ai-engineer-ui.ts`, hooks `staff.ts`/`ticket-ui.ts`: внутренняя форма заметки, выбор объекта, подтверждение, отмена, handoff, доработка, версии и детали |
 | Запуск | `src/index.ts`, `src/ai-engineer-readiness.ts`: подготовка индексов перед допуском UI, периодическая работа, остановка до Mongo disconnect |
 | Контроллер AINOC | Отдельный патч: `bin/ainoc_support_engineer_controller.py`, SQL `db/migrations/support_engineer_stage1.sql`, выключенный config example, oneshot service/timer |
@@ -46,6 +46,7 @@ flowchart TD
 - AI-события сохраняются в аудите; навигация по заключениям и редакциям идёт из постоянной карточки, отдельно от клиентской истории.
 - При остановке worker отменяет SDK-запрос через AbortSignal и ждёт до 5s. Поздний ответ не публикуется, lease восстанавливается. Штатные Compose и deployment config sample сохранены байт-в-байт: существующий app-update adapter не допускает их изменений.
 - AI-ready в боте разрешает UI после подготовки индексов и startup repair. Отдельный bridge читает ту же startup-конфигурацию и сам проверяет индексы до операций. Отзыв роли/отключение требует согласованного restart и отключения контроллера; общего live-readiness сервиса нет.
+- Точный центральный контракт, frozen snapshot и порядок согласованного выключенного rollout описаны в [AI_ENGINEER_CENTRAL_CONCLUSION.md](AI_ENGINEER_CENTRAL_CONCLUSION.md). Policy fingerprint включает backend `ainoc-aor` и protocol `support-conclusion-v1`.
 - Перед bounded repair startup одним `updateMany` повышает epoch всех незавершённых заданий и сохранённых continuation при disabled либо несовпадении policy. Возврат к прежней конфигурации не оживляет оставшиеся за пределами batch задания. Pending/outcome/feedback сохраняются.
 
 ## Локальные доказательства

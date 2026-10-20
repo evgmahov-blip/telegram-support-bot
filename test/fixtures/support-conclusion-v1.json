@@ -1,0 +1,83 @@
+{
+  "protocol": "support-conclusion-v1",
+  "claim_request": {
+    "deployment_scope": "most-support-vm3902",
+    "protocol": "support-conclusion-v1",
+    "claim_id": "10000000-0000-4000-8000-000000000001"
+  },
+  "claim_response": {
+    "protocol": "support-conclusion-v1",
+    "status": "claimed",
+    "claim_id": "10000000-0000-4000-8000-000000000001",
+    "lease_until": 1700000120000,
+    "task": {
+      "schema": "support-engineer-task-v1",
+      "deployment_scope": "most-support-vm3902",
+      "task_id": "20000000-0000-4000-8000-000000000002",
+      "request_id": "30000000-0000-4000-8000-000000000003",
+      "ticket_id": 42,
+      "revision": 1,
+      "ticket_epoch": 0,
+      "requested_by": "1",
+      "binding_id": "canary",
+      "binding_version": 1,
+      "profile_id": "host-info-v1",
+      "context_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "authority_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "policy_fingerprint": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "created_at": 1700000000000,
+      "expires_at": 1700000900000,
+      "execution_allowed": false
+    },
+    "input": {
+      "goal": "Check whether the approved host is reachable.",
+      "history": "",
+      "feedback": ""
+    },
+    "checks": {
+      "status": "partial",
+      "facts": [
+        {
+          "ref": "check-1",
+          "check_id": "host-info-v1",
+          "observed_at": 1700000000000,
+          "values": { "reachable": true, "uptime_seconds": null }
+        }
+      ],
+      "unknowns": ["Uptime was unavailable."],
+      "completed_at": 1700000000000,
+      "execution_allowed": false
+    },
+    "snapshot_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "execution_allowed": false
+  },
+  "publish_request": {
+    "deployment_scope": "most-support-vm3902",
+    "protocol": "support-conclusion-v1",
+    "ticket_id": 42,
+    "request_id": "30000000-0000-4000-8000-000000000003",
+    "claim_id": "10000000-0000-4000-8000-000000000001",
+    "revision": 1,
+    "authority_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "policy_fingerprint": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "snapshot_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "result": {
+      "summary": "The approved host responded to the read-only reachability check.",
+      "verified_findings": [
+        { "text": "The host was reachable at observation time.", "evidence_refs": ["check-1"] }
+      ],
+      "hypotheses": ["The reported issue may be above the host transport layer."],
+      "unknowns": ["Application health and customer-path behavior were not checked."],
+      "recommended_next_steps": ["Use an approved application-specific diagnostic workflow."],
+      "customer_reply_draft": "We confirmed that the host is reachable and are continuing to check the application path."
+    }
+  },
+  "publish_response": {
+    "protocol": "support-conclusion-v1",
+    "status": "awaiting_operator",
+    "request_id": "30000000-0000-4000-8000-000000000003",
+    "revision": 1,
+    "snapshot_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "execution_allowed": false
+  }
+}

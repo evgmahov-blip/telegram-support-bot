@@ -103,7 +103,7 @@ describe('AI engineer durable task protocol', () => {
     const request = await submitted(); const collector = randomUUID(), summarizer = randomUUID();
     await store.claim(42, request, 'collector', collector);
     await store.publishChecks(42, request, collector, checks()); await store.repair(42);
-    await store.claim(42, request, 'summarizer', summarizer);
+    await store.claimSummarizer(42, request, summarizer, ai.digest({ request }));
     await store.publishConclusion(42, request, summarizer, conclusion); await store.repair(42);
     return request;
   }
@@ -217,9 +217,9 @@ describe('AI engineer durable task protocol', () => {
   it('bounds actual summarizer attempts across crashes', async () => {
     const request = await submitted(), collector = randomUUID();
     await store.claim(42, request, 'collector', collector); await store.publishChecks(42, request, collector, checks()); await store.repair(42);
-    await store.claim(42, request, 'summarizer', randomUUID()); clock += ai.SUMMARIZER_MS;
-    await store.claim(42, request, 'summarizer', randomUUID()); clock += ai.SUMMARIZER_MS;
-    await expect(store.claim(42, request, 'summarizer', randomUUID())).rejects.toThrow('attempts_exhausted');
+    await store.claimSummarizer(42, request, randomUUID(), ai.digest({ request, attempt: 1 })); clock += ai.SUMMARIZER_MS;
+    await store.claimSummarizer(42, request, randomUUID(), ai.digest({ request, attempt: 2 })); clock += ai.SUMMARIZER_MS;
+    await expect(store.claimSummarizer(42, request, randomUUID(), ai.digest({ request, attempt: 3 }))).rejects.toThrow('attempts_exhausted');
     await store.repair(42); expect(memory.value.ai_engineer!.failure_code).toBe('attempts_exhausted');
   });
   it('rejects executable/unknown check fields and invented evidence', async () => {
@@ -227,7 +227,7 @@ describe('AI engineer durable task protocol', () => {
     await expect(store.publishChecks(42, request, claim, { ...checks(), command: 'id' })).rejects.toThrow('unexpected_fields');
     await expect(store.publishChecks(42, request, claim, { ...checks(), execution_allowed: true })).rejects.toThrow('invalid_checks');
     await store.publishChecks(42, request, claim, checks()); await store.repair(42);
-    const summarizer = randomUUID(); await store.claim(42, request, 'summarizer', summarizer);
+    const summarizer = randomUUID(); await store.claimSummarizer(42, request, summarizer, ai.digest({ request }));
     await expect(store.publishConclusion(42, request, summarizer, { ...conclusion,
       verified_findings: [{ text: 'Придуманный факт', evidence_refs: ['other-customer'] }] })).rejects.toThrow('evidence_unknown');
   });
