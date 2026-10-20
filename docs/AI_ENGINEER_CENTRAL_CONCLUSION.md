@@ -39,6 +39,9 @@ validated check projection. It contains no ticket history, attachments, raw data
 or command output. `snapshot_digest` is canonical SHA-256 of `{task,input,checks}` and is frozen into the summarizer claim.
 Any later projection mutation is rejected.
 
+The returned `task` envelope is binding-only and includes `requested_by` (a Telegram user ID). Only `input` and `checks`
+may enter the model prompt. The envelope, claim ID, and all ticket, request, and user identities must remain outside it.
+
 Every heartbeat, publication, and failure revalidates current ticket authority, revision, owner/epoch through the authority
 digest and current checks, policy fingerprint, catalog binding, request/task expiry, fact freshness, claim, and snapshot.
 Conclusion validation permits evidence references only from projected facts. Exact duplicate conclusion publication is

@@ -231,6 +231,18 @@ describe('AI engineer durable task protocol', () => {
     await expect(store.publishConclusion(42, request, summarizer, { ...conclusion,
       verified_findings: [{ text: 'Придуманный факт', evidence_refs: ['other-customer'] }] })).rejects.toThrow('evidence_unknown');
   });
+  it('idempotently replays a normalized conclusion through the real store', async () => {
+    const request = await submitted(), collector = randomUUID();
+    await store.claim(42, request, 'collector', collector); await store.publishChecks(42, request, collector, checks());
+    await store.repair(42);
+    const summarizer = randomUUID(), snapshot = ai.digest({ request });
+    await store.claimSummarizer(42, request, summarizer, snapshot);
+    const raw = { ...conclusion, summary: `  ${conclusion.summary}\r\n` };
+    const accepted = await store.publishConclusion(42, request, summarizer, raw);
+    expect((await store.publishConclusion(42, request, summarizer, raw)).version).toBe(accepted.version);
+    await expect(store.publishConclusion(42, request, summarizer, { ...raw, summary: 'different' }))
+      .rejects.toThrow('result_conflict');
+  });
   it('does not let an archive hash change due to a continuation or outbox acknowledgement', async () => {
     const request = await awaiting(); const handed = await store.handoff(42, request, '2');
     const hash = ai.digest(ai.archiveSnapshot(handed)); await store.repair(42);

@@ -27,7 +27,7 @@ export class EngineerWorker {
     if (policy.enabled) await initializeEngineerIndexes();
     // A coordinated restart is the role/feature-revocation boundary. Authority
     // comparison in repair invalidates tasks from older policy generations.
-    await this.tick(false);
+    await this.tick();
     setEngineerReady(engineerPolicy().enabled);
   }
   schedule(): void {
@@ -38,7 +38,7 @@ export class EngineerWorker {
     await this.tracker.drain(5000);
   }
 
-  async tick(_generate = true): Promise<void> {
+  async tick(): Promise<void> {
     if (this.busy || this.stopped) return;
     this.busy = true;
     try {

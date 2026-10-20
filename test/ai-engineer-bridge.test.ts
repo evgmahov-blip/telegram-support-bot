@@ -1,4 +1,6 @@
 import { randomUUID } from 'crypto';
+import { readFileSync } from 'fs';
+import { join } from 'path';
 import * as ai from '../src/ai-engineer';
 import { executeBridge, publicEnvelope, BridgeDependencies } from '../src/ai-engineer-bridge';
 import { validateCatalog } from '../src/ai-engineer-catalog';
@@ -163,6 +165,20 @@ describe('support-conclusion-v1 bridge', () => {
     clock = job.summarizer!.until;
     await expect(executeBridge('summarizer-status', boundRequest(first.snapshot_digest), d)).rejects.toThrow('lease_stale');
   });
+  it('rejects an old claim after lease loss and a second claim', async () => {
+    d.findClaim = jest.fn(async () => null);
+    const first: any = await executeBridge('claim-summarizer', claimRequest(), d);
+    clock = job.summarizer!.until;
+    const secondClaim = '10000000-0000-4000-8000-000000000002';
+    d.findSummarizer = jest.fn(async () => liveTicket);
+    const second: any = await executeBridge('claim-summarizer', { ...scope, protocol: ai.CONCLUSION_PROTOCOL,
+      claim_id: secondClaim }, d);
+    expect(second.claim_id).toBe(secondClaim); expect(job.attempts).toBe(2);
+    await expect(executeBridge('publish-conclusion', { ...boundRequest(first.snapshot_digest), result: conclusion }, d))
+      .rejects.toThrow('lease_stale');
+    await expect(executeBridge('fail-conclusion', { ...boundRequest(first.snapshot_digest), code: 'model_unavailable' }, d))
+      .rejects.toThrow('lease_stale');
+  });
   it('publishes an exact six-key conclusion idempotently and rejects conflicting replay', async () => {
     d.findClaim = jest.fn(async () => null);
     const first: any = await executeBridge('claim-summarizer', claimRequest(), d);
@@ -171,6 +187,26 @@ describe('support-conclusion-v1 bridge', () => {
     expect((await executeBridge('publish-conclusion', request, d) as any).status).toBe('awaiting_operator');
     await expect(executeBridge('publish-conclusion', { ...request,
       result: { ...conclusion, summary: 'conflict' } }, d)).rejects.toThrow('projection_pending');
+  });
+  it('replays an accepted publish receipt after facts and catalog expire', async () => {
+    d.findClaim = jest.fn(async () => null);
+    const first: any = await executeBridge('claim-summarizer', claimRequest(), d);
+    const request = { ...boundRequest(first.snapshot_digest), result: conclusion };
+    const accepted = await executeBridge('publish-conclusion', request, d);
+    clock += ai.FACTS_MS + 1;
+    d.bindingAllowed = jest.fn(async () => { throw new ai.EngineerError('catalog_expired'); });
+    expect(await executeBridge('publish-conclusion', request, d)).toEqual(accepted);
+    expect(d.bindingAllowed).not.toHaveBeenCalled();
+  });
+  it('replays an accepted failure receipt and rejects the opposite outcome', async () => {
+    d.findClaim = jest.fn(async () => null);
+    const first: any = await executeBridge('claim-summarizer', claimRequest(), d);
+    const request = { ...boundRequest(first.snapshot_digest), code: 'model_unavailable' };
+    const accepted = await executeBridge('fail-conclusion', request, d);
+    clock += ai.FACTS_MS + 1;
+    expect(await executeBridge('fail-conclusion', request, d)).toEqual(accepted);
+    await expect(executeBridge('publish-conclusion', { ...boundRequest(first.snapshot_digest), result: conclusion }, d))
+      .rejects.toThrow();
   });
   it.each([
     ['revision', () => ({ revision: job.revision + 1 }), 'result_binding_changed'],
@@ -202,6 +238,14 @@ describe('support-conclusion-v1 bridge', () => {
     await expect(executeBridge('publish-conclusion', { ...boundRequest(first.snapshot_digest), result: { ...conclusion,
       verified_findings: [{ text: 'invented', evidence_refs: ['unknown-ref'] }] } }, d)).rejects.toThrow('evidence_unknown');
   });
+  it.each(['claim-checks', 'request-status', 'publish-checks'])('keeps legacy %s schema protocol-free', async operation => {
+    const request: any = operation === 'claim-checks' ? { ...scope, claim_id: randomUUID(), protocol: ai.CONCLUSION_PROTOCOL }
+      : operation === 'request-status' ? { ...scope, ticket_id: 42, request_id: job.request_id,
+        claim_id: randomUUID(), protocol: ai.CONCLUSION_PROTOCOL }
+      : { ...scope, ticket_id: 42, request_id: job.request_id, claim_id: randomUUID(), revision: job.revision,
+        authority_digest: job.authority_digest, policy_fingerprint: job.policy_fingerprint, result: {}, protocol: ai.CONCLUSION_PROTOCOL };
+    await expect(executeBridge(operation, request, d)).rejects.toThrow('unexpected_fields');
+  });
   it.each(['input', 'checks'])('rejects a frozen %s projection mutation', async changed => {
     d.findClaim = jest.fn(async () => null);
     const first: any = await executeBridge('claim-summarizer', claimRequest(), d);
@@ -219,5 +263,26 @@ describe('support-conclusion-v1 bridge', () => {
     await expect(executeBridge('summarizer-status', boundRequest(first.snapshot_digest), d)).rejects.toThrow('facts_stale');
     clock = now; d.bindingAllowed = jest.fn(async () => { throw new ai.EngineerError('catalog_expired'); });
     await expect(executeBridge('summarizer-status', boundRequest(first.snapshot_digest), d)).rejects.toThrow('catalog_expired');
+  });
+  it('rejects publication when facts become stale after claim', async () => {
+    d.findClaim = jest.fn(async () => null);
+    const first: any = await executeBridge('claim-summarizer', claimRequest(), d);
+    clock += ai.FACTS_MS + 1;
+    await expect(executeBridge('publish-conclusion', { ...boundRequest(first.snapshot_digest), result: conclusion }, d))
+      .rejects.toThrow('facts_stale');
+  });
+  it('matches the checked-in language-neutral parity fixture', async () => {
+    const fixture = JSON.parse(readFileSync(join(__dirname, 'fixtures', 'support-conclusion-v1.json'), 'utf8'));
+    job = ai.createTask(ticket, policy, '1', binding,
+      ai.snapshotInput(fixture.claim_response.input.goal, '', fixture.claim_response.input.feedback), now,
+      { task_id: fixture.claim_response.task.task_id, request_id: fixture.claim_response.task.request_id });
+    job = ai.acknowledge(job, job.projection_pending!.id);
+    job.state = 'summarizing'; job.checks = structuredClone(fixture.claim_response.checks);
+    liveTicket.ai_engineer = job; d.findClaim = jest.fn(async () => null);
+    expect(ai.digest({ task: fixture.claim_response.task, input: fixture.claim_response.input,
+      checks: fixture.claim_response.checks })).toBe(fixture.claim_response.snapshot_digest);
+    expect(await executeBridge('claim-summarizer', fixture.claim_request, d)).toEqual(fixture.claim_response);
+    expect(await executeBridge('publish-conclusion', fixture.publish_request, d)).toEqual(fixture.publish_response);
+    expect(await executeBridge('publish-conclusion', fixture.publish_request, d)).toEqual(fixture.publish_response);
   });
 });

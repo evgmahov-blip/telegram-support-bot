@@ -34,6 +34,16 @@ export function summarizerProjection(job: ai.EngineerTask, now: number, secrets:
   const task = publicEnvelope(job);
   return { task, input, checks, snapshot_digest: ai.digest({ task, input, checks }) };
 }
+function exactConclusionReceipt(job: ai.EngineerTask, claimId: unknown, snapshotDigest: unknown, result: unknown): boolean {
+  if (!job.conclusion || job.state !== 'awaiting_operator' || job.summarizer !== null
+    || job.summarizer_receipt !== claimId || job.summarizer_snapshot_digest !== snapshotDigest) return false;
+  try { return ai.digest(job.conclusion) === ai.digest(ai.validateConclusion(result, job)); }
+  catch { return false; }
+}
+function exactFailureReceipt(job: ai.EngineerTask, claimId: unknown, snapshotDigest: unknown, code: unknown): boolean {
+  return job.state === 'failed' && job.summarizer === null && job.summarizer_receipt === claimId
+    && job.summarizer_snapshot_digest === snapshotDigest && job.failure_code === code;
+}
 export interface BridgeDependencies {
   policy: () => ai.EngineerPolicy; store: EngineerStore;
   findClaim: (claimId: string) => Promise<EngineerTicket | null>;
@@ -142,6 +152,16 @@ export async function executeBridge(operation: string, payload: unknown, d: Brid
     ai.requireEngineer(job?.request_id === p.request_id && job.revision === p.revision
       && job.authority_digest === p.authority_digest && job.policy_fingerprint === p.policy_fingerprint,
     'result_binding_changed');
+    // Accepted receipts are immutable. Recognize an exact replay before live
+    // lease, catalog and facts checks so a lost response remains recoverable.
+    if (operation === 'publish-conclusion' && exactConclusionReceipt(job, p.claim_id, p.snapshot_digest, p.result)) {
+      return { protocol: ai.CONCLUSION_PROTOCOL, status: job.state, request_id: job.request_id,
+        revision: job.revision, snapshot_digest: p.snapshot_digest, execution_allowed: false };
+    }
+    if (operation === 'fail-conclusion' && exactFailureReceipt(job, p.claim_id, p.snapshot_digest, p.code)) {
+      return { protocol: ai.CONCLUSION_PROTOCOL, status: job.state, request_id: job.request_id,
+        revision: job.revision, snapshot_digest: p.snapshot_digest, execution_allowed: false };
+    }
     ai.requireEngineer(ai.current(job, ticket, policy), 'authority_changed');
     await d.bindingAllowed(policy.scope, job.binding, now);
     const projection = summarizerProjection(job, now);

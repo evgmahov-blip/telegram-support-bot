@@ -170,7 +170,13 @@ export class EngineerStore {
   }
   async publishConclusion(ticketId: number, requestId: string, claimId: string, result: unknown): Promise<EngineerTask> {
     const { ticket, job } = await this.active(ticketId, requestId);
-    if (job.conclusion && job.summarizer_receipt === claimId && task.digest(job.conclusion) === task.digest(result) && job.summarizer === null) return job;
+    if (job.conclusion && job.summarizer_receipt === claimId && job.summarizer === null) {
+      let normalized: task.Conclusion;
+      try { normalized = task.validateConclusion(result, job); }
+      catch { throw new task.EngineerError('result_conflict'); }
+      task.requireEngineer(task.digest(job.conclusion) === task.digest(normalized), 'result_conflict');
+      return job;
+    }
     return this.commit(ticket, job, task.finishConclusion(job, claimId, result, this.clock()));
   }
   async failConclusion(ticketId: number, requestId: string, claimId: string,
