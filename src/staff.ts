@@ -1,6 +1,7 @@
 import cache from './cache';
 import * as middleware from './middleware';
 import * as db from './db';
+import { handleEngineerText } from './ai-engineer-ui';
 import { Context } from './interfaces';
 import { ISupportee } from './db';
 import * as log from './logger'
@@ -172,6 +173,7 @@ async function chat(ctx: Context) {
 
   const replyMsg = ctx.message?.reply_to_message;
   const ordinaryText = !replyMsg && typeof ctx.message?.text === 'string' && !ctx.message.text.startsWith('/');
+  if (await handleEngineerText(ctx)) return;
   if (ordinaryText && await resolutionCase.handleTextInput(ctx)) return;
   if (ordinaryText && await staffNameEditor.handleTextInput(ctx)) return;
   let composeInput = false;

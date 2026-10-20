@@ -16,6 +16,7 @@ import * as workflows from './workflows';
 import * as recovery from './recovery';
 import { createGracefulShutdown, installSignalHandlers, ManagedTimer } from './lifecycle';
 import * as log from './logger'
+import { EngineerWorker } from './ai-engineer-worker';
 
 /**
  * Check and migrate SQLite database to MongoDB.
@@ -103,6 +104,15 @@ async function main(logs = true) {
 
   // Initialize staff member cache from config
   await team.initStaffCache();
+  const engineer = new EngineerWorker();
+  // Disabled legacy test adapters have no ticket model. Production still repairs
+  // persisted work at the coordinated feature/role revocation boundary.
+  const engineerAvailable = Boolean(db.Supportee);
+  let engineerInitialized = false;
+  if (engineerAvailable) {
+    try { await engineer.initialize(); engineerInitialized = true; }
+    catch { log.error('AI engineer startup unavailable; support remains active'); }
+  }
 
   // Create and store all enabled addons.
   const addons = createAddons();
@@ -120,9 +130,14 @@ async function main(logs = true) {
   const performShutdown = createGracefulShutdown(addons, timers);
   const shutdown = async (reason?: string) => {
     shuttingDown = true;
+    await engineer.stop();
     await performShutdown(reason);
   };
   installSignalHandlers(shutdown);
+  if (engineerInitialized) {
+    const engineerInterval = setInterval(() => engineer.schedule(), 5000);
+    engineerInterval.unref(); timers.add(engineerInterval);
+  }
 
   // Set up daily summary cron job
   const summaryTime = cache.config.daily_summary_time || '09:00';

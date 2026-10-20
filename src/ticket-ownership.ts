@@ -1,4 +1,5 @@
 import { ISupportee, Supportee } from './db';
+import { authorityUpdate } from './ai-engineer-authority';
 
 const ACTIVE_STATUSES: Array<'open' | 'waiting_user'> = ['open', 'waiting_user'];
 
@@ -16,7 +17,7 @@ export async function takeTicket(
       status: { $in: ACTIVE_STATUSES },
       assigned_to: null,
     },
-    { $set: { assigned_to: agentId } },
+    authorityUpdate({ assigned_to: agentId }),
     { new: true },
   );
 
@@ -54,7 +55,7 @@ export async function transferTicket(
       status: { $in: ACTIVE_STATUSES },
       assigned_to: ownerGuard,
     },
-    { $set: { assigned_to: targetAgentId } },
+    authorityUpdate({ assigned_to: targetAgentId }),
     { new: true },
   );
 

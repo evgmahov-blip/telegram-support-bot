@@ -15,6 +15,7 @@ import * as resolutionCase from './ticket-resolution-case';
 import { staffDisplayName } from './staff-names';
 import { isManualTicket, MANUAL_SOURCE_LABELS } from './manual-ticket-guard';
 import { randomUUID } from 'crypto';
+import * as engineerUI from './ai-engineer-ui';
 
 const PAGE = 6;
 const PROMPT_MS = 15 * 60 * 1000;
@@ -83,6 +84,7 @@ async function staffButtons(t: ISupportee) {
     return kb([
     [{ text: '📜 История', callback_data: `tc:h:${id}:0` }, { text: '🔓 Вернуть в работу', callback_data: `tc:reopen:${id}` }],
     [{ text: saved ? '📘 Решение' : '💾 Сохранить решение', callback_data: `rs:${saved ? 'view' : 'start'}:${id}` }],
+    ...(t.ai_engineer ? [[{ text: 'Заключение ИИ', callback_data: `ae:view:${id}` }]] : []),
     [{ text: '⬅️ Назад', callback_data: 'tm:closed:0' }, STAFF_HOME],
   ]);
   }
@@ -92,6 +94,8 @@ async function staffButtons(t: ISupportee) {
     [{ text: t.status === 'waiting_user' ? '▶️ Продолжить работу' : '⏳ Ждём клиента', callback_data: `tc:${t.status === 'waiting_user' ? 'resume' : 'wait'}:${id}` }, { text: '👤 Передать', callback_data: `tc:transfer:${id}` }],
     [{ text: '📜 История', callback_data: `tc:h:${id}:0` }, { text: '📝 Заметка', callback_data: `tc:note:${id}` }],
     [{ text: '🔒 Закрыть', callback_data: `tc:closeask:${id}` }],
+    ...(cache.config.ai_engineer_enabled === true ? [[{ text: 'ИИ-инженер', callback_data: `ae:${engineerUI.engineerCanStart(t) ? 'start' : 'view'}:${id}` }]] : []),
+    ...(t.ai_engineer ? [[{ text: 'Заключение ИИ', callback_data: `ae:view:${id}` }]] : []),
     [{ text: '⬅️ Назад', callback_data: 'tm:active:0' }, STAFF_HOME],
   ]);
 }
@@ -112,7 +116,7 @@ export async function cardText(ticket: ISupportee): Promise<string> {
   ].filter(Boolean).join('\n');
   return `<b>Заявка #${ticket.ticketId}</b>\n` +
     `Статус: <b>${e(statusName[ticket.status] || ticket.status)}</b>\n` +
-    `${details}\nИнженер: ${e(owner)}\n\n` +
+    `${details}\nИнженер: ${e(owner)}\n${cache.config.ai_engineer_enabled === true ? `ИИ: ${e(engineerUI.engineerStatus(ticket))}\n` : ''}\n` +
     `<b>${manual ? 'Описание / последняя запись' : 'Последнее сообщение'}</b>\n${e(preview)}`;
 }
 
@@ -376,6 +380,10 @@ export async function handleCallback(ctx: Context): Promise<boolean> {
     return true;
   }
   if (p[0] === 'sn') return staffNameEditor.handleCallback(ctx, p);
+  if (p[0] === 'ae') {
+    if (!staffSurface(ctx)) { await ctx.answerCbQuery('Недоступно вне рабочей группы/темы.', true); return true; }
+    return engineerUI.handleEngineerCallback(ctx, p);
+  }
   if (p[0] === 'rs') {
     if (!staffSurface(ctx)) { await ctx.answerCbQuery('Недоступно вне рабочей группы/темы.', true); return true; }
     return resolutionCase.handleCallback(ctx, p);

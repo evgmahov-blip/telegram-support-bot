@@ -265,6 +265,8 @@ export class Config {
   mongodb_uri: string = 'mongodb://mongodb:27017/support';
   // LLM settings (legacy flat fields for backward compat)
   use_llm: boolean = false;
+  ai_engineer_enabled: boolean = false;
+  ai_engineer_scope: string = 'most-support-vm3902';
   llm_api_key: string = '';
   llm_base_url: string = '';
   llm_model: string = '';

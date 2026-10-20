@@ -5,6 +5,7 @@ import * as middleware from './middleware';
 import * as webhooks from './webhooks';
 import * as log from './logger';
 import { isManualTicket } from './manual-ticket-guard';
+import { authorityUpdate } from './ai-engineer-authority';
 
 /**
  * Compare-and-set transition for a ticket lifecycle state.
@@ -21,12 +22,10 @@ export async function transitionTicketStateFrom(
   if (expectedOwner !== undefined) filter.assigned_to = expectedOwner;
   const ticket = await Supportee.findOneAndUpdate(
     filter,
-    {
-      $set: {
+    authorityUpdate({
         status: target,
         closed_at: target === 'closed' ? new Date() : null,
-      },
-    },
+    }),
     { new: true },
   );
 

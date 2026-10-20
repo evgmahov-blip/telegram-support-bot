@@ -4,6 +4,8 @@ import cache from './cache';
 import { Messenger, TicketPriority } from './interfaces';
 import * as log from './logger'
 import { isManualRecipient, MANUAL_USER_PREFIX } from './manual-ticket-guard';
+import type { EngineerTask } from './ai-engineer';
+import { authorityUpdate } from './ai-engineer-authority';
 
 // Lazy config accessors — defer reading cache.config until runtime
 // to avoid circular module initialization issues (index → migrate → db → cache)
@@ -18,6 +20,9 @@ function getCollectionName(): string {
 export type TicketStatus = 'open' | 'waiting_user' | 'closed';
 
 export interface ISupportee extends mongoose.Document {
+  ai_epoch?: number;
+  ai_engineer?: EngineerTask | null;
+  ai_engineer_draft?: import('./ai-engineer-ui').EngineerDraft | null;
   ticketId: number;
   userid: string;
   internalIds: Array<number> | null;
@@ -70,6 +75,9 @@ export type ManualSource = 'phone' | 'email' | 'in_person' | 'other';
 export const MANUAL_SOURCES: ManualSource[] = ['phone', 'email', 'in_person', 'other'];
 
 export const SupporteeSchema = new mongoose.Schema<ISupportee>({
+  ai_epoch: { type: Number, default: 0 },
+  ai_engineer: { type: mongoose.Schema.Types.Mixed, default: null },
+  ai_engineer_draft: { type: mongoose.Schema.Types.Mixed, default: null },
   ticketId: { type: Number, required: true, unique: true, alias: 'id' },
   userid: { type: String, required: true },
   internalIds: { type: [Number], required: false },
@@ -591,7 +599,7 @@ export async function transitionTicketStatus(
       ticketId,
       status: { $in: allowedStatusSources[target] },
     },
-    { $set: update },
+    authorityUpdate(update),
     { new: true },
   );
 
@@ -697,7 +705,8 @@ export async function clearStaffCardBinding(ticketId: number, chatId: string, me
 }
 
 export async function setReplyPrompt(ticketId: number, staffId: string, promptId: number, expiresAt: Date,
-  kind: 'reply' | 'note', expectedOwner?: string, chatId?: string, threadId?: number | null, originMessageId?: number) {
+  kind: 'reply' | 'note', expectedOwner?: string, chatId?: string, threadId?: number | null, originMessageId?: number,
+  engineerDraft?: import('./ai-engineer-ui').EngineerDraft) {
   const query: Record<string, unknown> = { ticketId, status: { $in: ['open', 'waiting_user'] }, $or: [
     { pending_reply_staff_id: null }, { pending_reply_staff_id: { $exists: false } },
     { pending_reply_expires_at: { $lte: new Date() } },
@@ -716,6 +725,8 @@ export async function setReplyPrompt(ticketId: number, staffId: string, promptId
       pending_reply_origin_message_id: originMessageId ?? promptId,
       pending_reply_claim: null, pending_reply_claimed_at: null,
       pending_reply_version: { $add: [{ $ifNull: ['$pending_reply_version', 0] }, 1] },
+      ...(engineerDraft ? { ai_engineer_draft: { $mergeObjects: [{ $literal: engineerDraft },
+        { compose_version: { $add: [{ $ifNull: ['$pending_reply_version', 0] }, 1] } }] } } : {}),
     } }],
     { new: true },
   );
@@ -1011,6 +1022,9 @@ export async function banUser(
     { $setOnInsert: { messenger, userid: String(userid) } },
     { upsert: true, new: true, setDefaultsOnInsert: true },
   );
+  if (cache.config.ai_engineer_enabled === true) {
+    await Supportee.updateMany({ messenger, userid: String(userid), ai_engineer: { $ne: null } }, { $inc: { ai_epoch: 1 } });
+  }
 }
 
 export async function unbanUser(
@@ -1023,7 +1037,7 @@ export async function unbanUser(
   // that encoded a ban as ticket status/category.
   await Supportee.updateMany(
     { messenger, userid: String(userid), status: 'banned' },
-    { $set: { status: 'closed', category: null, closed_at: new Date() } },
+    authorityUpdate({ status: 'closed', category: null, closed_at: new Date() }),
   );
 }
 
@@ -1047,7 +1061,7 @@ export async function checkBan(
 export const closeAll = async () => {
   await Supportee.updateMany(
     { status: { $in: ['open', 'waiting_user'] } },
-    { $set: { status: 'closed', closed_at: new Date() } },
+    authorityUpdate({ status: 'closed', closed_at: new Date() }),
   );
 };
 
@@ -1058,7 +1072,7 @@ export const reopen = async (userid: any, category: string, messenger: string) =
     status: 'closed',
     ...(category && { category }),
   };
-  await Supportee.updateMany(query, { $set: { status: 'open', closed_at: null } });
+  await Supportee.updateMany(query, authorityUpdate({ status: 'open', closed_at: null }));
 };
 
 export const addIdAndName = async (
@@ -1098,13 +1112,28 @@ export const add = async (
     };
     const result = await Supportee.updateMany(
       query,
-      { $set: { status: 'closed', closed_at: new Date() } },
+      authorityUpdate({ status: 'closed', closed_at: new Date() }),
     );
     return result.modifiedCount ?? 0;
   }
 
   if (status === 'open') {
     const ticketId = await getNextTicketId();
+    if (cache.config.ai_engineer_enabled === true) {
+      const update = authorityUpdate({ status: 'open', category: category ?? null, closed_at: null });
+      const result = await Supportee.findOneAndUpdate({ messenger, userid }, [
+        { $set: {
+          ticketId: { $ifNull: ['$ticketId', ticketId] },
+          userid: { $ifNull: ['$userid', { $literal: String(userid) }] },
+          messenger: { $ifNull: ['$messenger', { $literal: messenger }] },
+          created_at: { $ifNull: ['$created_at', new Date()] },
+          assigned_to: { $ifNull: ['$assigned_to', null] },
+          tags: { $ifNull: ['$tags', []] }, priority: { $ifNull: ['$priority', 'normal'] },
+        } },
+        ...update,
+      ], { upsert: true, new: true });
+      return result ? 1 : 0;
+    }
     const result = await Supportee.findOneAndUpdate(
       { messenger, userid },
       {
@@ -1305,11 +1334,20 @@ async function appendAnalyticsEvent(
   ticketId: number,
   agent_id: string | null = null,
   metadata: Record<string, any> = {},
+  stableEventId?: string,
 ): Promise<IAnalyticsEvent> {
-  const eventId = randomUUID();
+  const eventId = stableEventId || randomUUID();
   let lastError: unknown = null;
 
   for (let attempt = 0; attempt < MAX_EVENT_APPEND_RETRIES; attempt += 1) {
+    if (stableEventId) {
+      const existing = await AnalyticsEvent.findOne({ event_id: stableEventId });
+      if (existing) {
+        if (existing.type !== type || existing.ticketId !== ticketId || existing.agent_id !== agent_id
+          || JSON.stringify(existing.metadata) !== JSON.stringify(metadata)) throw new Error('ai_event_conflict');
+        return existing as IAnalyticsEvent;
+      }
+    }
     const seq = await nextEventSequenceCandidate();
     const event = new AnalyticsEvent({
       event_id: eventId,
@@ -1325,6 +1363,10 @@ async function appendAnalyticsEvent(
       return event as IAnalyticsEvent;
     } catch (err) {
       lastError = err;
+      if (stableEventId && (err as { code?: number }).code === 11000) {
+        await waitForEventRetry(attempt);
+        continue;
+      }
       if (isDuplicateSequenceError(err)) {
         await waitForEventRetry(attempt);
         continue;
@@ -1348,6 +1390,15 @@ export async function recordAnalyticsEvent(
   metadata: Record<string, any> = {},
 ): Promise<IAnalyticsEvent> {
   return enqueueEventAppend(() => appendAnalyticsEvent(type, ticketId, agent_id, metadata));
+}
+
+/** Stable event UUID is persisted with the task before its first append. */
+export async function recordAIEngineerEvent(eventId: string, type: string, ticketId: number,
+  actorId: string, metadata: Record<string, unknown>): Promise<IAnalyticsEvent> {
+  if (!/^ai\.(task_submitted|checks_completed|conclusion_created|rework_requested|handed_off|failed|cancelled|stale)$/.test(type)) {
+    throw new Error('ai_event_type_denied');
+  }
+  return enqueueEventAppend(() => appendAnalyticsEvent(type, ticketId, actorId, metadata, eventId));
 }
 
 export async function getEventsSince(
@@ -1495,7 +1546,7 @@ export async function assignTicket(
   try {
     await Supportee.findOneAndUpdate(
       { ticketId },
-      { $set: { assigned_to: agent_telegram_id } },
+      authorityUpdate({ assigned_to: agent_telegram_id }),
     );
   } catch (err) {
     log.error('DB assignTicket error:', err);
@@ -1506,7 +1557,7 @@ export async function unassignTicket(ticketId: number): Promise<void> {
   try {
     await Supportee.findOneAndUpdate(
       { ticketId },
-      { $set: { assigned_to: null } },
+      authorityUpdate({ assigned_to: null }),
     );
   } catch (err) {
     log.error('DB unassignTicket error:', err);

@@ -164,6 +164,9 @@ autoreply:
 #    msg: "Check out our Website"
 
 use_llm: false # Will enable show_auto_replied when set to true
+# Internal staff diagnostic tasks; no automatic client replies or write actions.
+ai_engineer_enabled: false
+ai_engineer_scope: 'most-support-vm3902'
 llm_api_key: 'API_KEY'
 llm_base_url: 'https://api.openai.com/v1'
 llm_model: 'qwen-2.5-7b-instruct'

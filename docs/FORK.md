@@ -1,5 +1,7 @@
 # MOST Support Bot fork
 
+Read-only AI engineer implementation and deployment gates: [AI_ENGINEER_IMPLEMENTATION.md](AI_ENGINEER_IMPLEMENTATION.md).
+
 Upstream: `bostrot/telegram-support-bot`
 
 Baseline: `5c4bb7386da42647bc4e55e3660238a1ab037b19`
@@ -113,6 +115,10 @@ Durable push delivery is an explicit per-subscriber opt-in (`durable: true`). It
 Telegram ingress receipt idempotence is tracked separately in open PR #10 and is not part of the VM3902 candidate. Do not represent that dependency as merged or reproduce its mechanism here.
 
 ## AI contract
+
+Stage 1 AI engineer integration is specified in [AI_ENGINEER_STAGE1.md](AI_ENGINEER_STAGE1.md).
+This is a preparation document; the support-to-AINOC runtime bridge is not implemented by it.
+Task handoff, controller pull transport and rework contracts are defined in [AI_ENGINEER_ARCHITECTURE.md](AI_ENGINEER_ARCHITECTURE.md).
 
 AI output is staff-only draft material:
 
