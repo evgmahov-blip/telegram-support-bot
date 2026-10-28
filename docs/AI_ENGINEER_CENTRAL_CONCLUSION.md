@@ -61,3 +61,6 @@ or enable either side as part of this patch. AOR owns model admission, runtime b
 receipts, commits, review, and release.
 
 The language-neutral parity fixture is `test/fixtures/support-conclusion-v1.json`.
+
+An optional exact-request canary mode (disabled by default) narrows admission to one owner-approved synthetic request
+without changing this protocol; see `docs/AI_ENGINEER_CANARY.md`.

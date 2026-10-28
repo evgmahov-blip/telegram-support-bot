@@ -97,10 +97,23 @@ async function begin(ctx: Context, ticket: db.ISupportee & EngineerTicket, mode:
   else ai.requireEngineer(job && ['awaiting_operator', 'handed_off', 'failed'].includes(job.state)
     && !job.continuation && ai.current(job, ticket, engineerPolicy()), 'not_ready');
   if (mode === 'rework') await requireCatalogBinding(engineerPolicy().scope, job!.binding);
+  // Canary: this ordinary staff path carries the owner-approved request UUID and binding,
+  // only for the admitted actor/ticket/owner/epoch/revision. Store.submit re-checks all of it.
+  const policy = engineerPolicy(), admission = ai.canaryWindow(policy, Date.now());
+  let options = catalog.entries;
+  if (admission) {
+    ai.requireEngineer(mode === 'new', 'canary_rework_denied');
+    options = options.filter(b => b.binding_id === admission.binding_id && b.binding_version === admission.binding_version
+      && b.profile_id === admission.profile_id);
+    ai.requireEngineer(options.length === 1 && ai.canaryMatches(policy, { scope: policy.scope, ticket_id: ticket.ticketId,
+      request_id: admission.request_id, revision: (job?.revision ?? 0) + 1, expected_owner: ticket.assigned_to ?? null,
+      ticket_epoch: ticket.ai_epoch ?? 0, requested_by: who, binding: options[0] }), 'canary_not_admitted');
+  }
   const draft: EngineerDraft = { token: randomBytes(8).toString('hex'), version: 1, compose_version: 0,
-    mode, step: 'input', goal: '', options: catalog.entries, selected: mode === 'rework' ? job!.binding : null,
-    owner: ticket.assigned_to ?? null, epoch: ticket.ai_epoch ?? 0, fingerprint: ai.policyFingerprint(engineerPolicy()),
-    base_request: job?.request_id ?? null, task_id: job?.task_id ?? randomUUID(), request_id: randomUUID(), operation_id: randomUUID() };
+    mode, step: 'input', goal: '', options, selected: mode === 'rework' ? job!.binding : null,
+    owner: ticket.assigned_to ?? null, epoch: ticket.ai_epoch ?? 0, fingerprint: ai.policyFingerprint(policy),
+    base_request: job?.request_id ?? null, task_id: job?.task_id ?? randomUUID(),
+    request_id: admission ? admission.request_id : randomUUID(), operation_id: randomUUID() };
   const prompt = await middleware.sendMessage(chat, cache.config.staffchat_type,
     `Задание ИИ · заявка №${ticket.ticketId}. Внутренний ввод для оператора.`, { message_thread_id: topic ?? undefined });
   ai.requireEngineer(prompt, 'prompt_unavailable');
@@ -118,6 +131,11 @@ export function engineerStatus(ticket: db.ISupportee): string {
     handed_off: 'Принято оператором', reworked: 'Возвращено на доработку', failed: 'Диагностика не завершена',
     cancelled: 'Задание отменено', stale: 'Задание устарело' };
   return `${labels[job.state]} · редакция ${job.revision}`;
+}
+/** In canary mode the start entry is shown only on the admitted ticket; standard mode is unchanged. */
+export function engineerOffered(ticket: db.ISupportee): boolean {
+  const canary = engineerPolicy().canary;
+  return cache.config.ai_engineer_enabled === true && (!canary || canary.admission?.ticket_id === ticket.ticketId);
 }
 export function engineerCanStart(ticket: db.ISupportee): boolean {
   return !ticket.ai_engineer || !ai.current(ticket.ai_engineer, ticket, engineerPolicy()) || ai.TERMINAL.has(ticket.ai_engineer.state);
@@ -156,7 +174,7 @@ export async function handleEngineerCallback(ctx: Context, p: string[]): Promise
       await panel(ctx, conclusionText(job), [
         ...(canAct && job.state === 'awaiting_operator' ? [[{ text: 'Принять оператору', callback_data: `ae:handoff:${id}:${token}` }]] : []),
         ...(canAct && ['awaiting_operator', 'handed_off', 'failed'].includes(job.state) && !job.continuation
-          ? [[{ text: 'Вернуть на доработку', callback_data: `ae:rework:${id}:${token}` }]] : []),
+          && !engineerPolicy().canary ? [[{ text: 'Вернуть на доработку', callback_data: `ae:rework:${id}:${token}` }]] : []),
         ...(canAct && !ai.TERMINAL.has(job.state) ? [[{ text: 'Отменить задание', callback_data: `ae:cancel:${id}:${token}` }]] : []),
         [{ text: 'Все разделы заключения', callback_data: `ae:section:${id}:${job.revision}:0` }],
         ...(job.revision > 1 ? [[{ text: 'Предыдущая редакция', callback_data: `ae:section:${id}:${job.revision - 1}:0` }]] : []),

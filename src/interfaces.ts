@@ -267,6 +267,9 @@ export class Config {
   use_llm: boolean = false;
   ai_engineer_enabled: boolean = false;
   ai_engineer_scope: string = 'most-support-vm3902';
+  // 'canary' admits only the exact ai_engineer_canary_admission tuple; see docs/AI_ENGINEER_CANARY.md.
+  ai_engineer_mode: 'standard' | 'canary' = 'standard';
+  ai_engineer_canary_admission: Record<string, unknown> | null = null;
   llm_api_key: string = '';
   llm_base_url: string = '';
   llm_model: string = '';

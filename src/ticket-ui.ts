@@ -94,7 +94,7 @@ async function staffButtons(t: ISupportee) {
     [{ text: t.status === 'waiting_user' ? '▶️ Продолжить работу' : '⏳ Ждём клиента', callback_data: `tc:${t.status === 'waiting_user' ? 'resume' : 'wait'}:${id}` }, { text: '👤 Передать', callback_data: `tc:transfer:${id}` }],
     [{ text: '📜 История', callback_data: `tc:h:${id}:0` }, { text: '📝 Заметка', callback_data: `tc:note:${id}` }],
     [{ text: '🔒 Закрыть', callback_data: `tc:closeask:${id}` }],
-    ...(cache.config.ai_engineer_enabled === true ? [[{ text: 'ИИ-инженер', callback_data: `ae:${engineerUI.engineerCanStart(t) ? 'start' : 'view'}:${id}` }]] : []),
+    ...(engineerUI.engineerOffered(t) ? [[{ text: 'ИИ-инженер', callback_data: `ae:${engineerUI.engineerCanStart(t) ? 'start' : 'view'}:${id}` }]] : []),
     ...(t.ai_engineer ? [[{ text: 'Заключение ИИ', callback_data: `ae:view:${id}` }]] : []),
     [{ text: '⬅️ Назад', callback_data: 'tm:active:0' }, STAFF_HOME],
   ]);

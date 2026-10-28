@@ -47,10 +47,21 @@ export function admissionDraftFilter(draft: NonNullable<AdmissionFence['draft']>
     'ai_engineer_draft.token': draft.token, 'ai_engineer_draft.version': draft.version,
     'ai_engineer_draft.compose_version': draft.compose_version, 'ai_engineer_draft.step': 'preview' };
 }
+/** Canary computational writes re-assert the admitted ticket/owner/epoch on the live document. */
+export function canaryWriteFilter(admission: task.CanaryAdmission, ticket: EngineerTicket, next: EngineerTask): Record<string, unknown> {
+  task.requireEngineer(ticket.ticketId === admission.ticket_id && (ticket.assigned_to ?? null) === admission.expected_owner
+    && (ticket.ai_epoch ?? 0) === admission.ticket_epoch && next.request_id === admission.request_id
+    && next.revision === admission.revision, 'canary_not_admitted');
+  return { ticketId: admission.ticket_id, assigned_to: admission.expected_owner, $expr: { $and: [
+    { $eq: [{ $ifNull: ['$ai_epoch', 0] }, ticket.ai_epoch ?? 0] },
+    { $eq: [{ $ifNull: ['$ai_epoch', 0] }, admission.ticket_epoch] },
+  ] } };
+}
 
 export interface EngineerPersistence {
   read(ticketId: number): Promise<EngineerTicket | null>;
-  compareAndSet(ticket: EngineerTicket, previous: EngineerTask | null, next: EngineerTask, fence?: AdmissionFence): Promise<EngineerTicket | null>;
+  compareAndSet(ticket: EngineerTicket, previous: EngineerTask | null, next: EngineerTask, fence?: AdmissionFence,
+    admission?: task.CanaryAdmission | null): Promise<EngineerTicket | null>;
   archive(snapshot: Record<string, unknown>, continuation?: task.Continuation | null): Promise<void>;
   emit(ticketId: number, pending: task.Projection, requestId: string, revision: number): Promise<void>;
 }
@@ -63,7 +74,7 @@ export const mongoEngineerPersistence: EngineerPersistence = {
     const banned = await db.UserBan.exists({ userid: ticket.userid, messenger: ticket.messenger });
     return { ...ticket, ai_banned: Boolean(banned) } as unknown as EngineerTicket;
   },
-  async compareAndSet(ticket, previous, next, fence) {
+  async compareAndSet(ticket, previous, next, fence, admission) {
     const filter: Record<string, unknown> = { ticketId: ticket.ticketId, status: ticket.status,
       assigned_to: ticket.assigned_to ?? null,
       $expr: { $eq: [{ $ifNull: ['$ai_epoch', 0] }, ticket.ai_epoch ?? 0] } };
@@ -74,6 +85,7 @@ export const mongoEngineerPersistence: EngineerPersistence = {
     if (fence?.draft) {
       Object.assign(filter, admissionDraftFilter(fence.draft));
     }
+    if (admission) Object.assign(filter, canaryWriteFilter(admission, ticket, next));
     return await Supportee.findOneAndUpdate(filter, { $set: { ai_engineer: next } }, { new: true }).lean() as unknown as EngineerTicket | null;
   },
   async archive(snapshot, continuation) {
@@ -117,8 +129,13 @@ export class EngineerStore {
   private access(ticket: EngineerTicket, actor: string) {
     task.requireEngineer(task.authorized(this.policy(), ticket, actor), 'not_authorized');
   }
-  private async commit(ticket: EngineerTicket, previous: EngineerTask | null, next: EngineerTask, fence?: AdmissionFence): Promise<EngineerTask> {
-    const updated = await this.persistence.compareAndSet(ticket, previous, next, fence);
+  /** Computational writes (admit/claim/renew/publish) are canary-gated; human control and repair are not. */
+  private async commit(ticket: EngineerTicket, previous: EngineerTask | null, next: EngineerTask, fence?: AdmissionFence,
+    computational = false): Promise<EngineerTask> {
+    const policy = this.policy();
+    const admission = computational ? task.canaryWindow(policy, this.clock()) : null;
+    if (admission) task.requireEngineer(task.canaryMatches(policy, next), 'canary_not_admitted');
+    const updated = await this.persistence.compareAndSet(ticket, previous, next, fence, admission);
     task.requireEngineer(updated?.ai_engineer, 'state_changed');
     return updated.ai_engineer;
   }
@@ -126,11 +143,30 @@ export class EngineerStore {
     ids?: { task_id: string; request_id: string }, fence?: AdmissionFence): Promise<EngineerTask> {
     const ticket = await this.read(ticketId); this.access(ticket, actor);
     const previous = ticket.ai_engineer ?? null;
+    const policy = this.policy();
     if (ids && previous?.request_id === ids.request_id) {
-      task.requireEngineer(task.current(previous, ticket, this.policy()) && previous.requested_by === actor
-        && previous.input_digest === task.digest(task.snapshotInput(input.goal, input.history, input.feedback))
-        && task.digest(previous.binding) === task.digest(binding), 'request_conflict');
-      return previous;
+      if (task.current(previous, ticket, policy)) {
+        task.requireEngineer(previous.requested_by === actor
+          && previous.input_digest === task.digest(task.snapshotInput(input.goal, input.history, input.feedback))
+          && task.digest(previous.binding) === task.digest(binding), 'request_conflict');
+        return previous;
+      }
+      // A stale immutable request is never reusable. In canary mode, report a changed
+      // owner/epoch/admission fence before the terminal identity conflict.
+      const admission = task.canaryWindow(policy, this.clock());
+      if (admission) task.requireEngineer(task.canaryMatches(policy, { scope: policy.scope, ticket_id: ticket.ticketId,
+        request_id: ids.request_id, revision: (previous?.revision ?? 0) + 1, expected_owner: ticket.assigned_to ?? null,
+        ticket_epoch: ticket.ai_epoch ?? 0, requested_by: actor, binding }), 'canary_not_admitted');
+      task.requireEngineer(false, 'request_conflict');
+    }
+    // Canary: the caller must carry the pre-selected request UUID; never mint one here.
+    // Checked before any archive side effect; createTask and the CAS re-check it.
+    if (policy.canary) {
+      task.requireEngineer(ids, 'canary_identity_required');
+      task.canaryWindow(policy, this.clock());
+      task.requireEngineer(task.canaryMatches(policy, { scope: policy.scope, ticket_id: ticket.ticketId,
+        request_id: ids.request_id, revision: (previous?.revision ?? 0) + 1, expected_owner: ticket.assigned_to ?? null,
+        ticket_epoch: ticket.ai_epoch ?? 0, requested_by: actor, binding }), 'canary_not_admitted');
     }
     checkAdmission(ticket, fence);
     if (previous) {
@@ -143,7 +179,7 @@ export class EngineerStore {
     }
     const nextIds = ids ?? (previous ? { task_id: previous.task_id, request_id: randomUUID() } : undefined);
     const next = task.createTask(ticket, this.policy(), actor, binding, input, this.clock(), nextIds, (previous?.revision ?? 0) + 1);
-    return this.commit(ticket, previous, next, fence);
+    return this.commit(ticket, previous, next, fence, true);
   }
   private async active(ticketId: number, requestId: string): Promise<{ ticket: EngineerTicket; job: EngineerTask }> {
     const ticket = await this.read(ticketId); const job = ticket.ai_engineer;
@@ -151,22 +187,25 @@ export class EngineerStore {
     task.requireEngineer(task.current(job, ticket, this.policy()), 'authority_changed');
     return { ticket, job };
   }
+  /** Canary window for new computational work; accepted-receipt replays are checked before it. */
+  private window(): void { task.canaryWindow(this.policy(), this.clock()); }
   async claim(ticketId: number, requestId: string, stage: 'collector', claimId: string): Promise<EngineerTask> {
-    const { ticket, job } = await this.active(ticketId, requestId);
-    return this.commit(ticket, job, task.claim(job, stage, claimId, this.clock()));
+    const { ticket, job } = await this.active(ticketId, requestId); this.window();
+    return this.commit(ticket, job, task.claim(job, stage, claimId, this.clock()), undefined, true);
   }
   async claimSummarizer(ticketId: number, requestId: string, claimId: string, snapshotDigest: string): Promise<EngineerTask> {
-    const { ticket, job } = await this.active(ticketId, requestId);
-    return this.commit(ticket, job, task.claim(job, 'summarizer', claimId, this.clock(), snapshotDigest));
+    const { ticket, job } = await this.active(ticketId, requestId); this.window();
+    return this.commit(ticket, job, task.claim(job, 'summarizer', claimId, this.clock(), snapshotDigest), undefined, true);
   }
   async renewSummarizer(ticketId: number, requestId: string, claimId: string, snapshotDigest: string): Promise<EngineerTask> {
-    const { ticket, job } = await this.active(ticketId, requestId);
-    return this.commit(ticket, job, task.renewSummarizer(job, claimId, snapshotDigest, this.clock()));
+    const { ticket, job } = await this.active(ticketId, requestId); this.window();
+    return this.commit(ticket, job, task.renewSummarizer(job, claimId, snapshotDigest, this.clock()), undefined, true);
   }
   async publishChecks(ticketId: number, requestId: string, claimId: string, result: unknown): Promise<EngineerTask> {
     const { ticket, job } = await this.active(ticketId, requestId);
     if (job.checks && job.collector_receipt === claimId && task.digest(job.checks) === task.digest(result) && job.collector === null) return job;
-    return this.commit(ticket, job, task.finishChecks(job, claimId, result, this.clock()));
+    this.window();
+    return this.commit(ticket, job, task.finishChecks(job, claimId, result, this.clock()), undefined, true);
   }
   async publishConclusion(ticketId: number, requestId: string, claimId: string, result: unknown): Promise<EngineerTask> {
     const { ticket, job } = await this.active(ticketId, requestId);
@@ -177,14 +216,16 @@ export class EngineerStore {
       task.requireEngineer(task.digest(job.conclusion) === task.digest(normalized), 'result_conflict');
       return job;
     }
-    return this.commit(ticket, job, task.finishConclusion(job, claimId, result, this.clock()));
+    this.window();
+    return this.commit(ticket, job, task.finishConclusion(job, claimId, result, this.clock()), undefined, true);
   }
   async failConclusion(ticketId: number, requestId: string, claimId: string,
     code: 'model_unavailable' | 'model_output_invalid'): Promise<EngineerTask> {
     const { ticket, job } = await this.active(ticketId, requestId);
     if (job.state === 'failed' && job.summarizer_receipt === claimId && job.failure_code === code
       && job.summarizer === null) return job;
-    return this.commit(ticket, job, task.failConclusion(job, claimId, code, this.clock()));
+    this.window();
+    return this.commit(ticket, job, task.failConclusion(job, claimId, code, this.clock()), undefined, true);
   }
   async handoff(ticketId: number, requestId: string, actor: string): Promise<EngineerTask> {
     const { ticket, job } = await this.active(ticketId, requestId); this.access(ticket, actor);
@@ -193,6 +234,8 @@ export class EngineerStore {
   }
   async rework(ticketId: number, requestId: string, actor: string, operationId: string, feedback: string, fence?: AdmissionFence): Promise<EngineerTask> {
     const { ticket, job } = await this.active(ticketId, requestId); this.access(ticket, actor);
+    // A canary admission covers exactly one revision; a next revision needs its own admission.
+    task.requireEngineer(!this.policy().canary, 'canary_rework_denied');
     checkAdmission(ticket, fence);
     if (job.continuation?.operation_id === operationId) {
       task.requireEngineer(job.continuation.actor_id === actor && job.continuation.input.feedback === task.text(feedback, 1000), 'request_conflict');
@@ -231,9 +274,10 @@ export class EngineerStore {
     const { ticket, job } = await this.active(ticketId, requestId);
     task.requireEngineer(task.TERMINAL.has(job.state) && !job.projection_pending && job.continuation, 'not_ready');
     const intent = job.continuation; this.access(ticket, intent.actor_id);
+    task.requireEngineer(!this.policy().canary, 'canary_rework_denied');
     await this.persistence.archive(task.archiveSnapshot(job), job.continuation);
     const next = task.createTask(ticket, this.policy(), intent.actor_id, job.binding, intent.input, this.clock(),
       { task_id: job.task_id, request_id: intent.request_id }, intent.revision);
-    return this.commit(ticket, job, next);
+    return this.commit(ticket, job, next, undefined, true);
   }
 }

@@ -73,4 +73,26 @@ describe('durable engineer worker', () => {
     expect(rows.every(row => !ai.current(row.ai_engineer, row, mockPolicy))).toBe(true);
     expect(rows[11].ai_engineer.continuation).not.toBeNull(); // preserved for audit, revoked for execution
   });
+  it('a canary startup revokes every ordinary outstanding job; switching back does not revive them', async () => {
+    const standard = structuredClone(mockPolicy), now = Date.now();
+    const rows = Array.from({ length: 3 }, (_, i) => {
+      const ticket = { _id: i + 1, ticketId: i + 1, status: 'open', assigned_to: null, ai_epoch: 0 };
+      return { ...ticket, ai_engineer: ai.createTask(ticket, standard, '1', binding, ai.snapshotInput('Ordinary'), now) };
+    });
+    mockPolicy = { ...standard, canary: ai.parseCanaryPolicy('canary', { schema: ai.CANARY_SCHEMA,
+      deployment_scope: standard.scope, ticket_id: 4242, request_id: '40000000-0000-4000-8000-000000000004', revision: 1,
+      expected_owner: null, ticket_epoch: 0, requested_by: '1', binding_id: 'canary', binding_version: 1,
+      profile_id: ai.PROFILE, base_policy_digest: ai.basePolicyDigest(standard), issued_at: now - 1000,
+      expires_at: now + 60_000 }, standard) };
+    expect(mockPolicy.canary.error).toBeNull();
+    mockEpochFence.mockImplementation(async (filter: any) => {
+      rows.filter(r => r.ai_engineer.policy_fingerprint !== filter['ai_engineer.policy_fingerprint'].$ne)
+        .forEach(r => r.ai_epoch++);
+      return { modifiedCount: 3 };
+    });
+    const worker = new EngineerWorker(); await worker.initialize(); await worker.stop();
+    expect(mockEpochFence.mock.calls[0][0]['ai_engineer.policy_fingerprint']).toEqual({ $ne: ai.policyFingerprint(mockPolicy) });
+    expect(rows.every(r => r.ai_epoch === 1 && !ai.current(r.ai_engineer, r, mockPolicy))).toBe(true);
+    expect(rows.every(r => !ai.current(r.ai_engineer, r, standard))).toBe(true);
+  });
 });

@@ -1,0 +1,45 @@
+{
+  "schema": "support-engineer-canary-admission-v1",
+  "canonicalization": "UTF-8 JSON; object keys sorted by code unit; no whitespace; strings JSON-escaped; integers only; arrays keep order; sha256 lowercase hex",
+  "base_policy": {
+    "enabled": true,
+    "scope": "most-support-vm3902",
+    "staff": [{ "telegram_id": "1", "role": "admin" }]
+  },
+  "base_policy_canonical": "{\"conclusion_protocol\":\"support-conclusion-v1\",\"enabled\":true,\"generation_backend\":\"ainoc-aor\",\"profiles\":[\"host-info-v1\"],\"scope\":\"most-support-vm3902\",\"staff\":[{\"role\":\"admin\",\"telegram_id\":\"1\"}]}",
+  "base_policy_digest": "7719cd0bc59912abb561fa2520761af66e19c1a57d5f34e2967c1b442a2cf69c",
+  "config": {
+    "ai_engineer_enabled": true,
+    "ai_engineer_scope": "most-support-vm3902",
+    "ai_engineer_mode": "canary",
+    "ai_engineer_canary_admission": {
+      "schema": "support-engineer-canary-admission-v1",
+      "deployment_scope": "most-support-vm3902",
+      "ticket_id": 4242,
+      "request_id": "40000000-0000-4000-8000-000000000004",
+      "revision": 1,
+      "expected_owner": "1",
+      "ticket_epoch": 3,
+      "requested_by": "1",
+      "binding_id": "canary",
+      "binding_version": 1,
+      "profile_id": "host-info-v1",
+      "base_policy_digest": "7719cd0bc59912abb561fa2520761af66e19c1a57d5f34e2967c1b442a2cf69c",
+      "issued_at": 1700000000000,
+      "expires_at": 1700003600000
+    }
+  },
+  "admission_canonical": "{\"base_policy_digest\":\"7719cd0bc59912abb561fa2520761af66e19c1a57d5f34e2967c1b442a2cf69c\",\"binding_id\":\"canary\",\"binding_version\":1,\"deployment_scope\":\"most-support-vm3902\",\"expected_owner\":\"1\",\"expires_at\":1700003600000,\"issued_at\":1700000000000,\"profile_id\":\"host-info-v1\",\"request_id\":\"40000000-0000-4000-8000-000000000004\",\"requested_by\":\"1\",\"revision\":1,\"schema\":\"support-engineer-canary-admission-v1\",\"ticket_epoch\":3,\"ticket_id\":4242}",
+  "admission_fingerprint_rule": "sha256(admission_canonical)",
+  "canary_policy_canonical_template": "{\"admission_fingerprint\":\"<admission_fingerprint>\",\"base_policy_digest\":\"7719cd0bc59912abb561fa2520761af66e19c1a57d5f34e2967c1b442a2cf69c\",\"mode\":\"canary\"}",
+  "canary_policy_fingerprint_rule": "sha256(canary_policy_canonical_template with <admission_fingerprint> replaced)",
+  "fail_closed_vectors": [
+    { "mode": "canary", "admission": null, "error": "canary_admission_missing",
+      "policy_canonical": "{\"base_policy_digest\":\"7719cd0bc59912abb561fa2520761af66e19c1a57d5f34e2967c1b442a2cf69c\",\"error\":\"canary_admission_missing\",\"mode\":\"canary\"}" },
+    { "mode": "standard", "admission": "<config admission>", "error": "canary_mode_required",
+      "policy_canonical": "{\"base_policy_digest\":\"7719cd0bc59912abb561fa2520761af66e19c1a57d5f34e2967c1b442a2cf69c\",\"error\":\"canary_mode_required\",\"mode\":\"canary\"}" },
+    { "mode": "canary", "admission": "<config admission with expires_at 1700003600001>", "error": "canary_ttl_invalid",
+      "policy_canonical": "{\"base_policy_digest\":\"7719cd0bc59912abb561fa2520761af66e19c1a57d5f34e2967c1b442a2cf69c\",\"error\":\"canary_ttl_invalid\",\"mode\":\"canary\"}" }
+  ],
+  "window": { "not_started_before": 1700000000000, "open_from_inclusive": 1700000000000, "closed_from_inclusive": 1700003600000 }
+}

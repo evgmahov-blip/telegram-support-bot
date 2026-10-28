@@ -56,15 +56,94 @@ export function uuid(value: unknown): asserts value is string {
   requireEngineer(typeof value === 'string'
     && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value), 'invalid_uuid');
 }
+export const CANARY_SCHEMA = 'support-engineer-canary-admission-v1';
+export const CANARY_MAX_MS = 60 * 60_000;
+export const CANARY_MAX_BYTES = 2048;
+/** Exact, owner-approved admission of ONE pre-created synthetic staff ticket request. */
+export interface CanaryAdmission {
+  schema: typeof CANARY_SCHEMA; deployment_scope: string; ticket_id: number; request_id: string; revision: number;
+  expected_owner: string | null; ticket_epoch: number; requested_by: string;
+  binding_id: string; binding_version: number; profile_id: typeof PROFILE;
+  base_policy_digest: string; issued_at: number; expires_at: number;
+}
+/** Present only in canary mode. `error` set means fail-closed: nothing may be admitted or computed. */
+export interface CanaryPolicy { admission: CanaryAdmission | null; error: string | null }
 export interface EngineerPolicy {
   enabled: boolean;
   scope: string;
   staff: Array<{ telegram_id: string; role: 'admin' | 'supervisor' | 'agent' }>;
+  canary?: CanaryPolicy | null;
 }
-export function policyFingerprint(policy: EngineerPolicy): string {
+/** Standard fingerprint; also the canary `base_policy_digest`. Unchanged for standard mode. */
+export function basePolicyDigest(policy: EngineerPolicy): string {
   return digest({ enabled: policy.enabled, scope: policy.scope,
     staff: [...policy.staff].sort((a, b) => a.telegram_id.localeCompare(b.telegram_id)), profiles: [PROFILE],
     generation_backend: GENERATION_BACKEND, conclusion_protocol: CONCLUSION_PROTOCOL });
+}
+export const admissionFingerprint = (admission: CanaryAdmission): string => digest(admission);
+// Not self-referential: the admission binds the base digest; this binds both. Time is
+// deliberately excluded, so expiry never makes a task non-current for human control.
+export function policyFingerprint(policy: EngineerPolicy): string {
+  const base = basePolicyDigest(policy);
+  if (!policy.canary) return base;
+  const { admission, error } = policy.canary;
+  return admission && !error ? digest({ mode: 'canary', base_policy_digest: base, admission_fingerprint: admissionFingerprint(admission) })
+    : digest({ mode: 'canary', base_policy_digest: base, error: error || 'canary_admission_missing' });
+}
+const TELEGRAM_ID = /^[1-9][0-9]{0,19}$/;
+export function validateCanaryAdmission(value: unknown, base: EngineerPolicy): CanaryAdmission {
+  requireEngineer(value !== undefined && value !== null, 'canary_admission_missing');
+  let size: number;
+  try { size = byteSize(value); } catch { throw new EngineerError('canary_admission_invalid'); }
+  requireEngineer(size <= CANARY_MAX_BYTES, 'canary_admission_oversize');
+  try {
+    exact(value, ['schema', 'deployment_scope', 'ticket_id', 'request_id', 'revision', 'expected_owner', 'ticket_epoch',
+      'requested_by', 'binding_id', 'binding_version', 'profile_id', 'base_policy_digest', 'issued_at', 'expires_at']);
+    uuid(value.request_id);
+  } catch { throw new EngineerError('canary_admission_invalid'); }
+  const v = value as unknown as CanaryAdmission, int = (n: unknown, min: number) => Number.isSafeInteger(n) && Number(n) >= min;
+  requireEngineer(v.schema === CANARY_SCHEMA && int(v.ticket_id, 1) && int(v.revision, 1) && int(v.ticket_epoch, 0)
+    && (v.expected_owner === null || (typeof v.expected_owner === 'string' && TELEGRAM_ID.test(v.expected_owner)))
+    && typeof v.requested_by === 'string' && TELEGRAM_ID.test(v.requested_by)
+    && typeof v.binding_id === 'string' && /^[a-z][a-z0-9_-]{0,63}$/.test(v.binding_id) && int(v.binding_version, 1)
+    && typeof v.base_policy_digest === 'string' && /^[0-9a-f]{64}$/.test(v.base_policy_digest), 'canary_admission_invalid');
+  requireEngineer(v.profile_id === PROFILE, 'profile_denied');
+  requireEngineer(v.deployment_scope === base.scope, 'scope_denied');
+  requireEngineer(base.enabled === true && v.base_policy_digest === basePolicyDigest({ ...base, canary: null }), 'canary_policy_mismatch');
+  requireEngineer(base.staff.some(s => s.telegram_id === v.requested_by), 'canary_actor_unknown');
+  requireEngineer(int(v.issued_at, 1) && int(v.expires_at, 1) && v.expires_at > v.issued_at
+    && v.expires_at - v.issued_at <= CANARY_MAX_MS, 'canary_ttl_invalid');
+  return structuredClone(v);
+}
+/** Config → canary policy. Standard mode with a stray admission is ambiguous and fails closed. */
+export function parseCanaryPolicy(mode: unknown, admission: unknown, base: EngineerPolicy): CanaryPolicy | null {
+  const present = admission !== undefined && admission !== null;
+  if (mode === undefined || mode === null || mode === 'standard') return present ? { admission: null, error: 'canary_mode_required' } : null;
+  if (mode !== 'canary') return { admission: null, error: 'canary_mode_invalid' };
+  try { return { admission: validateCanaryAdmission(admission, base), error: null }; }
+  catch (error) { return { admission: null, error: error instanceof EngineerError ? error.code : 'canary_admission_invalid' }; }
+}
+/** Computational window. Absolute timestamps from config: a restart never extends it. */
+export function canaryWindow(policy: EngineerPolicy, now: number): CanaryAdmission | null {
+  if (!policy.canary) return null;
+  const { admission, error } = policy.canary;
+  requireEngineer(admission && !error, error || 'canary_admission_missing');
+  requireEngineer(Number.isFinite(now) && now >= admission.issued_at, 'canary_not_started');
+  requireEngineer(now < admission.expires_at, 'canary_expired');
+  return admission;
+}
+type CanaryIdentity = Pick<EngineerTask, 'scope' | 'ticket_id' | 'request_id' | 'revision' | 'expected_owner'
+  | 'ticket_epoch' | 'requested_by'> & { binding: Pick<Binding, 'binding_id' | 'binding_version' | 'profile_id'> };
+/** Identity only (no clock). True for standard mode. */
+export function canaryMatches(policy: EngineerPolicy, job: CanaryIdentity): boolean {
+  if (!policy.canary) return true;
+  const a = policy.canary.admission;
+  if (!a || policy.canary.error) return false;
+  return job.scope === a.deployment_scope && job.ticket_id === a.ticket_id
+    && job.request_id === a.request_id && job.revision === a.revision && job.expected_owner === a.expected_owner
+    && job.ticket_epoch === a.ticket_epoch && job.requested_by === a.requested_by
+    && job.binding?.binding_id === a.binding_id && job.binding.binding_version === a.binding_version
+    && job.binding.profile_id === a.profile_id;
 }
 export interface TicketAuthority {
   ticketId: number; status: string; assigned_to: string | null; ai_epoch?: number;
@@ -116,7 +195,8 @@ export function authorized(policy: EngineerPolicy, ticket: TicketAuthority, acto
 export function current(task: EngineerTask, ticket: TicketAuthority, policy: EngineerPolicy): boolean {
   return task.ticket_id === ticket.ticketId && task.ticket_epoch === (ticket.ai_epoch ?? 0)
     && task.expected_owner === (ticket.assigned_to ?? null) && task.scope === policy.scope
-    && task.policy_fingerprint === policyFingerprint(policy) && authorized(policy, ticket, task.requested_by);
+    && task.policy_fingerprint === policyFingerprint(policy) && canaryMatches(policy, task)
+    && authorized(policy, ticket, task.requested_by);
 }
 export function snapshotInput(goal: unknown, history: unknown = '', feedback: unknown = ''): TaskInput {
   requireEngineer(typeof history === 'string' && typeof feedback === 'string', 'invalid_text');
@@ -137,13 +217,19 @@ export function createTask(ticket: TicketAuthority, policy: EngineerPolicy, acto
     && Number.isSafeInteger(revision) && revision > 0 && Number.isFinite(now), 'invalid_identity');
   const validatedBinding = validateBinding(binding);
   const validatedInput = snapshotInput(input.goal, input.history, input.feedback);
+  // Canary: only the one admitted tuple, inside its window; task TTL never outlives the admission.
+  const admission = canaryWindow(policy, now);
+  requireEngineer(canaryMatches(policy, { scope: policy.scope, ticket_id: ticket.ticketId, request_id: ids.request_id, revision,
+    expected_owner: ticket.assigned_to ?? null, ticket_epoch: ticket.ai_epoch ?? 0, requested_by: actor,
+    binding: validatedBinding }), 'canary_not_admitted');
+  const expires = admission ? Math.min(now + REQUEST_MS, admission.expires_at) : now + REQUEST_MS;
   const authority = { ticket_id: ticket.ticketId, epoch: ticket.ai_epoch ?? 0, owner: ticket.assigned_to ?? null,
-    actor, binding: validatedBinding, request_id: ids.request_id, revision, policy: policyFingerprint(policy), expires_at: now + REQUEST_MS };
+    actor, binding: validatedBinding, request_id: ids.request_id, revision, policy: policyFingerprint(policy), expires_at: expires };
   return { schema: 'support-engineer-task-v1', scope: policy.scope, ...ids, ticket_id: ticket.ticketId,
     revision, version: 1, ticket_epoch: ticket.ai_epoch ?? 0, requested_by: actor,
     expected_owner: ticket.assigned_to ?? null, binding: validatedBinding, policy_fingerprint: policyFingerprint(policy),
     input: validatedInput, input_digest: digest(validatedInput), authority_digest: digest(authority),
-    created_at: now, expires_at: now + REQUEST_MS, state: 'queued', collector: null, summarizer: null, attempts: 0,
+    created_at: now, expires_at: expires, state: 'queued', collector: null, summarizer: null, attempts: 0,
     summarizer_snapshot_digest: null,
     checks: null, conclusion: null, failure_code: null, continuation: null, execution_allowed: false,
     collector_receipt: null, summarizer_receipt: null,
@@ -177,7 +263,8 @@ export function claim(task: EngineerTask, stage: 'collector' | 'summarizer', cla
   }
   const until = stage === 'summarizer'
     ? Math.min(now + SUMMARIZER_MS, task.expires_at, ...task.checks!.facts.map(f => f.observed_at + FACTS_MS))
-    : now + COLLECTOR_MS;
+    // Publication after task expiry is rejected anyway; never lease past it.
+    : Math.min(now + COLLECTOR_MS, task.expires_at);
   return changed(task, { state, [stage]: { claim_id: claimId, until },
     attempts: task.attempts + (stage === 'summarizer' ? 1 : 0),
     ...(stage === 'summarizer' ? { summarizer_snapshot_digest: snapshotDigest! } : {}) });

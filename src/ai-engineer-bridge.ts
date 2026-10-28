@@ -9,8 +9,25 @@ export const OPERATIONS = ['publish-catalog', 'claim-checks', 'publish-checks', 
   'claim-summarizer', 'summarizer-status', 'publish-conclusion', 'fail-conclusion'] as const;
 export function engineerPolicy(): ai.EngineerPolicy {
   const config = cache.config;
-  return { enabled: config.ai_engineer_enabled === true, scope: config.ai_engineer_scope || 'most-support-vm3902',
+  const base: ai.EngineerPolicy = { enabled: config.ai_engineer_enabled === true, scope: config.ai_engineer_scope || 'most-support-vm3902',
     staff: (config.staff_roles || []).map(s => ({ telegram_id: String(s.telegram_id), role: s.role })) };
+  const canary = ai.parseCanaryPolicy(config.ai_engineer_mode, config.ai_engineer_canary_admission, base);
+  return canary ? { ...base, canary } : base;
+}
+/**
+ * Canary queue selection: only the exact admitted ticket/request/revision/owner/epoch/binding,
+ * and nothing at all outside the admission window. `undefined` means standard mode.
+ */
+export function canarySelection(policy: ai.EngineerPolicy, now: number, excluded: string[]): Record<string, unknown> | null | undefined {
+  if (!policy.canary) return undefined;
+  let a: ai.CanaryAdmission | null;
+  try { a = ai.canaryWindow(policy, now); } catch { return null; }
+  if (!a) return null;
+  return { ticketId: a.ticket_id, 'ai_engineer.request_id': { $eq: a.request_id, $nin: excluded },
+    'ai_engineer.revision': a.revision, 'ai_engineer.ticket_id': a.ticket_id, 'ai_engineer.requested_by': a.requested_by,
+    'ai_engineer.expected_owner': a.expected_owner, 'ai_engineer.ticket_epoch': a.ticket_epoch,
+    'ai_engineer.binding.binding_id': a.binding_id, 'ai_engineer.binding.binding_version': a.binding_version,
+    'ai_engineer.binding.profile_id': a.profile_id };
 }
 /** No ticket context/goal/history/feedback crosses this boundary. */
 export function publicEnvelope(job: ai.EngineerTask) {
@@ -60,14 +77,15 @@ export function bridgeDependencies(): BridgeDependencies {
       { 'ai_engineer.summarizer.claim_id': claimId }, { 'ai_engineer.summarizer_receipt': claimId },
     ] }).lean() as unknown as EngineerTicket | null,
     findQueued: async excluded => {
-      const now = Date.now();
-      const allowed = await catalog.readCatalog(engineerPolicy().scope, now);
+      const now = Date.now(), policy = engineerPolicy(), canary = canarySelection(policy, now, excluded);
+      if (canary === null) return null;
+      const allowed = await catalog.readCatalog(policy.scope, now);
       if (!allowed.entries.length) return null;
-      return await db.Supportee.findOne({ 'ai_engineer.scope': engineerPolicy().scope,
+      return await db.Supportee.findOne({ 'ai_engineer.scope': policy.scope,
         status: { $in: [...ai.ACTIVE_TICKETS] }, 'ai_engineer.request_id': { $nin: excluded },
         'ai_engineer.state': { $in: ['queued', 'collecting'] }, 'ai_engineer.projection_pending': null,
-        'ai_engineer.policy_fingerprint': ai.policyFingerprint(engineerPolicy()),
-        'ai_engineer.expires_at': { $gt: now }, $and: [
+        'ai_engineer.policy_fingerprint': ai.policyFingerprint(policy),
+        'ai_engineer.expires_at': { $gt: now }, ...canary, $and: [
           { $or: allowed.entries.map(b => ({ 'ai_engineer.binding.binding_id': b.binding_id,
             'ai_engineer.binding.binding_version': b.binding_version, 'ai_engineer.binding.profile_id': b.profile_id })) },
           { $or: [{ 'ai_engineer.collector': null }, { 'ai_engineer.collector.until': { $lte: now } }] },
@@ -78,14 +96,15 @@ export function bridgeDependencies(): BridgeDependencies {
         ] }).sort({ 'ai_engineer.created_at': 1 }).lean() as unknown as EngineerTicket | null;
     },
     findSummarizer: async excluded => {
-      const now = Date.now();
-      const allowed = await catalog.readCatalog(engineerPolicy().scope, now);
+      const now = Date.now(), policy = engineerPolicy(), canary = canarySelection(policy, now, excluded);
+      if (canary === null) return null;
+      const allowed = await catalog.readCatalog(policy.scope, now);
       if (!allowed.entries.length) return null;
-      return await db.Supportee.findOne({ 'ai_engineer.scope': engineerPolicy().scope,
+      return await db.Supportee.findOne({ 'ai_engineer.scope': policy.scope,
         status: { $in: [...ai.ACTIVE_TICKETS] }, 'ai_engineer.request_id': { $nin: excluded },
         'ai_engineer.state': 'summarizing', 'ai_engineer.projection_pending': null,
-        'ai_engineer.policy_fingerprint': ai.policyFingerprint(engineerPolicy()),
-        'ai_engineer.expires_at': { $gt: now }, 'ai_engineer.attempts': { $lt: 2 }, $and: [
+        'ai_engineer.policy_fingerprint': ai.policyFingerprint(policy),
+        'ai_engineer.expires_at': { $gt: now }, 'ai_engineer.attempts': { $lt: 2 }, ...canary, $and: [
           { $or: allowed.entries.map(b => ({ 'ai_engineer.binding.binding_id': b.binding_id,
             'ai_engineer.binding.binding_version': b.binding_version, 'ai_engineer.binding.profile_id': b.profile_id })) },
           { $or: [{ 'ai_engineer.summarizer': null }, { 'ai_engineer.summarizer.until': { $lte: now } }] },
@@ -114,6 +133,7 @@ export async function executeBridge(operation: string, payload: unknown, d: Brid
     if (prior) {
       const ticket = await d.store.read(prior.ticketId), job = ticket.ai_engineer;
       ai.requireEngineer(job && ai.current(job, ticket, policy), 'authority_changed');
+      ai.canaryWindow(policy, now);
       await d.bindingAllowed(policy.scope, job.binding, now);
       ai.requireEngineer(job.summarizer?.claim_id === p.claim_id && job.summarizer.until > now
         && job.expires_at > now && job.state === 'summarizing', 'lease_stale');
@@ -122,6 +142,7 @@ export async function executeBridge(operation: string, payload: unknown, d: Brid
       return { protocol: ai.CONCLUSION_PROTOCOL, status: 'claimed', claim_id: p.claim_id,
         lease_until: job.summarizer.until, ...projection, execution_allowed: false };
     }
+    ai.canaryWindow(policy, now);
     const excluded: string[] = [];
     for (let attempt = 0; attempt < 5; attempt++) {
       const ticket = await d.findSummarizer(excluded), job = ticket?.ai_engineer;
@@ -190,10 +211,12 @@ export async function executeBridge(operation: string, payload: unknown, d: Brid
     if (prior) {
       const ticket = await d.store.read(prior.ticketId), job = ticket.ai_engineer;
       ai.requireEngineer(job && ai.current(job, ticket, policy), 'authority_changed');
+      ai.canaryWindow(policy, now);
       await d.bindingAllowed(policy.scope, job.binding, now);
       ai.requireEngineer(job.collector?.claim_id === p.claim_id && job.collector.until > now && job.expires_at > now, 'lease_stale');
       return { status: job.state, task: publicEnvelope(job), claim_id: p.claim_id, lease_until: job.collector.until, execution_allowed: false };
     }
+    ai.canaryWindow(policy, now);
     const excluded: string[] = [];
     for (let attempt = 0; attempt < 5; attempt++) {
       const ticket = await d.findQueued(excluded), job = ticket?.ai_engineer;
