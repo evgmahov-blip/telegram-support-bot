@@ -7,6 +7,8 @@ jest.mock('../src/cache', () => ({ __esModule: true, default: { config: {
 } } }));
 jest.mock('../src/db', () => ({
   Supportee: { findOne: mockFind, findOneAndUpdate: mockUpdate },
+  findActiveReplyCompose: jest.fn(async () => null), findAnyActiveManualDraft: jest.fn(async () => null),
+  findStaffNameEdit: jest.fn(async () => null), findResolutionIntent: jest.fn(async () => null),
   clearReplyPrompt: mockClear, setPendingTicketAction: jest.fn(), consumePendingTicketAction: mockConsume,
 }));
 jest.mock('../src/ai-engineer-store', () => ({ EngineerStore: jest.fn(() => ({
@@ -18,7 +20,7 @@ jest.mock('../src/ai-engineer-catalog', () => ({ requireCatalogBinding: mockBind
 jest.mock('../src/middleware', () => ({ reply: mockReply }));
 jest.mock('../src/ticket-ui', () => ({ refreshStaffCard: jest.fn() }));
 import * as ai from '../src/ai-engineer';
-import { handleEngineerCallback, handleEngineerText, EngineerDraft } from '../src/ai-engineer-ui';
+import { handleEngineerCallback, handleEngineerText, EngineerDraft, engineerStatus, engineerCanStart } from '../src/ai-engineer-ui';
 
 describe('staff-only AI engineer task flow', () => {
   const binding: ai.Binding = { binding_id: 'canary', binding_version: 1, display_label: 'Canary', profile_id: ai.PROFILE };
@@ -119,6 +121,87 @@ describe('staff-only AI engineer task flow', () => {
     await handleEngineerCallback(ctx, ['ae', 'handoff', '42', 'obsolete']);
     expect(mockHandoff).not.toHaveBeenCalled();
     expect(mockConsume).toHaveBeenCalledWith(42, `ae:${job.request_id}`, 'obsolete', '1');
+  });
+  it('shows bounded failure reasons and retry text only when rework exists', () => {
+    const job = ai.createTask(ticket, mockPolicy, '1', binding, ai.snapshotInput('x'), Date.now());
+    job.revision = 2;
+    for (const [code, fragment] of Object.entries({
+      request_expired: 'Срок задания истёк', facts_stale: 'Данные диагностики устарели',
+      attempts_exhausted: 'Попытки исчерпаны', checks_denied: 'Диагностика отклонена', checks_failed: 'Диагностика не удалась',
+      model_unavailable: 'Модель недоступна', model_output_invalid: 'Ответ модели не принят',
+    })) {
+      job.state = 'failed'; job.failure_code = code as ai.EngineerTask['failure_code'];
+      expect(engineerStatus({ ...ticket, ai_engineer: job })).toContain(fragment);
+      expect(engineerStatus({ ...ticket, ai_engineer: job })).toContain('можно повторить');
+    }
+    const base = mockPolicy;
+    const fixture = require('./fixtures/support-engineer-canary-admission-v1.json');
+    const admission = { ...fixture.config.ai_engineer_canary_admission,
+      ticket_id: ticket.ticketId, expected_owner: '1', ticket_epoch: 0, requested_by: '1',
+      base_policy_digest: ai.basePolicyDigest(base), issued_at: Date.now() - 1000, expires_at: Date.now() + 60000 };
+    mockPolicy = { ...base, canary: ai.parseCanaryPolicy('canary', admission, base) };
+    const canaryJob = ai.createTask(ticket, mockPolicy, '1', binding, ai.snapshotInput('x'), Date.now(),
+      { task_id: job.task_id, request_id: admission.request_id });
+    canaryJob.state = 'failed'; canaryJob.failure_code = 'model_unavailable';
+    expect(engineerStatus({ ...ticket, ai_engineer: canaryJob })).toContain('можно продолжить вручную');
+    expect(engineerStatus({ ...ticket, ai_engineer: canaryJob })).not.toContain('можно повторить');
+    mockPolicy = base;
+    job.failure_code = 'model_unavailable';
+    mockPolicy = { enabled: true, scope: 'most-support-vm3902', staff: mockPolicy.staff };
+    job.failure_code = 'unknown_code' as any;
+    expect(engineerStatus({ ...ticket, ai_engineer: job })).toContain('Диагностика не завершена');
+    job.state = 'cancelled'; job.failure_code = null;
+    expect(engineerStatus({ ...ticket, ai_engineer: job })).toContain('Задание отменено');
+    job.state = 'stale';
+    expect(engineerStatus({ ...ticket, ai_engineer: job })).toContain('Задание устарело');
+  });
+  it('answers canary and readiness callbacks in Russian without raw codes or secrets', async () => {
+    const { readCatalog } = jest.requireMock('../src/ai-engineer-catalog');
+    readCatalog.mockResolvedValue({ entries: [binding] });
+    mockPolicy = { ...mockPolicy, canary: { admission: null, error: 'canary_expired' } };
+    await handleEngineerCallback(ctx, ['ae', 'start', '42']);
+    expect(ctx.answerCbQuery).toHaveBeenCalledWith('Окно проверки завершено.', true);
+    mockReady = false;
+    mockPolicy = { enabled: true, scope: 'most-support-vm3902', staff: mockPolicy.staff };
+    await handleEngineerCallback(ctx, ['ae', 'start', '42']);
+    const hint = String(ctx.answerCbQuery.mock.calls.at(-1)[0]);
+    expect(hint).toContain('не готов');
+    expect(hint).not.toMatch(/canary|sk-secret|123456:ABCDEF/);
+    mockReady = true;
+    Object.assign(draft, { step: 'preview', selected: binding, goal: 'Проверить' });
+    mockBinding.mockRejectedValue(new ai.EngineerError('catalog_unavailable'));
+    await handleEngineerCallback(ctx, ['ae', 'confirm', '42', draft.token, '1']);
+    expect(String(ctx.answerCbQuery.mock.calls.at(-1)[0])).toContain('Каталог');
+    expect(mockSubmit).not.toHaveBeenCalled();
+  });
+  it.each([
+    ['compose_exists', 'Сначала завершите или отмените текущий ввод.'],
+    ['catalog_unavailable', 'Каталог АИНОК недоступен. Повторите позже.'],
+    ['binding_unavailable', 'Каталог АИНОК недоступен. Повторите позже.'],
+    ['canary_not_started', 'Окно проверки ещё не открыто.'],
+    ['canary_expired', 'Окно проверки завершено.'],
+    ['canary_admission_missing', 'Пробный режим не настроен.'],
+    ['canary_admission_invalid', 'Неверные параметры пробного режима.'],
+    ['canary_policy_mismatch', 'Политика пробного режима не совпадает с конфигурацией.'],
+    ['canary_not_admitted', 'Эта заявка не входит в пробный режим.'],
+    ['canary_rework_denied', 'Доработка в пробном режиме недоступна.'],
+    ['not_ready', 'ИИ-инженер ещё не готов. Повторите через минуту.'],
+    ['task_exists', 'Задание уже передано.'],
+    ['unknown_secret_code', 'Действие недоступно или устарело. Откройте актуальную карточку и повторите.'],
+  ])('maps callback failure %s to bounded Russian text', async (code, text) => {
+    const { readCatalog } = jest.requireMock('../src/ai-engineer-catalog');
+    readCatalog.mockRejectedValueOnce(new ai.EngineerError(code));
+    await handleEngineerCallback(ctx, ['ae', 'start', '42']);
+    expect(ctx.answerCbQuery).toHaveBeenCalledWith(text, true);
+    expect(text).not.toMatch(/canary|unknown_secret_code|sk-secret|123456:ABCDEF/);
+    expect(mockSubmit).not.toHaveBeenCalled();
+  });
+  it('keeps standard start available after a real cancellation', () => {
+    const created = ai.createTask(ticket, mockPolicy, '1', binding, ai.snapshotInput('x'), Date.now());
+    const ready = ai.acknowledge(created, created.projection_pending!.id);
+    const cancelled = ai.cancel(ready, '1', Date.now());
+    ticket.ai_engineer = ai.acknowledge(cancelled, cancelled.projection_pending!.id);
+    expect(engineerCanStart(ticket)).toBe(true);
   });
   it('cannot start from a copied or obsolete ticket card', async () => {
     ctx.callbackQuery.message.message_id = 9;

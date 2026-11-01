@@ -11,7 +11,7 @@ function model(): mongoose.Model<any> {
     payload: { type: mongoose.Schema.Types.Mixed, required: true }, digest: { type: String, required: true },
   }));
 }
-export function validateCatalog(value: unknown, scope: string, now: number): EngineerCatalog {
+export function validateCatalog(value: unknown, scope: string, now: number, admission?: ai.CanaryAdmission | null): EngineerCatalog {
   ai.exact(value, ['deployment_scope', 'version', 'generated_at', 'expires_at', 'entries']);
   ai.requireEngineer(value.deployment_scope === scope && Number.isSafeInteger(value.version) && Number(value.version) > 0, 'catalog_scope_or_version');
   ai.requireEngineer(typeof value.generated_at === 'number' && typeof value.expires_at === 'number'
@@ -20,11 +20,20 @@ export function validateCatalog(value: unknown, scope: string, now: number): Eng
   ai.requireEngineer(Array.isArray(value.entries) && value.entries.length <= 100 && ai.byteSize(value) <= 24 * 1024, 'catalog_too_large');
   const entries = value.entries.map(ai.validateBinding);
   ai.requireEngineer(new Set(entries.map(b => b.binding_id)).size === entries.length, 'binding_duplicate');
-  return { deployment_scope: scope, version: Number(value.version), generated_at: value.generated_at,
+  const catalog = { deployment_scope: scope, version: Number(value.version), generated_at: value.generated_at,
     expires_at: value.expires_at, entries };
+  if (admission) {
+    ai.requireEngineer(catalog.entries.length === 1, 'binding_unavailable');
+    ai.requireEngineer(catalog.expires_at <= admission.expires_at, 'catalog_expired');
+    for (const entry of catalog.entries) {
+      ai.requireEngineer(entry.binding_id === admission.binding_id && entry.binding_version === admission.binding_version
+        && entry.profile_id === admission.profile_id, 'binding_unavailable');
+    }
+  }
+  return catalog;
 }
-export async function publishCatalog(value: unknown, scope: string, now = Date.now()): Promise<EngineerCatalog> {
-  const catalog = validateCatalog(value, scope, now), hash = ai.digest(catalog), collection = model();
+export async function publishCatalog(value: unknown, scope: string, now = Date.now(), admission?: ai.CanaryAdmission | null): Promise<EngineerCatalog> {
+  const catalog = validateCatalog(value, scope, now, admission), hash = ai.digest(catalog), collection = model();
   try {
     const updated = await collection.findOneAndUpdate({ _id: scope, version: { $lt: catalog.version } },
       { $set: { payload: catalog, digest: hash, version: catalog.version } }, { upsert: true, new: true }).lean();

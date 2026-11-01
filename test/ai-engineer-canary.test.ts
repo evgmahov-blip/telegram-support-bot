@@ -1,7 +1,17 @@
 const mockFindOne = jest.fn(), mockFindOneAndUpdate = jest.fn(), mockReadCatalog = jest.fn();
+const mockCatalogFindOneAndUpdate = jest.fn(), mockCatalogFindById = jest.fn();
 jest.mock('../src/db', () => ({ Supportee: { findOne: mockFindOne, findOneAndUpdate: mockFindOneAndUpdate } }));
-jest.mock('../src/ai-engineer-catalog', () => ({ readCatalog: mockReadCatalog, publishCatalog: jest.fn(),
-  requireCatalogBinding: jest.fn() }));
+jest.mock('mongoose', () => ({
+  __esModule: true,
+  default: { models: { AIEngineerCatalog: {
+    findOneAndUpdate: (...args: unknown[]) => ({ lean: () => mockCatalogFindOneAndUpdate(...args) }),
+    findById: (...args: unknown[]) => ({ lean: () => mockCatalogFindById(...args) }),
+  } } },
+}));
+jest.mock('../src/ai-engineer-catalog', () => {
+  const actual = jest.requireActual('../src/ai-engineer-catalog');
+  return { ...actual, readCatalog: mockReadCatalog, requireCatalogBinding: jest.fn() };
+});
 import { createHash, randomUUID } from 'crypto';
 import { readFileSync } from 'fs';
 import { join } from 'path';
@@ -10,6 +20,7 @@ import * as ai from '../src/ai-engineer';
 import { EngineerStore, EngineerPersistence, EngineerTicket, mongoEngineerPersistence } from '../src/ai-engineer-store';
 import { executeBridge, BridgeDependencies, bridgeDependencies, canarySelection, engineerPolicy,
   summarizerProjection, publicEnvelope } from '../src/ai-engineer-bridge';
+import { publishCatalog, validateCatalog } from '../src/ai-engineer-catalog';
 
 // Mock/fixture tests only: no Mongo, Telegram, AINOC controller or model is reached. Not a live E2E.
 const sha = (s: string) => createHash('sha256').update(s, 'utf8').digest('hex');
@@ -425,5 +436,61 @@ describe('canary bridge operations', () => {
     expect(await executeBridge('publish-conclusion', request, d)).toEqual(accepted);
     expect(d.bindingAllowed).not.toHaveBeenCalled(); expect(d.store.publishConclusion).not.toHaveBeenCalled();
     await expect(executeBridge('summarizer-status', (({ result, ...rest }) => rest)(request), d)).rejects.toThrow();
+  });
+});
+
+describe('canary publish-catalog boundary', () => {
+  let policy: ai.EngineerPolicy, clock: number, d: BridgeDependencies;
+  const scope = { deployment_scope: base.scope };
+  const admitted = admission();
+  const catalogPayload = (patch: Record<string, unknown> = {}) => ({
+    deployment_scope: base.scope, version: 1, generated_at: clock,
+    expires_at: Math.min(clock + ai.FACTS_MS, expires), entries: [binding], ...patch,
+  });
+  beforeEach(() => {
+    policy = canary(); clock = issued + 1000;
+    mockCatalogFindOneAndUpdate.mockReset().mockResolvedValue({ version: 1 });
+    mockCatalogFindById.mockReset();
+    d = { policy: () => policy, clock: () => clock, findClaim: jest.fn(), findQueued: jest.fn(), findSummarizer: jest.fn(),
+      bindingAllowed: jest.fn(), publishCatalog, store: {} as any };
+  });
+  it('publishes an exact admitted binding inside the canary window', async () => {
+    const payload = catalogPayload();
+    await executeBridge('publish-catalog', payload, d);
+    expect(mockCatalogFindOneAndUpdate).toHaveBeenCalled();
+  });
+  it('standard mode publishes without admission validation on entries', async () => {
+    policy = base;
+    d = { ...d, policy: () => policy, publishCatalog };
+    const payload = { ...catalogPayload(), entries: [binding, { ...otherBinding, binding_id: 'second' }] };
+    await executeBridge('publish-catalog', payload, d);
+    expect(mockCatalogFindOneAndUpdate).toHaveBeenCalled();
+  });
+  it.each([
+    ['not started', () => { clock = issued - 1; }, 'canary_not_started'],
+    ['expired', () => { clock = expires; }, 'canary_expired'],
+    ['missing admission', () => { policy = canary(null); }, 'canary_admission_missing'],
+  ])('fail closed when canary window is %s before catalog validation', async (_name, mutate, code) => {
+    mutate();
+    await expect(executeBridge('publish-catalog', catalogPayload(), d)).rejects.toThrow(code);
+    expect(mockCatalogFindOneAndUpdate).not.toHaveBeenCalled();
+  });
+  it.each([
+    ['binding_id', { entries: [{ ...binding, binding_id: 'other' }] }, 'binding_unavailable'],
+    ['binding_version', { entries: [otherBinding] }, 'binding_unavailable'],
+    ['profile_id', { entries: [{ ...binding, profile_id: 'shell' as typeof ai.PROFILE }] }, 'profile_denied'],
+  ])('rejects a foreign %s in catalog entries without persistence', async (_name, patch, code) => {
+    await expect(publishCatalog(catalogPayload(patch), base.scope, clock, admitted)).rejects.toThrow(code);
+    expect(mockCatalogFindOneAndUpdate).not.toHaveBeenCalled();
+  });
+  it('rejects catalog expiry beyond the absolute canary expires_at without persistence', async () => {
+    clock = expires - 60_000;
+    const payload = catalogPayload({ generated_at: clock, expires_at: clock + ai.FACTS_MS });
+    await expect(publishCatalog(payload, base.scope, clock, admitted)).rejects.toThrow('catalog_expired');
+    expect(mockCatalogFindOneAndUpdate).not.toHaveBeenCalled();
+  });
+  it('rejects an empty canary catalog without persistence', async () => {
+    await expect(publishCatalog(catalogPayload({ entries: [] }), base.scope, clock, admitted)).rejects.toThrow('binding_unavailable');
+    expect(mockCatalogFindOneAndUpdate).not.toHaveBeenCalled();
   });
 });

@@ -16,12 +16,13 @@ jest.mock('../src/ai-engineer-store', () => ({ EngineerStore: jest.fn(() => ({
   read: mockRead, repair: mockRepair, submit: mockSubmit, rework: mockRework,
 })), readEngineerRevision: jest.fn() }));
 jest.mock('../src/ai-engineer-bridge', () => ({ engineerPolicy: () => mockPolicy }));
-jest.mock('../src/ai-engineer-readiness', () => ({ engineerReady: () => true }));
+jest.mock('../src/ai-engineer-readiness', () => ({ engineerReady: jest.fn(() => true) }));
 jest.mock('../src/ai-engineer-catalog', () => ({ requireCatalogBinding: mockBinding, readCatalog: mockCatalog }));
 jest.mock('../src/middleware', () => ({ reply: mockReply, sendMessage: mockSend }));
 jest.mock('../src/ticket-ui', () => ({ refreshStaffCard: jest.fn() }));
 import * as ai from '../src/ai-engineer';
 import { handleEngineerCallback, engineerOffered, EngineerDraft } from '../src/ai-engineer-ui';
+import { engineerReady } from '../src/ai-engineer-readiness';
 
 // Mocked staff UI: proves the existing start/confirm path carries the pre-selected UUID. Not a live E2E.
 describe('canary through the existing staff start/confirm path', () => {
@@ -88,9 +89,13 @@ describe('canary through the existing staff start/confirm path', () => {
   it('offers the start entry only on the admitted ticket and hides rework', async () => {
     expect(engineerOffered({ ticketId: 4242 } as any)).toBe(true);
     expect(engineerOffered({ ticketId: 43 } as any)).toBe(false);
+    (engineerReady as jest.Mock).mockReturnValue(false);
+    expect(engineerOffered({ ticketId: 4242 } as any)).toBe(false);
     const job = ai.createTask(ticket, mockPolicy, '2', binding, ai.snapshotInput('Synthetic'), Date.now(),
       { task_id: '50000000-0000-4000-8000-000000000005', request_id: REQUEST });
     job.state = 'awaiting_operator'; job.projection_pending = null; ticket.ai_engineer = job;
+    expect(engineerOffered(ticket)).toBe(true);
+    (engineerReady as jest.Mock).mockReturnValue(true);
     await handleEngineerCallback(ctx, ['ae', 'view', '4242']);
     const markup = JSON.stringify(mockReply.mock.calls[0][2].reply_markup);
     expect(markup).toContain('ae:handoff:'); expect(markup).not.toContain('ae:rework:');

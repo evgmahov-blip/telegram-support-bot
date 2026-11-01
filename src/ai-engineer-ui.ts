@@ -30,7 +30,9 @@ function surface(ctx: Context): boolean {
     && (!cache.config.staffchat_thread_id || thread(ctx) === cache.config.staffchat_thread_id));
 }
 function access(ctx: Context, ticket: EngineerTicket): void {
-  ai.requireEngineer(surface(ctx) && engineerReady() && ai.authorized(engineerPolicy(), ticket, actor(ctx)), 'not_authorized');
+  ai.requireEngineer(surface(ctx), 'not_authorized');
+  ai.requireEngineer(engineerReady(), 'not_ready');
+  ai.requireEngineer(ai.authorized(engineerPolicy(), ticket, actor(ctx)), 'not_authorized');
 }
 function draftAccess(ctx: Context, ticket: db.ISupportee & EngineerTicket, token: string, version?: number): EngineerDraft {
   access(ctx, ticket);
@@ -122,23 +124,69 @@ async function begin(ctx: Context, ticket: db.ISupportee & EngineerTicket, mode:
   ai.requireEngineer(bound?.ai_engineer_draft, 'draft_stale');
   await showDraft(ctx, ticket.ticketId, bound.ai_engineer_draft);
 }
+const FAILURE_STATUS: Record<string, string> = {
+  request_expired: 'Срок задания истёк',
+  facts_stale: 'Данные диагностики устарели',
+  attempts_exhausted: 'Попытки исчерпаны',
+  model_unavailable: 'Модель недоступна',
+  model_output_invalid: 'Ответ модели не принят',
+  checks_denied: 'Диагностика отклонена',
+  checks_failed: 'Диагностика не удалась',
+};
+const CALLBACK_HINT: Record<string, string> = {
+  compose_exists: 'Сначала завершите или отмените текущий ввод.',
+  catalog_unavailable: 'Каталог АИНОК недоступен. Повторите позже.',
+  binding_unavailable: 'Каталог АИНОК недоступен. Повторите позже.',
+  canary_not_started: 'Окно проверки ещё не открыто.',
+  canary_expired: 'Окно проверки завершено.',
+  canary_admission_missing: 'Пробный режим не настроен.',
+  canary_admission_invalid: 'Неверные параметры пробного режима.',
+  canary_policy_mismatch: 'Политика пробного режима не совпадает с конфигурацией.',
+  canary_not_admitted: 'Эта заявка не входит в пробный режим.',
+  canary_rework_denied: 'Доработка в пробном режиме недоступна.',
+  not_ready: 'ИИ-инженер ещё не готов. Повторите через минуту.',
+  task_exists: 'Задание уже передано.',
+};
+const STALE_ACTION = 'Откройте актуальную карточку и повторите.';
+function manualFollowUp(ticket: db.ISupportee, job: ai.EngineerTask): string {
+  const policy = engineerPolicy();
+  const canRework = !policy.canary && ai.current(job, ticket, policy)
+    && ['awaiting_operator', 'handed_off', 'failed'].includes(job.state) && !job.continuation;
+  return canRework ? 'можно повторить или продолжить вручную' : 'можно продолжить вручную';
+}
 export function engineerStatus(ticket: db.ISupportee): string {
   const job = ticket.ai_engineer;
   if (!job) return 'Задание не передано';
   if (!ai.current(job, ticket, engineerPolicy())) return 'Задание устарело';
+  if (job.state === 'failed' && job.failure_code) {
+    const reason = FAILURE_STATUS[job.failure_code] || 'Диагностика не завершена';
+    return `${reason} · ${manualFollowUp(ticket, job)} · редакция ${job.revision}`;
+  }
   const labels: Record<ai.EngineerState, string> = { queued: 'В очереди', collecting: 'Диагностика АИНОК',
     summarizing: 'Готовится заключение', awaiting_operator: 'Заключение готово — ждёт оператора',
     handed_off: 'Принято оператором', reworked: 'Возвращено на доработку', failed: 'Диагностика не завершена',
     cancelled: 'Задание отменено', stale: 'Задание устарело' };
   return `${labels[job.state]} · редакция ${job.revision}`;
 }
-/** In canary mode the start entry is shown only on the admitted ticket; standard mode is unchanged. */
+/** In canary mode the start entry is shown only on the admitted ticket inside a valid window when ready. */
 export function engineerOffered(ticket: db.ISupportee): boolean {
-  const canary = engineerPolicy().canary;
-  return cache.config.ai_engineer_enabled === true && (!canary || canary.admission?.ticket_id === ticket.ticketId);
+  if (cache.config.ai_engineer_enabled !== true) return false;
+  const policy = engineerPolicy(), canary = policy.canary;
+  if (!canary) return true;
+  if (canary.error || canary.admission?.ticket_id !== ticket.ticketId) return false;
+  const job = ticket.ai_engineer;
+  if (job && ai.current(job, ticket, policy)) return true;
+  try { ai.canaryWindow(policy, Date.now()); } catch { return false; }
+  return engineerReady();
 }
 export function engineerCanStart(ticket: db.ISupportee): boolean {
-  return !ticket.ai_engineer || !ai.current(ticket.ai_engineer, ticket, engineerPolicy()) || ai.TERMINAL.has(ticket.ai_engineer.state);
+  const job = ticket.ai_engineer, policy = engineerPolicy();
+  if (job && ai.current(job, ticket, policy)) return !policy.canary && ai.TERMINAL.has(job.state);
+  if (policy.canary) {
+    try { ai.canaryWindow(policy, Date.now()); } catch { return false; }
+    if (!engineerReady()) return false;
+  }
+  return true;
 }
 export function conclusionText(job: Pick<ai.EngineerTask, 'revision' | 'state' | 'input' | 'conclusion' | 'checks'>): string {
   const c = job.conclusion;
@@ -260,9 +308,8 @@ export async function handleEngineerCallback(ctx: Context, p: string[]): Promise
     await ctx.answerCbQuery();
   } catch (error) {
     const code = error instanceof ai.EngineerError ? error.code : 'temporarily_unavailable';
-    const message = code === 'compose_exists' ? 'Сначала завершите или отмените текущий ввод.'
-      : code === 'catalog_unavailable' || code === 'binding_unavailable' ? 'Каталог АИНОК недоступен. Повторите позже.'
-      : 'Действие недоступно или устарело. Откройте актуальную карточку и повторите.';
+    const message = CALLBACK_HINT[code]
+      || `Действие недоступно или устарело. ${STALE_ACTION}`;
     await ctx.answerCbQuery(message, true);
   }
   return true;

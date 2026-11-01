@@ -51,15 +51,27 @@ export function summarizerProjection(job: ai.EngineerTask, now: number, secrets:
   const task = publicEnvelope(job);
   return { task, input, checks, snapshot_digest: ai.digest({ task, input, checks }) };
 }
+const LIVE_COMPUTE_STATES = new Set<ai.EngineerState>(['queued', 'collecting', 'summarizing']);
+/** Immutable accepted publish: survives handoff/cancel/stale/repair; never matches an in-flight lease. */
 function exactConclusionReceipt(job: ai.EngineerTask, claimId: unknown, snapshotDigest: unknown, result: unknown): boolean {
-  if (!job.conclusion || job.state !== 'awaiting_operator' || job.summarizer !== null
+  if (!job.conclusion || job.summarizer !== null || LIVE_COMPUTE_STATES.has(job.state)
     || job.summarizer_receipt !== claimId || job.summarizer_snapshot_digest !== snapshotDigest) return false;
   try { return ai.digest(job.conclusion) === ai.digest(ai.validateConclusion(result, job)); }
   catch { return false; }
 }
 function exactFailureReceipt(job: ai.EngineerTask, claimId: unknown, snapshotDigest: unknown, code: unknown): boolean {
-  return job.state === 'failed' && job.summarizer === null && job.summarizer_receipt === claimId
-    && job.summarizer_snapshot_digest === snapshotDigest && job.failure_code === code;
+  if (job.conclusion || job.summarizer !== null || LIVE_COMPUTE_STATES.has(job.state)
+    || job.summarizer_receipt !== claimId || job.summarizer_snapshot_digest !== snapshotDigest
+    || job.failure_code !== code) return false;
+  return job.state === 'failed';
+}
+function conclusionReceiptResponse(job: ai.EngineerTask, snapshotDigest: unknown) {
+  return { protocol: ai.CONCLUSION_PROTOCOL, status: 'awaiting_operator' as const, request_id: job.request_id,
+    revision: job.revision, snapshot_digest: snapshotDigest, execution_allowed: false as const };
+}
+function failureReceiptResponse(job: ai.EngineerTask, snapshotDigest: unknown) {
+  return { protocol: ai.CONCLUSION_PROTOCOL, status: 'failed' as const, request_id: job.request_id,
+    revision: job.revision, snapshot_digest: snapshotDigest, execution_allowed: false as const };
 }
 export interface BridgeDependencies {
   policy: () => ai.EngineerPolicy; store: EngineerStore;
@@ -176,12 +188,10 @@ export async function executeBridge(operation: string, payload: unknown, d: Brid
     // Accepted receipts are immutable. Recognize an exact replay before live
     // lease, catalog and facts checks so a lost response remains recoverable.
     if (operation === 'publish-conclusion' && exactConclusionReceipt(job, p.claim_id, p.snapshot_digest, p.result)) {
-      return { protocol: ai.CONCLUSION_PROTOCOL, status: job.state, request_id: job.request_id,
-        revision: job.revision, snapshot_digest: p.snapshot_digest, execution_allowed: false };
+      return conclusionReceiptResponse(job, p.snapshot_digest);
     }
     if (operation === 'fail-conclusion' && exactFailureReceipt(job, p.claim_id, p.snapshot_digest, p.code)) {
-      return { protocol: ai.CONCLUSION_PROTOCOL, status: job.state, request_id: job.request_id,
-        revision: job.revision, snapshot_digest: p.snapshot_digest, execution_allowed: false };
+      return failureReceiptResponse(job, p.snapshot_digest);
     }
     ai.requireEngineer(ai.current(job, ticket, policy), 'authority_changed');
     await d.bindingAllowed(policy.scope, job.binding, now);
@@ -204,7 +214,10 @@ export async function executeBridge(operation: string, payload: unknown, d: Brid
     return { protocol: ai.CONCLUSION_PROTOCOL, status: failed.state, request_id: failed.request_id,
       revision: failed.revision, snapshot_digest: p.snapshot_digest, execution_allowed: false };
   }
-  if (operation === 'publish-catalog') return d.publishCatalog(p, policy.scope, now);
+  if (operation === 'publish-catalog') {
+    const admission = policy.canary ? ai.canaryWindow(policy, now) : undefined;
+    return d.publishCatalog(p, policy.scope, now, admission);
+  }
   if (operation === 'claim-checks') {
     ai.exact(p, ['deployment_scope', 'claim_id']); ai.uuid(p.claim_id);
     const prior = await d.findClaim(p.claim_id);

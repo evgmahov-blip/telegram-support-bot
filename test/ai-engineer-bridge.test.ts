@@ -3,6 +3,7 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 import * as ai from '../src/ai-engineer';
 import { executeBridge, publicEnvelope, BridgeDependencies } from '../src/ai-engineer-bridge';
+import { EngineerStore, EngineerPersistence } from '../src/ai-engineer-store';
 import { validateCatalog } from '../src/ai-engineer-catalog';
 
 const now = 1_700_000_000_000;
@@ -88,6 +89,14 @@ describe('binding catalog wire contract', () => {
     expect(() => validateCatalog(catalog, policy.scope, now + ai.FACTS_MS)).toThrow('catalog_expired');
     expect(() => validateCatalog({ ...catalog, expires_at: now + ai.FACTS_MS + 1 }, policy.scope, now)).toThrow('catalog_expired');
   });
+  it('requires a single admitted binding under canary admission', () => {
+    const admission: ai.CanaryAdmission = { schema: ai.CANARY_SCHEMA, deployment_scope: policy.scope, ticket_id: 1,
+      request_id: '30000000-0000-4000-8000-000000000003', revision: 1, expected_owner: null, ticket_epoch: 0,
+      requested_by: '1', binding_id: binding.binding_id, binding_version: binding.binding_version,
+      profile_id: binding.profile_id, base_policy_digest: ai.basePolicyDigest(policy), issued_at: now, expires_at: now + 600_000 };
+    expect(() => validateCatalog({ ...catalog, entries: [] }, policy.scope, now, admission)).toThrow('binding_unavailable');
+    expect(() => validateCatalog({ ...catalog, entries: [binding, binding] }, policy.scope, now, admission)).toThrow('binding_duplicate');
+  });
   it('rejects full inventory fields, duplicate bindings and arbitrary profiles', () => {
     expect(() => validateCatalog({ ...catalog, token: 'secret' }, policy.scope, now)).toThrow('unexpected_fields');
     expect(() => validateCatalog({ ...catalog, entries: [binding, binding] }, policy.scope, now)).toThrow('binding_duplicate');
@@ -96,7 +105,7 @@ describe('binding catalog wire contract', () => {
 });
 
 describe('support-conclusion-v1 bridge', () => {
-  let clock: number, liveTicket: any, job: ai.EngineerTask, d: BridgeDependencies;
+  let clock: number, liveTicket: any, job: ai.EngineerTask, d: BridgeDependencies, persistence: EngineerPersistence;
   const claim = '10000000-0000-4000-8000-000000000001';
   const conclusion: ai.Conclusion = { summary: 'Host is reachable',
     verified_findings: [{ text: 'Reachability was verified', evidence_refs: ['check-1'] }],
@@ -108,27 +117,24 @@ describe('support-conclusion-v1 bridge', () => {
     job = ai.createTask(ticket, policy, '1', binding,
       ai.snapshotInput('Check token=super-secret-value and https://private.invalid', '', 'password=hunter2-secret'), clock);
     job = ai.acknowledge(job, job.projection_pending!.id);
-    job.state = 'summarizing';
-    job.checks = { status: 'partial', facts: [{ ref: 'check-1', check_id: ai.PROFILE, observed_at: clock,
+    const collector = randomUUID();
+    job = ai.claim(job, 'collector', collector, clock);
+    job = ai.finishChecks(job, collector, { status: 'partial', facts: [{ ref: 'check-1', check_id: ai.PROFILE, observed_at: clock,
       values: { reachable: true, uptime_seconds: null } }], unknowns: ['uptime unavailable'],
-    completed_at: clock, execution_allowed: false };
+    completed_at: clock, execution_allowed: false }, clock);
+    job = ai.acknowledge(job, job.projection_pending!.id);
     liveTicket = { ...ticket, ai_engineer: job };
-    const store: any = {
-      read: jest.fn(async () => liveTicket), repair: jest.fn(async () => null),
-      claimSummarizer: jest.fn(async (_t, _r, c, snapshot) => {
-        job = ai.claim(job, 'summarizer', c, clock, snapshot); liveTicket.ai_engineer = job; return job;
+    persistence = {
+      read: jest.fn(async () => liveTicket),
+      compareAndSet: jest.fn(async (_ticket, _previous, next) => {
+        job = next; liveTicket.ai_engineer = next; return liveTicket;
       }),
-      renewSummarizer: jest.fn(async (_t, _r, c, snapshot) => {
-        job = ai.renewSummarizer(job, c, snapshot, clock); liveTicket.ai_engineer = job; return job;
-      }),
-      publishConclusion: jest.fn(async (_t, _r, c, result) => {
-        if (job.conclusion && job.summarizer_receipt === c && ai.digest(job.conclusion) === ai.digest(result)) return job;
-        job = ai.finishConclusion(job, c, result, clock); liveTicket.ai_engineer = job; return job;
-      }),
-      failConclusion: jest.fn(async (_t, _r, c, code) => {
-        job = ai.failConclusion(job, c, code, clock); liveTicket.ai_engineer = job; return job;
-      }),
+      emit: jest.fn(async () => undefined), archive: jest.fn(async () => undefined),
     };
+    const store = new EngineerStore(() => policy, persistence, () => clock);
+    for (const name of ['publishConclusion', 'failConclusion', 'claimSummarizer', 'renewSummarizer', 'repair'] as const) {
+      jest.spyOn(store, name);
+    }
     d = { policy: () => policy, clock: () => clock, findQueued: jest.fn(async () => null),
       findSummarizer: jest.fn(async () => liveTicket), findClaim: jest.fn(async id => id === claim ? liveTicket : null),
       bindingAllowed: jest.fn(async () => undefined), publishCatalog: jest.fn(), store };
@@ -186,7 +192,7 @@ describe('support-conclusion-v1 bridge', () => {
     expect((await executeBridge('publish-conclusion', request, d) as any).status).toBe('awaiting_operator');
     expect((await executeBridge('publish-conclusion', request, d) as any).status).toBe('awaiting_operator');
     await expect(executeBridge('publish-conclusion', { ...request,
-      result: { ...conclusion, summary: 'conflict' } }, d)).rejects.toThrow('projection_pending');
+      result: { ...conclusion, summary: 'conflict' } }, d)).rejects.toThrow('result_conflict');
   });
   it('replays an accepted publish receipt after facts and catalog expire', async () => {
     d.findClaim = jest.fn(async () => null);
@@ -197,6 +203,47 @@ describe('support-conclusion-v1 bridge', () => {
     d.bindingAllowed = jest.fn(async () => { throw new ai.EngineerError('catalog_expired'); });
     expect(await executeBridge('publish-conclusion', request, d)).toEqual(accepted);
     expect(d.bindingAllowed).not.toHaveBeenCalled();
+  });
+  it.each(['handoff', 'cancel', 'owner', 'epoch'])('replays accepted receipt after %s without writes and refuses foreign proofs', async change => {
+    d.findClaim = jest.fn(async () => null);
+    const first: any = await executeBridge('claim-summarizer', claimRequest(), d);
+    const request = { ...boundRequest(first.snapshot_digest), result: conclusion };
+    const accepted = await executeBridge('publish-conclusion', request, d);
+    await d.store.repair(42); // acknowledge the conclusion projection before human control
+    if (change === 'handoff') await d.store.handoff(42, job.request_id, '1');
+    if (change === 'cancel') await d.store.cancel(42, job.request_id, '1');
+    if (change === 'owner') liveTicket.assigned_to = '9';
+    if (change === 'epoch') liveTicket.ai_epoch = 1;
+    await d.store.repair(42); // acknowledge handoff/cancel, or invalidate changed authority
+    if (job.projection_pending) await d.store.repair(42);
+    expect(job.state).toBe(change === 'handoff' ? 'handed_off' : change === 'cancel' ? 'cancelled' : 'stale');
+    const writes = [persistence.compareAndSet, persistence.emit, persistence.archive,
+      d.store.publishConclusion, d.store.failConclusion, d.store.claimSummarizer, d.store.renewSummarizer, d.store.repair];
+    for (const write of writes) (write as jest.Mock).mockClear();
+    (d.bindingAllowed as jest.Mock).mockClear();
+    expect(await executeBridge('publish-conclusion', request, d)).toEqual(accepted);
+    for (const write of writes) expect(write).not.toHaveBeenCalled();
+    expect(d.bindingAllowed).not.toHaveBeenCalled();
+    const stale = change === 'owner' || change === 'epoch';
+    for (const [patch, code] of [
+      [{ result: { ...conclusion, summary: 'other' } }, stale ? 'authority_changed' : 'result_conflict'],
+      [{ snapshot_digest: '0'.repeat(64) }, stale ? 'authority_changed' : 'snapshot_changed'],
+      [{ claim_id: randomUUID() }, stale ? 'authority_changed' : 'lease_stale'],
+      [{ request_id: randomUUID() }, 'result_binding_changed'],
+    ] as const) {
+      await expect(executeBridge('publish-conclusion', { ...request, ...patch }, d)).rejects.toThrow(code);
+    }
+    for (const write of [persistence.compareAndSet, persistence.emit, persistence.archive]) expect(write).not.toHaveBeenCalled();
+  });
+  it('does not replay a publish for a new claim or revision mismatch', async () => {
+    d.findClaim = jest.fn(async () => null);
+    const first: any = await executeBridge('claim-summarizer', claimRequest(), d);
+    const request = { ...boundRequest(first.snapshot_digest), result: conclusion };
+    await executeBridge('publish-conclusion', request, d);
+    await d.store.repair(42);
+    await expect(executeBridge('publish-conclusion', { ...request, claim_id: randomUUID() }, d)).rejects.toThrow('lease_stale');
+    await expect(executeBridge('publish-conclusion', { ...request, revision: job.revision + 1 }, d))
+      .rejects.toThrow('result_binding_changed');
   });
   it('replays an accepted failure receipt and rejects the opposite outcome', async () => {
     d.findClaim = jest.fn(async () => null);
