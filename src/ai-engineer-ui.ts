@@ -188,11 +188,13 @@ export function engineerCanStart(ticket: db.ISupportee): boolean {
   }
   return true;
 }
-export function conclusionText(job: Pick<ai.EngineerTask, 'revision' | 'state' | 'input' | 'conclusion' | 'checks'>): string {
+export function conclusionText(job: Pick<ai.EngineerTask, 'revision' | 'state' | 'input' | 'conclusion' | 'checks'>,
+  canRework = false): string {
   const c = job.conclusion;
   const lines = [`<b>ИИ-инженер · редакция ${job.revision}</b>`, `Задание: ${escape(job.input.goal)}`,
     job.input.feedback ? `Доработка: ${escape(job.input.feedback)}` : '',
-    c ? escape(c.summary) : 'Заключение пока недоступно. Можно повторить диагностику или продолжить вручную.',
+    c ? escape(c.summary) : `Заключение пока недоступно. ${canRework
+      ? 'Можно повторить диагностику или продолжить вручную.' : 'Можно продолжить вручную.'}`,
     c ? `<b>Подтверждено</b>\n${c.verified_findings.map(f => `${escape(f.text)} [${escape(f.evidence_refs.join(', '))}]`).join('\n') || 'Нет'}` : '',
     c ? `<b>Гипотезы</b>\n${escape(c.hypotheses.join('\n')) || 'Нет'}` : '',
     c ? `<b>Неизвестно</b>\n${escape(c.unknowns.join('\n')) || 'Нет'}` : '',
@@ -218,11 +220,12 @@ export async function handleEngineerCallback(ctx: Context, p: string[]): Promise
       ai.requireEngineer(job, 'task_missing');
       const token = randomBytes(8).toString('hex');
       const canAct = engineerReady() && ai.authorized(engineerPolicy(), ticket, actor(ctx)) && ai.current(job, ticket, engineerPolicy());
+      const canRework = canAct && ['awaiting_operator', 'handed_off', 'failed'].includes(job.state) && !job.continuation
+        && !engineerPolicy().canary;
       if (canAct) await db.setPendingTicketAction(id, `ae:${job.request_id}`, token, actor(ctx), new Date(Date.now() + ai.REQUEST_MS));
-      await panel(ctx, conclusionText(job), [
+      await panel(ctx, conclusionText(job, canRework), [
         ...(canAct && job.state === 'awaiting_operator' ? [[{ text: 'Принять оператору', callback_data: `ae:handoff:${id}:${token}` }]] : []),
-        ...(canAct && ['awaiting_operator', 'handed_off', 'failed'].includes(job.state) && !job.continuation
-          && !engineerPolicy().canary ? [[{ text: 'Вернуть на доработку', callback_data: `ae:rework:${id}:${token}` }]] : []),
+        ...(canRework ? [[{ text: 'Вернуть на доработку', callback_data: `ae:rework:${id}:${token}` }]] : []),
         ...(canAct && !ai.TERMINAL.has(job.state) ? [[{ text: 'Отменить задание', callback_data: `ae:cancel:${id}:${token}` }]] : []),
         [{ text: 'Все разделы заключения', callback_data: `ae:section:${id}:${job.revision}:0` }],
         ...(job.revision > 1 ? [[{ text: 'Предыдущая редакция', callback_data: `ae:section:${id}:${job.revision - 1}:0` }]] : []),
