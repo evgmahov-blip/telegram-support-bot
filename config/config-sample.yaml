@@ -14,7 +14,7 @@ spam_time: 300000 # time (in MS) in which user may send 5 messages
 parse_mode: 'Markdown' # Experimental. Do not change unless you know what you are doing. Options: Markdown/MarkdownV2/HTML
 allow_private: false # Allow / disallow option for staff to chat privately
 direct_reply: false # Set this to true to just forward staff users to a user chat when allow_private
-auto_close_tickets: true # Close tickets after answering
+auto_close_tickets: false # Ignored: a closure always requires the engineer's recorded cause and performed work
 anonymous_tickets: true # Include userid in tickets or not
 anonymous_replies: true # Include staff member name in response
 show_auto_replied: false # Send auto replied msgs to staff chat
@@ -39,7 +39,7 @@ show_replied_mark: false # Mark tickets that already got a staff reply in /open
 forward_edited_messages: true # Re-post a user's edited message to the staff chat, marked as edited (false: edits are forwarded like new messages)
 forward_stickers: false # Forward stickers between users and staff (off: stickers are ignored)
 forward_replies_to_parent: false # Mirror staff replies from a subcategory group into the parent category group
-allow_user_close: false # Let users close their own ticket with /close
+allow_user_close: false # Let users ask to close their ticket with /close (the engineer closes it with cause and performed work)
 allow_broadcast: false # Enable the staff command /broadcast <text> (sends to every known user)
 start_keyboard: [] # Reply-keyboard buttons shown with /start (Telegram, only when no categories are configured); each button sends its label as a message
   # - "FAQ"
@@ -279,4 +279,4 @@ escalation_rules: [] # Auto-escalate tickets based on rules
   # - after_hours: 4
   #   action: "notify_supervisor" # notify_supervisor or tag_urgent
 
-auto_close_after_days: 0 # Auto-close inactive tickets (0 = disabled)
+auto_close_after_days: 0 # Report inactive tickets in the log; they are never closed without cause and performed work (0 = disabled)

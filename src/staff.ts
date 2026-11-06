@@ -6,8 +6,8 @@ import { Context } from './interfaces';
 import { ISupportee } from './db';
 import * as log from './logger'
 import * as webhooks from './webhooks';
-import * as analytics from './analytics';
 import * as team from './team';
+import * as visibility from './ticket-visibility';
 import { refreshStaffCard } from './ticket-ui';
 import * as manualIntake from './manual-intake';
 import * as staffNameEditor from './staff-name-editor';
@@ -82,6 +82,8 @@ function findParentCategory(ticketCategory: string | null, chatId: string | numb
 
 async function forwardReplyToParent(ctx: Context, ticket: ISupportee, staffMessage: string): Promise<void> {
   if (!cache.config.forward_replies_to_parent) return;
+  // A personal ticket's reply is never mirrored into a shared parent group.
+  if (!visibility.isCommonTicket(ticket)) return;
   const parent = findParentCategory(ticket.category, ctx.chat.id);
   if (!parent) return;
   const esc = middleware.strictEscape;
@@ -89,8 +91,6 @@ async function forwardReplyToParent(ctx: Context, ticket: ISupportee, staffMessa
   const text = `${language.ticket} #T${ticket.ticketId.toString().padStart(6, '0')} ${language.acceptedBy} ${esc(ctx.message.from.first_name)}:\n\n${esc(staffMessage)}`;
   await middleware.sendMessage(parent.group_id, staffchat_type, text).catch(log.error);
 }
-
-const POST_DELIVERY_TRANSITION_ATTEMPTS = 3;
 
 async function markDeliveredWithRetry(deliveryKey: string): Promise<void> {
   let last: unknown;
@@ -100,25 +100,6 @@ async function markDeliveredWithRetry(deliveryKey: string): Promise<void> {
   // Telegram already accepted the reply. Throwing here would release the
   // ingress claim and immediately replay an already delivered message.
   log.error(`Критично: не удалось закрепить доставку ${deliveryKey}.`, last);
-}
-
-/** Retry post-delivery state changes locally; never replay the user-facing reply. */
-async function transitionTicketAfterDelivery(
-  ticketId: number,
-  target: db.TicketStatus,
-): Promise<ISupportee | null> {
-  let lastError: unknown = null;
-
-  for (let attempt = 0; attempt < POST_DELIVERY_TRANSITION_ATTEMPTS; attempt += 1) {
-    try {
-      return await db.transitionTicketStatus(ticketId, target);
-    } catch (err) {
-      lastError = err;
-    }
-  }
-
-  log.error(`Post-delivery ticket transition failed for #T${ticketId} -> ${target}:`, lastError);
-  return null;
 }
 
 const MANUAL_REPLY_LIMIT = 3000;
@@ -396,13 +377,15 @@ async function chat(ctx: Context) {
   }
   db.recordAnalyticsEventBestEffort('ticket.message.staff', ticketId, senderId);
 
+  // The shared staff chat does not get a personal ticket's client name.
+  const shownName = visibility.isCommonTicket(ticket) ? name : '';
   middleware.sendMessage(
     ctx.chat.id,
     cache.config.staffchat_type,
-    `${cache.config.language.msg_sent} ${middleware.strictEscape(name)}`,
+    `${cache.config.language.msg_sent}${shownName ? ` ${middleware.strictEscape(shownName)}` : ''}`,
   ).catch(log.error);
   if (composeInput) {
-    await middleware.reply(ctx, `✅ Ответ по #T${ticketId} отправлен клиенту ${name}.`, {
+    await middleware.reply(ctx, `✅ Ответ по #T${ticketId} отправлен клиенту${shownName ? ` ${shownName}` : ''}.`, {
       message_thread_id: ctx.message.message_thread_id ?? undefined,
       reply_markup: { inline_keyboard: [[
         { text: '⬅️ К заявке', callback_data: `tc:open:${ticketId}` },
@@ -419,14 +402,9 @@ async function chat(ctx: Context) {
   webhooks.webhooks.ticketReplied(ticketId, senderId, staffMessage.substring(0, 200));
 
   if (cache.config.auto_close_tickets) {
-    const closed = await transitionTicketAfterDelivery(ticketId, 'closed');
-    if (closed) {
-      db.recordAnalyticsEventBestEffort('ticket.closed', ticketId, senderId);
-      webhooks.webhooks.ticketClosed(ticketId, senderId);
-      await analytics.sendCSATSurvey(ticket.userid, ticket.messenger, ticketId).catch((err) => {
-        log.error(`CSAT delivery failed after closing #T${ticketId}:`, err);
-      });
-    }
+    // Closure requires the engineer's recorded cause and performed work; an
+    // unattended close would have to invent them, so it is refused here.
+    log.info(`auto_close_tickets: #T${ticketId} не закрыта автоматически — закрытие требует причины и выполненных работ.`);
   }
   if (!composeInput && typeof db.clearReplyPrompt === 'function') await db.clearReplyPrompt(ticketId, senderId);
   await refreshStaffCard(ticketId);

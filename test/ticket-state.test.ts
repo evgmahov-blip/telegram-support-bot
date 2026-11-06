@@ -66,6 +66,30 @@ describe('ticket state compare-and-set transitions', () => {
     expect(await ticketState.transitionTicketStateFrom(80, 'closed', 'open', '42')).toBeNull();
   });
 
+  it('binds the closure to its explanation version in the same owner-guarded CAS update', async () => {
+    const ticket: any = { ticketId: 81, userid: '700', messenger: 'telegram', status: 'open', assigned_to: '42' };
+    mockFindOneAndUpdate.mockResolvedValueOnce({ ...ticket, status: 'closed', closure_resolution_version: 3 });
+    mockSend.mockResolvedValue('92');
+    const result = await ticketState.closeTicketLifecycle(ticket, '42', '42', { resolutionVersion: 3, metadata: { resolution_version: 3 } });
+    expect(result.outcome).toBe('closed');
+    expect(mockFindOneAndUpdate).toHaveBeenCalledWith(
+      { ticketId: 81, status: { $in: ['open', 'waiting_user'] }, assigned_to: '42' },
+      { $set: { status: 'closed', closed_at: expect.any(Date), closure_resolution_version: 3 } },
+      { new: true },
+    );
+    expect(mockAnalytics).toHaveBeenCalledWith('ticket.closed', 81, '42', { resolution_version: 3 });
+    // The client gets only the generic closure notice.
+    expect(mockSend).toHaveBeenCalledWith('700', 'telegram', expect.not.stringContaining('resolution'));
+  });
+
+  it('a stale owner guard (null = was unassigned) leaves the ticket open', async () => {
+    mockFindOneAndUpdate.mockResolvedValueOnce(null);
+    mockGetTicket.mockResolvedValueOnce({ ticketId: 82, status: 'open', assigned_to: '43' });
+    const result = await ticketState.closeTicketLifecycle({ ticketId: 82, status: 'open' } as any, '50', null, { resolutionVersion: 1 });
+    expect(result.outcome).toBe('stale');
+    expect(mockFindOneAndUpdate.mock.calls[0][0]).toEqual({ ticketId: 82, status: { $in: ['open', 'waiting_user'] }, assigned_to: null });
+  });
+
   it('keeps close side effects after a best-effort analytics failure', async () => {
     const ticket: any = { ticketId: 79, userid: '700', messenger: 'telegram', status: 'open', assigned_to: '42' };
     mockFindOneAndUpdate.mockResolvedValue({ ...ticket, status: 'closed' });

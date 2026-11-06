@@ -11,6 +11,8 @@ import * as workflows from './workflows';
 import * as edited from './edited';
 import * as log from './logger'
 import * as ticketUi from './ticket-ui';
+import * as clientOrganization from './client-organization';
+import * as routingAdmin from './routing-admin-ui';
 
 /**
  * grammY sets ctx.match to a string for string triggers and to a RegExpMatchArray for
@@ -67,6 +69,11 @@ export function registerCommonHandlers(addon: Addon, keys?: string[][]) {
   // Analytics commands
   addon.command('stats', (ctx: Context) => commands.statsCommand(ctx));
 
+  addon.command('routing_schedule', (ctx: Context) => routingAdmin.handleScheduleCommand(ctx));
+  addon.command('routing_timezone', (ctx: Context) => routingAdmin.handleScheduleCommand(ctx, true));
+  addon.command('routing_timeout', (ctx: Context) => routingAdmin.handleSettingsCommand(ctx, 'acceptance_minutes'));
+  addon.command('routing_reminder', (ctx: Context) => routingAdmin.handleSettingsCommand(ctx, 'reminder_before_minutes'));
+
   // Workflow commands
   addon.command('templates', (ctx: Context) => commands.templatesCommand(ctx));
 
@@ -122,7 +129,10 @@ export function registerCommonHandlers(addon: Addon, keys?: string[][]) {
 
   if (cache.config.pass_start === false) {
     addon.command('start', async (ctx: Context) => {
-      if (ctx.chat.type === 'private') {
+      if (ctx.chat.type === 'private' && addon.platform === 'telegram' && ticketUi.isStaffPrivate(ctx)) {
+        // A registered engineer's DM is their private staff surface (own and common tickets).
+        await ticketUi.showStaffPrivateHome(ctx);
+      } else if (ctx.chat.type === 'private') {
         const hasCategories = cache.config.categories && cache.config.categories.length > 0;
         const startMarkup = !hasCategories && addon.platform === 'telegram' ? startKeyboardMarkup() : null;
         if (startMarkup) {
@@ -140,7 +150,8 @@ export function registerCommonHandlers(addon: Addon, keys?: string[][]) {
             await middleware.reply(ctx, cache.config.language.services);
           }
         }
-        if (addon.platform === 'telegram') await ticketUi.showUserHome(ctx);
+        // The organization is asked once, before any ticket; afterwards Home shows it with an edit action.
+        if (addon.platform === 'telegram' && !await clientOrganization.promptIfMissing(ctx)) await ticketUi.showUserHome(ctx);
       } else if (addon.platform === 'telegram' && ctx.session.admin && String(ctx.chat.id) === String(cache.config.staffchat_id)) {
         await ticketUi.showStaffHome(ctx);
       } else {

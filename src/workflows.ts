@@ -3,37 +3,19 @@ import * as db from './db';
 import * as middleware from './middleware';
 import { Context } from './interfaces';
 import * as log from './logger'
-import { isManualTicket } from './manual-ticket-guard';
+import { isBusinessTime } from './routing-policy';
+import { maintainRouting } from './ticket-routing';
+import { refreshStaffCard } from './ticket-ui';
+import { flushRoutingSettingsAudit } from './routing-settings';
+import { flushOrganizationBindingAudit } from './client-organization-binding';
 
 /**
  * Checks if the current time is within business hours.
  */
 export function isWithinBusinessHours(): boolean {
     const bh = cache.config.web_chat?.business_hours;
-    if (!bh || !bh.enabled) return true; // No business hours configured = always open
-
-    const now = new Date();
-    const timezone = bh.timezone || 'UTC';
-
-    // Get current time in the configured timezone
-    const nowStr = now.toLocaleString('en-US', { timeZone: timezone });
-    const localTime = new Date(nowStr);
-    const hours = localTime.getHours();
-    const minutes = localTime.getMinutes();
-    const currentTimeInMinutes = hours * 60 + minutes;
-
-    // Parse start and end times
-    const [startH, startM] = bh.start.split(':').map(Number);
-    const [endH, endM] = bh.end.split(':').map(Number);
-    const startTimeInMinutes = startH * 60 + (startM || 0);
-    const endTimeInMinutes = endH * 60 + (endM || 0);
-
-    if (startTimeInMinutes < endTimeInMinutes) {
-        return currentTimeInMinutes >= startTimeInMinutes && currentTimeInMinutes <= endTimeInMinutes;
-    } else {
-        // Handles overnight hours (e.g., 22:00 - 06:00)
-        return currentTimeInMinutes >= startTimeInMinutes || currentTimeInMinutes <= endTimeInMinutes;
-    }
+    if (!bh || !bh.enabled) return true;
+    return isBusinessTime(new Date(), bh);
 }
 
 /**
@@ -87,12 +69,15 @@ export async function checkEscalation(ticketId: number): Promise<void> {
 }
 
 /**
- * Checks for auto-close on inactivity and closes eligible tickets.
+ * Inactivity auto-close (auto_close_after_days). A closure needs the engineer's
+ * recorded cause and performed work, which an unattended job cannot provide,
+ * so eligible tickets are only reported and stay open; nothing is invented.
  */
-export async function checkAutoClose(): Promise<void> {
+export async function checkAutoClose(): Promise<number> {
     const days = cache.config.auto_close_after_days || 0;
-    if (days <= 0) return;
+    if (days <= 0) return 0;
 
+    let stale = 0;
     try {
         const cutoffDate = new Date(Date.now() - days * 86400000);
         const openTickets = await db.Supportee.find({ status: 'open' });
@@ -103,29 +88,15 @@ export async function checkAutoClose(): Promise<void> {
                 .sort({ timestamp: -1 })
                 .limit(1);
 
-            if (messages.length === 0 || new Date(messages[0].timestamp) < cutoffDate) {
-                if (isManualTicket(ticket)) {
-                    // No client channel: close by ticket id and never attempt a notification.
-                    if (await db.transitionTicketStatus(ticket.ticketId, 'closed')) {
-                        await db.recordAnalyticsEvent('ticket.closed', ticket.ticketId, null, { reason: 'auto_close_inactivity' });
-                        log.info(`Auto-closed manual ticket #T${ticket.ticketId} (inactivity ${days}d)`);
-                    }
-                    continue;
-                }
-                await db.add(ticket.userid, 'closed', ticket.category, ticket.messenger);
-                await db.setClosedAt(ticket.ticketId);
-                await db.recordAnalyticsEvent('ticket.closed', ticket.ticketId, null, { reason: 'auto_close_inactivity' });
-
-                // Notify user
-                const msg = `${cache.config.language.ticket} #T${ticket.ticketId.toString().padStart(6, '0')} ${cache.config.language.closed}\n\nYour ticket was auto-closed due to inactivity (${days} days). You can open a new ticket at any time.`;
-                await middleware.sendMessage(ticket.userid, ticket.messenger, msg);
-
-                log.info(`Auto-closed ticket #T${ticket.ticketId} (inactivity ${days}d)`);
-            }
+            if (messages.length === 0 || new Date(messages[0].timestamp) < cutoffDate) stale += 1;
+        }
+        if (stale > 0) {
+            log.info(`Автозакрытие по неактивности отключено: ${stale} заявок без активности ${days} дн. остаются открытыми — закрытие требует причины и выполненных работ.`);
         }
     } catch (err) {
         log.error('Error in auto-close check:', err);
     }
+    return stale;
 }
 
 /**
@@ -165,6 +136,9 @@ export async function handleCannedResponse(ctx: Context, key: string): Promise<s
  * Should be called from a setInterval in the main index.ts.
  */
 export async function runWorkflowChecks(): Promise<void> {
+    if (db.Supportee) await maintainRouting(new Date(), undefined, ticket => refreshStaffCard(ticket.ticketId));
+    await flushRoutingSettingsAudit();
+    if (db.ClientProfile) await flushOrganizationBindingAudit();
     await checkAutoClose();
     log.info('Workflow checks completed.');
 }

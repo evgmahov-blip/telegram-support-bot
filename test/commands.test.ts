@@ -87,6 +87,9 @@ jest.mock('../src/webhooks', () => ({
   },
 }));
 
+const mockStartClose = jest.fn().mockResolvedValue(true);
+jest.mock('../src/ticket-resolution-case', () => ({ startClose: mockStartClose }));
+
 import * as commands from '../src/commands';
 import { Context, Messenger } from '../src/interfaces';
 import cache from '../src/cache';
@@ -189,14 +192,14 @@ describe('Commands Module', () => {
   });
 
   describe('clearCommand', () => {
-    it('should clear all tickets for admin users', async () => {
+    it('refuses bulk closure: every ticket needs its own cause and performed work', async () => {
       const ctx = createMockContext(true);
 
       await commands.clearCommand(ctx);
 
-      expect(mockCloseAll).toHaveBeenCalled();
-      expect(Object.keys(cache.ticketIDs)).toHaveLength(0);
-      expect(mockReply).toHaveBeenCalledWith(ctx, 'Все заявки закрыты.');
+      expect(mockCloseAll).not.toHaveBeenCalled();
+      expect(mockCloseTicketLifecycle).not.toHaveBeenCalled();
+      expect(mockReply).toHaveBeenCalledWith(ctx, expect.stringContaining('Массовое закрытие отключено'));
     });
 
     it('should reject non-admin users', async () => {
@@ -228,15 +231,13 @@ describe('Commands Module', () => {
   });
 
   describe('closeCommand', () => {
-    it('closes the resolved ticket through the lifecycle API', async () => {
+    it('starts the required closure explanation instead of closing directly', async () => {
       const ctx = createMockContext(true);
-      mockTransitionTicketStatus.mockResolvedValue({ ticketId: 1001, status: 'closed' });
 
       await commands.closeCommand(ctx);
 
-      expect(mockCloseTicketLifecycle).toHaveBeenCalledWith(
-        expect.objectContaining({ ticketId: 1001 }), 'user123', 'user123',
-      );
+      expect(mockStartClose).toHaveBeenCalledWith(ctx, expect.objectContaining({ ticketId: 1001 }));
+      expect(mockCloseTicketLifecycle).not.toHaveBeenCalled();
     });
   });
 

@@ -27,6 +27,7 @@ jest.mock('../src/db', () => ({
   getAllUsers: mockGetAllUsers,
   transitionTicketStatus: mockTransitionTicketStatus,
   recordAnalyticsEvent: mockRecordAnalyticsEvent,
+  recordAnalyticsEventBestEffort: jest.fn(),
   getInternalNotes: jest.fn().mockResolvedValue([{ text: 'n1' }]),
   getConversationHistory: jest.fn().mockResolvedValue([
     { sender: 'staff', text: 'Hello back', timestamp: new Date('2026-09-05T10:05:00Z') },
@@ -50,6 +51,7 @@ jest.mock('../src/ticket-state', () => ({
 }));
 jest.mock('../src/team', () => ({
   canPerformAction: jest.fn().mockReturnValue(true),
+  getStaffRole: jest.fn().mockReturnValue('supervisor'),
 }));
 jest.mock('../src/workflows', () => ({
   listCannedResponses: jest.fn().mockReturnValue(''),
@@ -231,6 +233,39 @@ describe('ticketCommand (#85)', () => {
     await commands.ticketCommand(makeCtx(true, { match: '9' } as Partial<Context>));
     expect(mockReply).toHaveBeenCalledWith(expect.anything(), expect.stringContaining('Использование: /ticket'));
   });
+
+  it('denies another engineer\'s personal ticket before rendering any detail', async () => {
+    const team = jest.requireMock('../src/team');
+    team.getStaffRole.mockReturnValueOnce('agent');
+    mockGetByTicketId.mockResolvedValue(ticket);
+    await commands.ticketCommand(makeCtx(true, { match: '1234' } as Partial<Context>));
+    expect(mockReply).toHaveBeenCalledTimes(1);
+    expect(mockReply.mock.calls[0][1]).toContain('недоступна');
+    expect(mockReply.mock.calls[0][1]).not.toContain('Alice');
+    expect(mockSendMessage).not.toHaveBeenCalled();
+  });
+
+  it('sends personal ticket details from a shared chat only to the actor DM', async () => {
+    mockGetByTicketId.mockResolvedValue(ticket);
+    mockSendMessage.mockResolvedValueOnce('501');
+    const ctx = makeCtx(true, { match: '1234' } as Partial<Context>);
+    ctx.chat.type = 'supergroup';
+    await commands.ticketCommand(ctx);
+    expect(mockSendMessage).toHaveBeenCalledWith('user123', 'telegram', expect.stringContaining('customer: Alice'), expect.anything());
+    expect(mockReply).toHaveBeenCalledTimes(1);
+    expect(mockReply.mock.calls[0][1]).not.toContain('Alice');
+  });
+
+  it('does not fall back to the shared chat when the DM is unavailable', async () => {
+    mockGetByTicketId.mockResolvedValue(ticket);
+    mockSendMessage.mockRejectedValueOnce({ description: 'Forbidden: bot was blocked by the user' });
+    const ctx = makeCtx(true, { match: '1234' } as Partial<Context>);
+    ctx.chat.type = 'supergroup';
+    await commands.ticketCommand(ctx);
+    expect(mockReply).toHaveBeenCalledTimes(1);
+    expect(mockReply.mock.calls[0][1]).toContain('/start');
+    expect(mockReply.mock.calls[0][1]).not.toContain('Alice');
+  });
 });
 
 describe('broadcastCommand (#159)', () => {
@@ -287,29 +322,33 @@ describe('user /close (#112)', () => {
     expect(mockReply).not.toHaveBeenCalled();
   });
 
-  it('closes the user\'s own active ticket through the guarded lifecycle API', async () => {
+  it('records a close request instead of closing without the engineer explanation', async () => {
     cache.config.allow_user_close = true;
-    const ticket = { ticketId: 7, userid: 'user123', status: 'open', category: null, messenger: 'telegram' };
+    const ticket = { ticketId: 7, userid: 'user123', status: 'open', category: null, messenger: 'telegram', assigned_to: null };
     mockGetTicketByUserId.mockResolvedValue(ticket);
 
     await commands.closeCommand(makeCtx(false));
 
-    expect(mockCloseTicketLifecycle).toHaveBeenCalledWith(ticket, 'user123', undefined, {
-      notifyUser: false, metadata: { closed_by: 'user' },
-    });
-    expect(mockReply).toHaveBeenCalledWith(expect.anything(), 'Ticket #T000007 closed');
-    expect(mockSendMessage).toHaveBeenCalledWith('-100123', 'telegram', 'Ticket #T000007 closed by the user');
-    expect(mockSendCSATSurvey).toHaveBeenCalledWith('user123', 'telegram', 7);
+    expect(mockCloseTicketLifecycle).not.toHaveBeenCalled();
+    expect(jest.requireMock('../src/db').recordAnalyticsEventBestEffort)
+      .toHaveBeenCalledWith('ticket.close_requested', 7, 'user123', { closed_by: 'user' });
+    expect(mockReply).toHaveBeenCalledWith(expect.anything(), expect.stringContaining('просьба закрыть обращение передана'));
+    // An unassigned (common) ticket notifies the shared staff chat.
+    expect(mockSendMessage).toHaveBeenCalledWith('-100123', 'telegram', expect.stringContaining('Клиент просит закрыть заявку № 7'), {});
+    expect(mockSendCSATSurvey).not.toHaveBeenCalled();
   });
 
-  it('allows the user to close a WAITING_USER ticket', async () => {
+  it('routes a close request on a personal ticket only to its owner DM', async () => {
     cache.config.allow_user_close = true;
-    const ticket = { ticketId: 8, userid: 'user123', status: 'waiting_user', category: null, messenger: 'telegram' };
+    const ticket = { ticketId: 8, userid: 'user123', status: 'waiting_user', category: null, messenger: 'telegram', assigned_to: '999' };
     mockGetTicketByUserId.mockResolvedValue(ticket);
+    mockSendMessage.mockResolvedValueOnce('77');
 
     await commands.closeCommand(makeCtx(false));
 
-    expect(mockCloseTicketLifecycle).toHaveBeenCalledWith(ticket, 'user123', undefined, expect.anything());
+    expect(mockCloseTicketLifecycle).not.toHaveBeenCalled();
+    expect(mockSendMessage).toHaveBeenCalledTimes(1);
+    expect(mockSendMessage).toHaveBeenCalledWith('999', 'telegram', expect.stringContaining('№ 8'), {});
   });
 
   it('tells the user when there is no active ticket', async () => {

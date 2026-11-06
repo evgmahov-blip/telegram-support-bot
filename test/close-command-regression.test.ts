@@ -5,15 +5,17 @@ const closeLifecycle = jest.fn();
 const refresh = jest.fn().mockResolvedValue(undefined);
 const getTicketByUserId = jest.fn();
 const sendMessage = jest.fn().mockResolvedValue('90');
+const startClose = jest.fn().mockResolvedValue(true);
 
 jest.mock('../src/middleware', () => ({ reply, sendMessage, strictEscape: (x: string) => x }));
 jest.mock('../src/db', () => ({
   getTicketByInternalId, getTicketById, getTicketByUserId, transitionTicketStatus: jest.fn(),
   closeAll: jest.fn(), open: jest.fn(), banUser: jest.fn(), unbanUser: jest.fn(), getInternalNotes: jest.fn(),
-  getConversationHistory: jest.fn(),
+  getConversationHistory: jest.fn(), recordAnalyticsEventBestEffort: jest.fn(),
 }));
 jest.mock('../src/ticket-state', () => ({ closeTicketLifecycle: closeLifecycle }));
 jest.mock('../src/ticket-ui', () => ({ refreshStaffCard: refresh }));
+jest.mock('../src/ticket-resolution-case', () => ({ startClose }));
 jest.mock('../src/cache', () => ({ __esModule: true, default: { config: { language: {
   from: 'От', ticket: 'Тикет', closed: 'закрыт', ticketClosed: 'Закрыт', ticketClosedError: 'Закрыт',
 }, allow_user_close: false, staffchat_type: 'telegram', staffchat_id: -100700 }, ticketIDs: {}, ticketStatus: {}, ticketSent: {}, staffMembers: new Map() } }));
@@ -21,7 +23,7 @@ jest.mock('../src/analytics', () => ({ sendCSATSurvey: jest.fn().mockResolvedVal
 jest.mock('../src/webhooks', () => ({ webhooks: { ticketClosed: jest.fn() } }));
 jest.mock('../src/workflows', () => ({ listCannedResponses: jest.fn(), getCannedResponse: jest.fn() }));
 
-import { closeCommand } from '../src/commands';
+import { closeCommand, clearCommand } from '../src/commands';
 import cache from '../src/cache';
 import { Context, Messenger } from '../src/interfaces';
 
@@ -43,11 +45,11 @@ describe('production /close regression', () => {
     cache.config.allow_user_close = false;
     getTicketByInternalId.mockResolvedValue(ticket); closeLifecycle.mockResolvedValue({ outcome: 'closed', ticket: { ...ticket, status: 'closed' } }); });
 
-  it('uses one numeric Telegram update and the persisted message correlation', async () => {
+  it('routes /close into the required explanation flow and never closes directly', async () => {
     const ctx = context(); await closeCommand(ctx);
     expect(getTicketByInternalId).toHaveBeenCalledWith(6);
-    expect(closeLifecycle).toHaveBeenCalledWith(ticket, '42', '42');
-    expect(refresh).toHaveBeenCalledWith(7);
+    expect(startClose).toHaveBeenCalledWith(ctx, ticket);
+    expect(closeLifecycle).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -57,12 +59,7 @@ describe('production /close regression', () => {
   ])('%s boundary', async (_n, actor, current, expected) => {
     getTicketByInternalId.mockResolvedValue(current);
     await closeCommand(context(true, actor)); expect(reply).toHaveBeenCalledWith(expect.anything(), expected);
-  });
-
-  it('reports an owner change won by a concurrent write', async () => {
-    closeLifecycle.mockResolvedValue({ outcome: 'stale', ticket: { ...ticket, assigned_to: '99' } });
-    await closeCommand(context());
-    expect(reply).toHaveBeenCalledWith(expect.anything(), 'Состояние или владелец заявки изменились; заявка не закрыта.');
+    expect(startClose).not.toHaveBeenCalled();
   });
 
   it('checks role before revealing a closed ticket state', async () => {
@@ -71,11 +68,19 @@ describe('production /close regression', () => {
     expect(reply).toHaveBeenCalledWith(expect.anything(), 'У вас нет прав закрывать заявки.');
   });
 
-  it('allows only the configured private user-close compatibility path', async () => {
+  it('turns the private user-close compatibility path into a request, not a closure', async () => {
     cache.config.allow_user_close = true;
     getTicketByUserId.mockResolvedValue({ ...ticket, userid: '700' });
     await closeCommand(context(false, 700, 700));
-    expect(closeLifecycle).toHaveBeenCalledWith(expect.objectContaining({ userid: '700' }), '700', undefined,
-      expect.objectContaining({ notifyUser: false }));
+    expect(closeLifecycle).not.toHaveBeenCalled();
+    expect(startClose).not.toHaveBeenCalled();
+    expect(reply).toHaveBeenCalledWith(expect.anything(), expect.stringContaining('просьба закрыть'));
+  });
+
+  it('refuses the legacy bulk /clear without touching tickets', async () => {
+    const db = jest.requireMock('../src/db');
+    await clearCommand(context());
+    expect(db.closeAll).not.toHaveBeenCalled();
+    expect(reply).toHaveBeenCalledWith(expect.anything(), expect.stringContaining('Массовое закрытие отключено'));
   });
 });

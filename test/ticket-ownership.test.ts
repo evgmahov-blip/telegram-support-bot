@@ -29,6 +29,7 @@ describe('ticket ownership', () => {
         ticketId: 10,
         status: { $in: ['open', 'waiting_user'] },
         assigned_to: null,
+        'routing.state': { $ne: 'offered' },
       },
       { $set: { assigned_to: 'agent-1' } },
       { new: true },
@@ -42,7 +43,7 @@ describe('ticket ownership', () => {
     const result = await ownership.transferTicket(11, 'agent-2', 'agent-1');
 
     expect(result).toBe(ticket);
-    expect(mockFindOne).not.toHaveBeenCalled();
+    expect(mockFindOne).toHaveBeenCalledWith({ ticketId: 11, status: { $in: ['open', 'waiting_user'] } });
     expect(mockFindOneAndUpdate).toHaveBeenCalledWith(
       {
         ticketId: 11,

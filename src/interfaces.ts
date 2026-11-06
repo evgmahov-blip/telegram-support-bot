@@ -50,6 +50,7 @@ export interface StaffMemberConfig {
   telegram_id: string;
   role: StaffRole;
   name: string;
+  active?: boolean;
 }
 
 export interface WebhookConfig {
@@ -84,6 +85,8 @@ export interface EscalationRule {
 }
 
 export interface BusinessHoursConfig {
+  /** Local start days: 0=Sunday to 6=Saturday; overnight hours belong to the start day. */
+  days?: number[];
   enabled: boolean;
   start: string;
   end: string;
@@ -311,6 +314,7 @@ export class Config {
   canned_responses: CannedResponse[] = [];
   escalation_rules: EscalationRule[] = [];
   auto_close_after_days: number = 0;
+  routing?: { acceptance_minutes: number; reminder_before_minutes: number | null };
   // Staff chat topic (forum thread) the bot is confined to (#183)
   staffchat_thread_id: number | null = null;
   // Open a new ticket for every incoming message (#172)

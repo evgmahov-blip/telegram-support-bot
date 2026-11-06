@@ -5,6 +5,7 @@ import { Context } from './interfaces';
 import * as log from './logger';
 import { persistStaffMessageCorrelation } from './staff-correlation';
 import { refreshStaffCard } from './ticket-ui';
+import * as visibility from './ticket-visibility';
 
 /**
  * Forwards an edited user message to the staff chat (forward_edited_messages, #147).
@@ -42,6 +43,19 @@ export async function handleEditedMessage(ctx: Context): Promise<boolean> {
     userId,
     `[${config.language.editedMessage}] ${msg.text}`,
   );
+
+  if (!visibility.isCommonTicket(ticket)) {
+    // A personal ticket's edit goes only to its owner's bot DM; a blocked DM
+    // leaves a content-free notice and is not retried into a shared chat.
+    const delivered = await visibility.sendToStaffPrivate(ticket.routing?.state === 'offered' ? ticket.routing.offered_to : ticket.assigned_to, text, { parse_mode: config.parse_mode });
+    if (!delivered) {
+      await middleware.sendMessage(config.staffchat_id, config.staffchat_type, visibility.personalUndeliveredNotice(ticket.ticketId), {})
+        .catch(log.error);
+    }
+    db.recordAnalyticsEventBestEffort('ticket.message.user', ticket.ticketId, userId);
+    await refreshStaffCard(ticket.ticketId);
+    return true;
+  }
 
   // Primary staff delivery is authoritative for ingress success. A transport
   // failure must reject so the fenced Telegram update can be retried.

@@ -9,6 +9,8 @@ import * as webhooks from './webhooks';
 import * as workflows from './workflows';
 import { persistStaffMessageCorrelation } from './staff-correlation';
 import { refreshStaffCard } from './ticket-ui';
+import * as visibility from './ticket-visibility';
+import * as routing from './ticket-routing';
 
 const TIME_BETWEEN_CONFIRMATION_MESSAGES = 86400000; // 24 hours
 function formatMessageAsTicket(
@@ -66,6 +68,34 @@ async function autoReply(ctx: Context): Promise<boolean> {
   return false;
 }
 
+/**
+ * Staff copy of a client message. Common tickets go to the shared staff chat
+ * (with reply correlation); a personal ticket goes only to its owner's bot DM,
+ * and a failed DM leaves just a content-free notice in the shared chat.
+ * Returns true when the copy was posted to shared staff surfaces.
+ */
+async function forwardToStaff(ticket: ISupportee, ctx: Context, autoReplyInfo?: string): Promise<boolean> {
+  if (ticket.routing?.state === 'offered') {
+    await routing.deliverOffer(ticket);
+    ticket = await db.getTicketById(ticket.ticketId, null) || ticket;
+  }
+  const { config } = cache;
+  const text = formatMessageAsTicket(ticket.ticketId, ctx, autoReplyInfo);
+  if (visibility.isCommonTicket(ticket)) {
+    const messageId = await sendMessage(config.staffchat_id, config.staffchat_type, text);
+    if (messageId) {
+      await persistStaffMessageCorrelation(ticket.ticketId, messageId, ctx.message.from.first_name);
+    }
+    return true;
+  }
+  const delivered = await visibility.sendToStaffPrivate(ticket.routing?.state === 'offered' ? ticket.routing.offered_to : ticket.assigned_to, text, { parse_mode: config.parse_mode });
+  if (!delivered) {
+    await sendMessage(config.staffchat_id, config.staffchat_type, visibility.personalUndeliveredNotice(ticket.ticketId), {})
+      .catch(log.error);
+  }
+  return false;
+}
+
 async function processTicket(
   ticket: ISupportee,
   ctx: Context,
@@ -104,29 +134,14 @@ async function processTicket(
     sendMessage(chatId, ticket.messenger, confirmationMsg).catch(log.error);
   }
 
-  const messageId = await sendMessage(
-    config.staffchat_id,
-    config.staffchat_type,
-    formatMessageAsTicket(
-      ticket.ticketId,
-      ctx,
-      autoReplyInfo,
-    ),
-  );
-  if (messageId) {
-    await persistStaffMessageCorrelation(
-      ticket.ticketId,
-      messageId,
-      ctx.message.from.first_name,
-    );
-  }
+  const shared = await forwardToStaff(ticket, ctx, autoReplyInfo);
   await refreshStaffCard(ticket.ticketId);
 
   db.recordAnalyticsEventBestEffort('ticket.message.user', ticket.ticketId, ctx.from.id.toString());
 
   // Category groups remain internal staff surfaces. MOST never adds a private
   // engineer-reply button; replies must happen in the staff group/thread.
-  if (ctx.session.group && ctx.session.group !== config.staffchat_id) {
+  if (shared && ctx.session.group && ctx.session.group !== config.staffchat_id) {
     sendMessage(
       ctx.session.group,
       ticket.messenger,
@@ -190,27 +205,12 @@ async function chat(ctx: Context, chat: { id: string }) {
 
     await db.persistTicketMessage(ticket.ticketId, 'user', ctx.from.id.toString(), ctx.message.text);
 
-    const messageId = await sendMessage(
-      config.staffchat_id,
-      config.staffchat_type,
-      formatMessageAsTicket(
-        ticket.ticketId,
-        ctx,
-        autoReplyInfo,
-      ),
-    );
-    if (messageId) {
-      await persistStaffMessageCorrelation(
-        ticket.ticketId,
-        messageId,
-        ctx.message.from.first_name,
-      );
-    }
+    const shared = await forwardToStaff(ticket, ctx, autoReplyInfo);
     await refreshStaffCard(ticket.ticketId);
 
     db.recordAnalyticsEventBestEffort('ticket.message.user', ticket.ticketId, ctx.from.id.toString());
 
-    if (ctx.session.group && ctx.session.group !== config.staffchat_id) {
+    if (shared && ctx.session.group && ctx.session.group !== config.staffchat_id) {
       sendMessage(
         ctx.session.group,
         ticket.messenger,

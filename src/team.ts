@@ -5,6 +5,7 @@ import * as ownership from './ticket-ownership';
 import * as middleware from './middleware';
 import * as log from './logger'
 import { staffDisplayName } from './staff-names';
+import * as routing from './ticket-routing';
 const safeStaffName = (id: string) => middleware.strictEscape(staffDisplayName(id));
 
 /**
@@ -34,8 +35,8 @@ export async function initStaffCache(): Promise<void> {
  * Gets the role of a staff member by their Telegram ID.
  */
 export function getStaffRole(telegramId: string): 'admin' | 'supervisor' | 'agent' | null {
-    const member = cache.staffMembers.get(telegramId);
-    if (!member) return null;
+    const member = cache.staffMembers?.get(telegramId);
+    if (!member || member.active === false) return null;
     return member.role as 'admin' | 'supervisor' | 'agent';
 }
 
@@ -134,7 +135,10 @@ export async function transferTicketCommand(
 
     const actorRole = getStaffRole(actorId);
     const expectedOwner = actorRole === 'agent' ? actorId : undefined;
-    const transferred = await ownership.transferTicket(ticketId, targetId, expectedOwner);
+    const transferred = current.routing
+      ? await routing.routingCommand(ticketId, actorId, current.routing.version, 'transfer', targetId)
+      : await ownership.transferTicket(ticketId, targetId, expectedOwner);
+    if (transferred?.routing) { await routing.flushRoutingAudit(transferred); await routing.deliverOffer(transferred); }
     if (!transferred) {
         await middleware.reply(ctx, 'Владелец или состояние заявки изменились.');
         return;
@@ -199,6 +203,13 @@ export async function assignTicketCommand(ctx: Context, targetId: string, ticket
         return;
     }
 
+    const current = await db.getTicketById(ticketId, null);
+    if (current?.routing) {
+      const changed = await routing.routingCommand(ticketId, String(ctx.from.id), current.routing.version, 'transfer', targetId);
+      if (changed) { await routing.flushRoutingAudit(changed); await routing.deliverOffer(changed); }
+      await middleware.reply(ctx, changed ? 'Заявка предложена инженеру; ожидает принятия.' : 'Назначение не выполнено: состояние или права изменились.');
+      return;
+    }
     await db.assignTicket(ticketId, targetId);
 
     const memberName = safeStaffName(targetId);
@@ -221,6 +232,12 @@ export async function assignTicketCommand(ctx: Context, targetId: string, ticket
  * Unassigns a ticket from its current assignee.
  */
 export async function unassignTicketCommand(ctx: Context, ticketId: number): Promise<void> {
+    const current = await db.getTicketById(ticketId, null);
+    if (current?.routing) {
+      const changed = await routing.routingCommand(ticketId, String(ctx.from.id), current.routing.version, 'common');
+      if (changed) await routing.flushRoutingAudit(changed);
+      await middleware.reply(ctx, changed ? 'Заявка в общей очереди.' : 'Состояние или права изменились.'); return;
+    }
     await db.unassignTicket(ticketId);
     await middleware.reply(ctx, cache.config.language.ticketUnassigned);
 }
@@ -279,12 +296,15 @@ export async function addInternalNoteCommand(ctx: Context, ticketId: number, tex
     const created = await db.addInternalNote(ticketId, ctx.from.id.toString(), text, deliveryKey);
     if (created === false) return;
 
-    // Show note in staff chat
+    // Show note in staff chat; a personal ticket's note text is not echoed to the shared chat.
     const esc = middleware.strictEscape;
+    const ticket = typeof db.getTicketById === 'function' ? await db.getTicketById(ticketId, null).catch(() => null) : null;
+    const personal = Boolean(ticket?.assigned_to) && ticket?.common_visible !== true;
     middleware.sendMessage(
         cache.config.staffchat_id,
         cache.config.staffchat_type,
-        `📝 ${cache.config.language.internalNote} #T${ticketId.toString().padStart(6, '0')} (${cache.config.language.noteAddedBy} ${esc(staffDisplayName(ctx.from.id.toString()))}):\n${esc(text)}`,
+        `📝 ${cache.config.language.internalNote} #T${ticketId.toString().padStart(6, '0')} (${cache.config.language.noteAddedBy} ${esc(staffDisplayName(ctx.from.id.toString()))})` +
+            (personal ? esc(': сохранена в истории личной заявки.') : `:\n${esc(text)}`),
         { parse_mode: cache.config.parse_mode },
     ).catch(log.error);
 

@@ -15,17 +15,21 @@ export async function transitionTicketStateFrom(
   ticketId: number,
   expectedStates: TicketStatus | TicketStatus[],
   target: TicketStatus,
-  expectedOwner?: string,
+  expectedOwner?: string | null,
+  closureResolutionVersion?: number,
 ): Promise<ISupportee | null> {
   const states = Array.isArray(expectedStates) ? expectedStates : [expectedStates];
   const filter: Record<string, unknown> = { ticketId, status: { $in: states } };
   if (expectedOwner !== undefined) filter.assigned_to = expectedOwner;
+  const values: Record<string, unknown> = {
+    status: target,
+    closed_at: target === 'closed' ? new Date() : null,
+  };
+  // The closure and the explanation it was confirmed with are written by one CAS update.
+  if (target === 'closed' && closureResolutionVersion !== undefined) values.closure_resolution_version = closureResolutionVersion;
   const ticket = await Supportee.findOneAndUpdate(
     filter,
-    authorityUpdate({
-        status: target,
-        closed_at: target === 'closed' ? new Date() : null,
-    }),
+    authorityUpdate(values),
     { new: true },
   );
 
@@ -40,11 +44,12 @@ export function resumeWaitingTicket(ticketId: number): Promise<ISupportee | null
 export async function closeTicketLifecycle(
   ticket: ISupportee,
   actorId: string,
-  expectedOwner?: string,
-  options: { notifyUser?: boolean; metadata?: Record<string, unknown> } = {},
+  expectedOwner?: string | null,
+  options: { notifyUser?: boolean; metadata?: Record<string, unknown>; resolutionVersion?: number } = {},
 ): Promise<{ outcome: 'closed'|'already_closed'|'stale'; ticket: ISupportee | null; notificationFailed?: boolean }> {
   if (ticket.status === 'closed') return { outcome: 'already_closed', ticket };
-  const closed = await transitionTicketStateFrom(ticket.ticketId, ['open', 'waiting_user'], 'closed', expectedOwner);
+  const closed = await transitionTicketStateFrom(ticket.ticketId, ['open', 'waiting_user'], 'closed', expectedOwner,
+    options.resolutionVersion);
   if (!closed) {
     const current = await db.getTicketById(ticket.ticketId, null);
     return { outcome: current?.status === 'closed' ? 'already_closed' : 'stale', ticket: current };

@@ -1,5 +1,6 @@
 import { ISupportee, Supportee } from './db';
 import { authorityUpdate } from './ai-engineer-authority';
+import { routingCommand } from './ticket-routing';
 
 const ACTIVE_STATUSES: Array<'open' | 'waiting_user'> = ['open', 'waiting_user'];
 
@@ -11,11 +12,14 @@ export async function takeTicket(
   ticketId: number,
   agentId: string,
 ): Promise<ISupportee | null> {
+  const current = await Supportee.findOne({ ticketId, status: { $in: ACTIVE_STATUSES } });
+  if (current?.routing) return routingCommand(ticketId, agentId, current.routing.version, 'take');
   const ticket = await Supportee.findOneAndUpdate(
     {
       ticketId,
       status: { $in: ACTIVE_STATUSES },
       assigned_to: null,
+      'routing.state': { $ne: 'offered' },
     },
     authorityUpdate({ assigned_to: agentId }),
     { new: true },
@@ -36,6 +40,12 @@ export async function transferTicket(
   targetAgentId: string,
   expectedOwner?: string,
 ): Promise<ISupportee | null> {
+  const routed = await Supportee.findOne({ ticketId, status: { $in: ACTIVE_STATUSES } });
+  if (routed?.routing) {
+    if (expectedOwner !== undefined && routed.assigned_to !== expectedOwner) return null;
+    if (!expectedOwner) return null;
+    return routingCommand(ticketId, expectedOwner, routed.routing.version, 'transfer', targetAgentId);
+  }
   let ownerGuard: string | null;
 
   if (expectedOwner !== undefined) {

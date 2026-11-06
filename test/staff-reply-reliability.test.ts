@@ -287,51 +287,18 @@ describe('staff reply delivery reliability', () => {
     expect(mockReply).toHaveBeenCalledWith(context, 'Ticket closed');
   });
 
-  it('does not replay a delivered reply when auto-close persistence keeps failing', async () => {
+  it('refuses unattended auto-close: the delivered reply stands and the ticket stays open', async () => {
     (cache.config as any).auto_close_tickets = true;
-    const error = new Error('mongo unavailable');
-    mockTransitionTicketStatus.mockRejectedValue(error);
 
     await expect(chat(createContext())).resolves.toBeUndefined();
 
     const userDeliveries = mockSendMessage.mock.calls.filter((call) => call[0] === 'user123');
     expect(userDeliveries).toHaveLength(1);
-    expect(mockTransitionTicketStatus).toHaveBeenCalledTimes(3);
-    expect(mockLogError).toHaveBeenCalledWith(
-      'Post-delivery ticket transition failed for #T42 -> closed:',
-      error,
-    );
-    expect(mockRecordEventBestEffort).toHaveBeenCalledWith(
-      'ticket.message.staff',
-      42,
-      'agent1',
-    );
-    expect(mockRecordEventBestEffort).toHaveBeenCalledWith(
-      'ticket.replied',
-      42,
-      'agent1',
-    );
-  });
-
-  it('treats CSAT failure as post-delivery best-effort after a successful close', async () => {
-    (cache.config as any).auto_close_tickets = true;
-    mockTransitionTicketStatus.mockResolvedValue(openTicket());
-    const error = new Error('csat unavailable');
-    mockSendCSATSurvey.mockRejectedValueOnce(error);
-
-    await expect(chat(createContext())).resolves.toBeUndefined();
-
-    const userDeliveries = mockSendMessage.mock.calls.filter((call) => call[0] === 'user123');
-    expect(userDeliveries).toHaveLength(1);
-    expect(mockRecordEventBestEffort).toHaveBeenCalledWith(
-      'ticket.closed',
-      42,
-      'agent1',
-    );
-    expect(mockTicketClosedWebhook).toHaveBeenCalledWith(42, 'agent1');
-    expect(mockLogError).toHaveBeenCalledWith(
-      'CSAT delivery failed after closing #T42:',
-      error,
-    );
+    expect(mockTransitionTicketStatus).not.toHaveBeenCalledWith(42, 'closed');
+    expect(mockRecordEventBestEffort).not.toHaveBeenCalledWith('ticket.closed', 42, 'agent1');
+    expect(mockTicketClosedWebhook).not.toHaveBeenCalled();
+    expect(mockSendCSATSurvey).not.toHaveBeenCalled();
+    expect(mockRecordEventBestEffort).toHaveBeenCalledWith('ticket.message.staff', 42, 'agent1');
+    expect(mockRecordEventBestEffort).toHaveBeenCalledWith('ticket.replied', 42, 'agent1');
   });
 });

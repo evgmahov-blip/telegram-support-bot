@@ -6,6 +6,8 @@ import * as log from './logger'
 import { isManualRecipient, MANUAL_USER_PREFIX } from './manual-ticket-guard';
 import type { EngineerTask } from './ai-engineer';
 import { authorityUpdate } from './ai-engineer-authority';
+import { commonRouting } from './routing-contract';
+import type { RoutingPlan } from './routing-contract';
 
 // Lazy config accessors — defer reading cache.config until runtime
 // to avoid circular module initialization issues (index → migrate → db → cache)
@@ -69,6 +71,17 @@ export interface ISupportee extends mongoose.Document {
   external_contact: string | null;
   created_by: string | null;
   manual_request_key: string | null;
+  // Organization name as declared by the client when this ticket was created.
+  // Identification metadata only: never verified membership, OrgRef or permission.
+  declared_organization: string | null;
+  // Explicit common visibility for an owned ticket; unassigned tickets are always common.
+  common_visible: boolean;
+  // Resolution version written for the closure that produced the current closed state.
+  closure_resolution_version: number | null;
+  routing?: import('./routing-contract').TicketRouting | null;
+  organization_ref?: import('./routing-contract').RoutingOrgRef | null;
+  organization_owner_version?: number | null;
+  organization_binding_version?: number | null;
 }
 
 export type ManualSource = 'phone' | 'email' | 'in_person' | 'other';
@@ -118,6 +131,13 @@ export const SupporteeSchema = new mongoose.Schema<ISupportee>({
   external_contact: { type: String, default: null },
   created_by: { type: String, default: null },
   manual_request_key: { type: String, required: false },
+  declared_organization: { type: String, default: null },
+  common_visible: { type: Boolean, default: false },
+  closure_resolution_version: { type: Number, default: null },
+  routing: { type: mongoose.Schema.Types.Mixed, default: null },
+  organization_ref: { type: mongoose.Schema.Types.Mixed, default: null },
+  organization_owner_version: { type: Number, default: null },
+  organization_binding_version: { type: Number, default: null },
 }, {
   timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' },
 });
@@ -263,6 +283,44 @@ UserBanSchema.index({ messenger: 1, userid: 1 }, { unique: true });
 const UserBan = mongoose.model('UserBan', UserBanSchema);
 
 /**
+ * Client profile scoped by the actual platform + user. The organization is a
+ * self-declared name used to identify requests; it grants nothing.
+ */
+export type OrganizationInputMode = 'first' | 'edit';
+export interface IClientProfile extends mongoose.Document {
+  messenger: string;
+  userid: string;
+  organization: string | null;
+  organization_updated_at: Date | null;
+  org_input: OrganizationInputMode | null;
+  org_input_version: number;
+  org_input_expires_at: Date | null;
+  organization_verification?: 'pending' | 'confirmed' | 'rejected';
+  confirmed_org_ref?: import('./routing-contract').RoutingOrgRef | null;
+  org_binding_version?: number;
+  org_binding_audit?: Array<Record<string, unknown>>;
+  org_binding_audit_pending?: boolean;
+}
+
+const ClientProfileSchema = new mongoose.Schema<IClientProfile>({
+  messenger: { type: String, required: true },
+  userid: { type: String, required: true },
+  organization: { type: String, default: null },
+  organization_updated_at: { type: Date, default: null },
+  org_input: { type: String, enum: ['first', 'edit', null], default: null },
+  org_input_version: { type: Number, default: 0 },
+  org_input_expires_at: { type: Date, default: null },
+  organization_verification: { type: String, enum: ['pending','confirmed','rejected'], default: 'pending' },
+  confirmed_org_ref: { type: mongoose.Schema.Types.Mixed, default: null },
+  org_binding_version: { type: Number, default: 0 },
+  org_binding_audit: { type: [mongoose.Schema.Types.Mixed], default: [] },
+  org_binding_audit_pending: { type: Boolean, default: false },
+}, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } });
+ClientProfileSchema.index({ messenger: 1, userid: 1 }, { unique: true });
+
+const ClientProfile = mongoose.model('ClientProfile', ClientProfileSchema);
+
+/**
  * Short-lived staff intake state for «Создать заявку вручную». It is not a
  * ticket: a draft that is never confirmed must not appear in ticket lists, so
  * it cannot live in Supportee. Rows self-expire through the purge_at TTL index.
@@ -359,11 +417,14 @@ const StaffNameEditIntent = mongoose.model('StaffNameEditIntent', StaffNameEditI
 
 export type ResolutionStep = 'cause' | 'actions' | 'check' | null;
 export type ResolutionIntentStatus = 'input' | 'preview' | 'saving' | 'saved' | 'cancelled';
+// 'record' documents an already closed ticket; 'close' is the explanation required before closure.
+export type ResolutionMode = 'record' | 'close';
 export interface IResolutionIntent extends mongoose.Document {
   token: string; actor_id: string; chat_id: string; thread_id: number | null; ticketId: number;
   status: ResolutionIntentStatus; step: ResolutionStep; version: number; base_version: number;
   cause: string | null; actions: string | null; check: string | null;
   last_consumed_message_id: number | null; edit_return: boolean; expires_at: Date; purge_at: Date;
+  mode?: ResolutionMode; expected_owner?: string | null;
 }
 const ResolutionIntentSchema = new mongoose.Schema<IResolutionIntent>({
   token: { type: String, required: true, unique: true }, actor_id: { type: String, required: true },
@@ -373,6 +434,7 @@ const ResolutionIntentSchema = new mongoose.Schema<IResolutionIntent>({
   base_version: { type: Number, default: 0 }, cause: { type: String, default: null }, actions: { type: String, default: null },
   check: { type: String, default: null }, last_consumed_message_id: { type: Number, default: null },
   edit_return: { type: Boolean, default: false }, expires_at: { type: Date, required: true }, purge_at: { type: Date, required: true },
+  mode: { type: String, enum: ['record', 'close'], default: 'record' }, expected_owner: { type: String, default: null },
 });
 ResolutionIntentSchema.index({ actor_id: 1, chat_id: 1, thread_id: 1 }, { unique: true });
 ResolutionIntentSchema.index({ purge_at: 1 }, { expireAfterSeconds: 0 });
@@ -380,6 +442,7 @@ const ResolutionIntent = mongoose.model('ResolutionIntent', ResolutionIntentSche
 
 export interface IResolutionVersion {
   version: number; cause: string; actions: string; check: string; author_id: string; saved_at: Date; intent_token: string;
+  closure?: boolean;
 }
 export interface ITicketResolution extends mongoose.Document {
   ticketId: number; current_version: number; versions: IResolutionVersion[]; created_at: Date; updated_at: Date;
@@ -387,7 +450,7 @@ export interface ITicketResolution extends mongoose.Document {
 const TicketResolutionSchema = new mongoose.Schema<ITicketResolution>({
   ticketId: { type: Number, required: true, unique: true }, current_version: { type: Number, required: true, default: 0 },
   versions: { type: [{ version: Number, cause: String, actions: String, check: String, author_id: String,
-    saved_at: Date, intent_token: String }], default: [] },
+    saved_at: Date, intent_token: String, closure: Boolean }], default: [] },
 }, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } });
 const TicketResolution = mongoose.model('TicketResolution', TicketResolutionSchema);
 
@@ -659,18 +722,38 @@ export async function listUserTickets(userId: string, page: number, pageSize = 6
     .skip(Math.max(0, page) * pageOffsetSize).limit(pageSize).lean<ISupportee[]>();
 }
 
+export type StaffListView = 'new' | 'mine' | 'common' | 'active' | 'closed';
+/** common: shared-surface safe; visible: own + common; all: supervisor/admin authority. */
+export type StaffListScope = 'common' | 'visible' | 'all';
+const COMMON_TICKET_FILTER = { $and: [{ 'routing.state': { $ne: 'offered' } }, { $or: [{ assigned_to: null }, { common_visible: true }] }] };
+
 export async function listStaffTickets(
-  view: 'new' | 'mine' | 'active' | 'closed', actorId: string, page: number, pageSize = 6, pageOffsetSize = pageSize,
+  view: StaffListView, actorId: string, page: number, pageSize = 6, pageOffsetSize = pageSize,
+  scope: StaffListScope = 'visible',
 ): Promise<ISupportee[]> {
-  const query: Record<string, unknown> = view === 'new'
-    ? { status: { $in: ['open', 'waiting_user'] }, assigned_to: null }
+  const active = { status: { $in: ['open', 'waiting_user'] } };
+  const base: Record<string, unknown> = view === 'new'
+    ? { ...active, ...COMMON_TICKET_FILTER }
     : view === 'mine'
-      ? { status: { $in: ['open', 'waiting_user'] }, assigned_to: actorId }
-      : view === 'closed'
-        ? { status: 'closed' }
-        : { status: { $in: ['open', 'waiting_user'] } };
+      ? { ...active, $or: [{ assigned_to: actorId }, { 'routing.state': 'offered', 'routing.offered_to': actorId }] }
+      : view === 'common'
+        ? { ...active, ...COMMON_TICKET_FILTER }
+        : view === 'closed'
+          ? { status: 'closed' }
+          : active;
+  // Visibility is part of the query, so counts and pages never include hidden tickets.
+  const visibility = scope === 'all' ? null
+    : scope === 'common' ? COMMON_TICKET_FILTER
+      : { $or: [{ assigned_to: actorId }, { 'routing.state': 'offered', 'routing.offered_to': actorId }, COMMON_TICKET_FILTER] };
+  const query: Record<string, unknown> = visibility ? { $and: [base, visibility] } : base;
   return await Supportee.find(query).sort({ updated_at: -1, ticketId: -1 })
     .skip(Math.max(0, page) * pageOffsetSize).limit(pageSize).lean<ISupportee[]>();
+}
+
+/** Owner-guarded explicit common visibility change; null when owner or value changed. */
+export async function setTicketCommonVisibility(ticketId: number, common: boolean, expectedOwner: string) {
+  const filter: Record<string, unknown> = { ticketId, assigned_to: expectedOwner, common_visible: common ? { $ne: true } : true };
+  return await Supportee.findOneAndUpdate(filter, { $set: { common_visible: common } }, { new: true }) as ISupportee | null;
 }
 
 export async function claimStaffCard(ticketId: number, claim: string) {
@@ -835,12 +918,61 @@ export const addNewTicket = async (
   userid: string | number,
   category: string | number | null,
   messenger: string,
+  declaredOrganization?: string | null,
+  plannedRouting?: RoutingPlan,
 ): Promise<number> => {
   const ticketId = await getNextTicketId();
-  await Supportee.create({ userid, messenger, ticketId, status: 'open', category: category ?? null });
+  // The declared organization is a snapshot: later profile edits never relabel this ticket.
+  const planned = plannedRouting ?? { routing: commonRouting('organization_unconfirmed') };
+  await Supportee.create({ userid, messenger, ticketId, status: 'open', category: category ?? null,
+    ...(declaredOrganization !== undefined ? { declared_organization: declaredOrganization } : {}), ...planned });
   recordAnalyticsEventBestEffort('ticket.created', ticketId, null, { user_id: String(userid) });
   return ticketId;
 };
+
+// --- Client profile: declared organization ---
+
+export async function getClientProfile(userid: string, messenger: string) {
+  return await ClientProfile.findOne({ messenger, userid: String(userid) }) as IClientProfile | null;
+}
+
+/** Arm one pending organization input; the returned version fences cancel/save. */
+export async function startOrganizationInput(userid: string, messenger: string, mode: OrganizationInputMode, expiresAt: Date | null) {
+  return await ClientProfile.findOneAndUpdate(
+    { messenger, userid: String(userid) },
+    { $set: { org_input: mode, org_input_expires_at: expiresAt },
+      $setOnInsert: { organization: null, organization_updated_at: null },
+      $inc: { org_input_version: 1 } },
+    { upsert: true, new: true },
+  ) as IClientProfile | null;
+}
+
+export async function saveOrganization(userid: string, messenger: string, version: number, organization: string) {
+  return await ClientProfile.findOneAndUpdate(
+    { messenger, userid: String(userid), org_input: { $ne: null }, org_input_version: version },
+    [{ $set: {
+      org_binding_audit: { $concatArrays: [{ $ifNull: ['$org_binding_audit', []] }, [{
+        event_id: randomUUID(), action: 'declared', at: new Date(), actor: { $literal: messenger + ':' + userid },
+        old_organization: '$organization', old_org_ref: '$confirmed_org_ref',
+        new_organization: { $literal: organization }, new_org_ref: null,
+      }]] },
+      organization: { $literal: organization }, organization_updated_at: new Date(), org_input: null, org_input_expires_at: null,
+      organization_verification: 'pending', confirmed_org_ref: null, org_binding_audit_pending: true,
+      org_input_version: { $add: [{ $ifNull: ['$org_input_version', 0] }, 1] },
+      org_binding_version: { $add: [{ $ifNull: ['$org_binding_version', 0] }, 1] },
+    } }],
+    { new: true },
+  ) as IClientProfile | null;
+}
+
+
+export async function cancelOrganizationInput(userid: string, messenger: string, version: number) {
+  return await ClientProfile.findOneAndUpdate(
+    { messenger, userid: String(userid), org_input: { $ne: null }, org_input_version: version },
+    { $set: { org_input: null, org_input_expires_at: null }, $inc: { org_input_version: 1 } },
+    { new: true },
+  ) as IClientProfile | null;
+}
 
 // --- Manual external tickets ---
 
@@ -1314,8 +1446,8 @@ export async function getTicketTimelinePage(ticketId: number, page: number, page
     { $project: { at: '$timestamp', kind: '$sender', actor: '$sender_id', text: 1, metadata: { $literal: {} } } },
     { $unionWith: { coll: AnalyticsEvent.collection.name, pipeline: [
       { $match: { ticketId, type: { $in: ['ticket.closed','ticket.reopened','ticket.taken','ticket.assigned','ticket.transferred','ticket.waiting','ticket.resumed',
-        // Creation audit (incl. manual intake author) is staff-only history.
-        ...(includeNotes ? ['ticket.created'] : [])] } } },
+        // Creation audit (incl. manual intake author), visibility and resolution audit are staff-only history.
+        ...(includeNotes ? ['ticket.created', 'ticket.visibility_changed', 'ticket.resolution_saved', 'ticket.close_requested'] : [])] } } },
       { $project: { at: '$timestamp', kind: { $literal: 'event' }, actor: '$agent_id', text: '$type', metadata: 1 } },
     ] } },
   ];
@@ -1393,6 +1525,21 @@ export async function recordAnalyticsEvent(
 }
 
 /** Stable event UUID is persisted with the task before its first append. */
+export async function recordOrganizationBindingEvent(eventId: string, action: string, actorId: string, metadata: Record<string, unknown>) {
+  if (!['declared','confirmed','rejected'].includes(action)) throw new Error('organization_audit_type_denied');
+  return enqueueEventAppend(() => appendAnalyticsEvent('client.organization_' + action, 0, actorId, metadata, eventId));
+}
+
+export async function recordRoutingSettingsEvent(eventId: string, actorId: string, metadata: Record<string, unknown>) {
+  return enqueueEventAppend(() => appendAnalyticsEvent('settings.routing_changed', 0, actorId, metadata, eventId));
+}
+
+export async function recordRoutingEvent(eventId: string, type: string, ticketId: number, actorId: string | null,
+  metadata: Record<string, unknown>): Promise<IAnalyticsEvent> {
+  if (!/^ticket\.routing_(common|offered|taken|transferred)$/.test(type)) throw new Error('routing_event_type_denied');
+  return enqueueEventAppend(() => appendAnalyticsEvent(type, ticketId, actorId, metadata, eventId));
+}
+
 export async function recordAIEngineerEvent(eventId: string, type: string, ticketId: number,
   actorId: string, metadata: Record<string, unknown>): Promise<IAnalyticsEvent> {
   if (!/^ai\.(task_submitted|checks_completed|conclusion_created|rework_requested|handed_off|failed|cancelled|stale)$/.test(type)) {
@@ -1545,7 +1692,7 @@ export async function assignTicket(
 ): Promise<void> {
   try {
     await Supportee.findOneAndUpdate(
-      { ticketId },
+      { ticketId, routing: null },
       authorityUpdate({ assigned_to: agent_telegram_id }),
     );
   } catch (err) {
@@ -1556,7 +1703,7 @@ export async function assignTicket(
 export async function unassignTicket(ticketId: number): Promise<void> {
   try {
     await Supportee.findOneAndUpdate(
-      { ticketId },
+      { ticketId, routing: null },
       authorityUpdate({ assigned_to: null }),
     );
   } catch (err) {
@@ -1751,14 +1898,15 @@ export async function getTicketResolution(ticketId: number) {
 }
 
 export async function startResolutionIntent(token: string, actorId: string, chatId: string, threadId: number | null,
-  ticketId: number, expiresAt: Date) {
+  ticketId: number, expiresAt: Date, mode: ResolutionMode = 'record', expectedOwner: string | null = null) {
   const existing = await TicketResolution.findOne({ ticketId }) as ITicketResolution | null;
-  const latest = existing?.versions?.[existing.versions.length - 1];
+  // A closure explanation is written fresh for this closure; only «record» edits start from the saved case.
+  const latest = mode === 'record' ? existing?.versions?.[existing.versions.length - 1] : undefined;
   return ResolutionIntent.findOneAndUpdate(
     { actor_id: actorId, chat_id: chatId, thread_id: threadId },
     { $set: { token, ticketId, status: 'input', step: 'cause', base_version: existing?.current_version || 0,
       cause: latest?.cause || null, actions: latest?.actions || null, check: latest?.check || null,
-      last_consumed_message_id: null, edit_return: false, expires_at: expiresAt,
+      last_consumed_message_id: null, edit_return: false, expires_at: expiresAt, mode, expected_owner: expectedOwner,
       purge_at: new Date(expiresAt.getTime() + RESOLUTION_PURGE_MS) }, $inc: { version: 1 } },
     { upsert: true, new: true, setDefaultsOnInsert: false },
   ) as Promise<IResolutionIntent>;
@@ -1809,28 +1957,37 @@ export async function abandonClaimedResolution(token: string, actorId: string, v
     { $set: { status: 'cancelled' }, $inc: { version: 1 } }, { new: true });
 }
 
-/** Append exactly one immutable version; base_version is the edit CAS fence and token is the replay fence. */
+/**
+ * Append exactly one immutable version; base_version is the edit CAS fence and token is the replay fence.
+ * A closure intent stays `saving` until the ticket really closes (completeResolutionIntent), so a crash
+ * between the two writes is retried by the same confirmation instead of closing without its explanation.
+ */
 export async function saveClaimedResolution(intent: IResolutionIntent) {
+  const closure = intent.mode === 'close';
   const replay = await TicketResolution.findOne({ ticketId: intent.ticketId, 'versions.intent_token': intent.token });
   if (replay) return replay as ITicketResolution;
   const next = intent.base_version + 1; const savedAt = new Date();
   let result = await TicketResolution.findOneAndUpdate(
     { ticketId: intent.ticketId, current_version: intent.base_version, 'versions.intent_token': { $ne: intent.token } },
     { $push: { versions: { version: next, cause: intent.cause!, actions: intent.actions!, check: intent.check!,
-      author_id: intent.actor_id, saved_at: savedAt, intent_token: intent.token } }, $set: { current_version: next } }, { new: true },
+      author_id: intent.actor_id, saved_at: savedAt, intent_token: intent.token, closure } }, $set: { current_version: next } }, { new: true },
   ) as ITicketResolution | null;
   if (!result && intent.base_version === 0) {
     try { result = await TicketResolution.create({ ticketId: intent.ticketId, current_version: 1, versions: [{ version: 1,
       cause: intent.cause!, actions: intent.actions!, check: intent.check!, author_id: intent.actor_id, saved_at: savedAt,
-      intent_token: intent.token }] }); } catch (err) { if ((err as {code?:number}).code !== 11000) throw err; }
+      intent_token: intent.token, closure }] }); } catch (err) { if ((err as {code?:number}).code !== 11000) throw err; }
   }
   if (!result) result = await TicketResolution.findOne({ ticketId: intent.ticketId, 'versions.intent_token': intent.token }) as ITicketResolution | null;
   if (!result) return null;
-  await ResolutionIntent.updateOne({ token: intent.token, status: 'saving' }, { $set: { status: 'saved' } });
+  if (!closure) await ResolutionIntent.updateOne({ token: intent.token, status: 'saving' }, { $set: { status: 'saved' } });
   return result;
+}
+
+export async function completeResolutionIntent(token: string) {
+  await ResolutionIntent.updateOne({ token, status: 'saving' }, { $set: { status: 'saved' } });
 }
 
 // --- Export models for use in other modules ---
 
 export { TicketMessage, AnalyticsEvent, WebhookCursor, InternalNote, TicketCounter, UserBan, ManualIntakeDraft,
-  StaffDisplayNameOverride, StaffNameEditIntent, ResolutionIntent, TicketResolution };
+  StaffDisplayNameOverride, StaffNameEditIntent, ResolutionIntent, TicketResolution, ClientProfile };
