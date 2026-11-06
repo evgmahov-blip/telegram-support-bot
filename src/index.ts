@@ -174,15 +174,15 @@ async function main(logs = true) {
     log.info(`Daily summary scheduled at ${summaryTime} UTC (first run in ${Math.round(delay / 60000)} min)`);
   }
 
-  // Set up periodic workflow checks (every 30 minutes)
+  // Reuse the existing workflow timer for acceptance deadlines (one-minute precision).
   const workflowInterval = setInterval(() => {
     void workflows.runWorkflowChecks().catch((err) => {
       log.error('Periodic workflow check failed:', err);
     });
-  }, 30 * 60 * 1000);
+  }, 60 * 1000);
   workflowInterval.unref(); // Don't keep process alive
   timers.add(workflowInterval);
-  log.info('Workflow periodic checks started (every 30 min)');
+  log.info('Workflow periodic checks started (every 1 min)');
 
   return { shutdown };
 }

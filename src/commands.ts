@@ -10,10 +10,11 @@ import * as workflows from './workflows';
 import { extractSupporteeId } from './staff';
 import * as webhooks from './webhooks';
 import { resolveTicketFromReply as resolveTicketFromContext } from './ticket-resolution';
-import * as ticketState from './ticket-state';
 import { refreshStaffCard } from './ticket-ui';
 import { isManualTicket, MANUAL_SOURCE_LABELS } from './manual-ticket-guard';
 import { staffDisplayName } from './staff-names';
+import * as resolutionCase from './ticket-resolution-case';
+import * as visibility from './ticket-visibility';
 
 const escapeRegex = (str: string): string => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -108,18 +109,14 @@ const findUserCommand = (command: string) => {
 };
 
 /**
- * Close all open tickets.
+ * Former bulk close of all open tickets. Every closure now needs its own cause
+ * and performed work, so the bulk route refuses instead of closing anything.
  *
  * @param ctx - The bot context.
  */
 const clearCommand = async (ctx: Context): Promise<void> => {
   if (!ctx.session.admin) return;
-  await db.closeAll();
-  // Reset the ticket caches
-  Object.keys(cache.ticketIDs).forEach(k => delete cache.ticketIDs[k]);
-  Object.keys(cache.ticketStatus).forEach(key => delete cache.ticketStatus[key]);
-  Object.keys(cache.ticketSent).forEach(key => delete cache.ticketSent[key]);
-  await middleware.reply(ctx, 'Все заявки закрыты.');
+  await middleware.reply(ctx, 'Массовое закрытие отключено: каждую заявку закрывают с причиной и выполненными работами (кнопка «🔒 Закрыть» на карточке).');
 };
 
 /**
@@ -144,7 +141,8 @@ const openCommand = async (ctx: Context): Promise<void> => {
     });
   }
 
-  const userList = await db.open(groups);
+  // A shared chat lists only common tickets; personal ones are in «Мои заявки» in the bot DM.
+  const userList = (await db.open(groups)).filter(ticket => visibility.isCommonTicket(ticket));
   let openTickets = '';
   userList.forEach(ticket => {
     if (ticket.userid != null) {
@@ -207,25 +205,14 @@ const closeCommand = async (ctx: Context): Promise<void> => {
       : 'Сначала возьмите заявку командой /take.');
     return;
   }
-  const expectedOwner = role === 'agent' ? actorId : undefined;
-  const result = await ticketState.closeTicketLifecycle(ticket, actorId, expectedOwner);
-  if (result.outcome !== 'closed') {
-    await middleware.reply(ctx, result.outcome === 'already_closed'
-      ? 'Заявка уже закрыта.'
-      : 'Состояние или владелец заявки изменились; заявка не закрыта.');
-    return;
-  }
-
-  const userId = ticket.userid;
-  const paddedTicket = ticketIdStr.toString().padStart(6, '0');
-  await middleware.reply(ctx, `${language.ticket} #T${paddedTicket} ${language.closed}`);
-  if (result.notificationFailed) await middleware.reply(ctx, 'Заявка закрыта, но уведомление пользователю не доставлено.');
-  if (isManualTicket(ticket)) await middleware.reply(ctx, 'Ручная заявка: клиент не уведомлялся, канала доставки нет.');
-  await refreshStaffCard(ticket.ticketId);
+  // Same route as the card button: the closure happens only with its cause and performed work.
+  await resolutionCase.startClose(ctx, ticket);
 };
 
 /**
- * Lets a user close their own open ticket (allow_user_close, #112).
+ * A client cannot provide the engineer's cause/actions, so allow_user_close
+ * (#112) records a close request for the responsible engineer instead of
+ * closing the ticket without its explanation.
  */
 const userCloseCommand = async (ctx: Context): Promise<void> => {
   const { language } = cache.config;
@@ -238,25 +225,10 @@ const userCloseCommand = async (ctx: Context): Promise<void> => {
   const ticketId = ticket.ticketId;
   const paddedTicket = ticketId.toString().padStart(6, '0');
 
-  const result = await ticketState.closeTicketLifecycle(ticket, userId, undefined, {
-    notifyUser: false, metadata: { closed_by: 'user' },
-  });
-  if (result.outcome !== 'closed') {
-    await middleware.reply(ctx, language.ticketClosedError);
-    return;
-  }
-
-  await middleware.reply(ctx, `${language.ticket} #T${paddedTicket} ${language.closed}`);
-  const staffTarget = ctx.session.group && ctx.session.group !== cache.config.staffchat_id
-    ? ctx.session.group
-    : cache.config.staffchat_id;
-  await middleware.sendMessage(
-    staffTarget,
-    cache.config.staffchat_type,
-    `${language.ticket} #T${paddedTicket} ${language.closedByUser}`,
-  ).catch(log.error);
-
-  await analytics.sendCSATSurvey(ticket.userid, ticket.messenger, ticketId).catch(log.error);
+  db.recordAnalyticsEventBestEffort('ticket.close_requested', ticketId, userId, { closed_by: 'user' });
+  await middleware.reply(ctx, `${language.ticket} #T${paddedTicket}: просьба закрыть обращение передана поддержке. Инженер закроет его после записи результата работы.`);
+  await visibility.notifyTicketStaff(ticket, `Клиент просит закрыть заявку № ${ticketId}. Закройте её кнопкой «🔒 Закрыть» с причиной и выполненными работами.`, {})
+    .catch(log.error);
   await refreshStaffCard(ticketId);
 };
 
@@ -630,6 +602,11 @@ const ticketCommand = async (ctx: Context): Promise<void> => {
     await middleware.reply(ctx, 'Использование: /ticket <номер> или ответьте на сообщение заявки.');
     return;
   }
+  const actorId = ctx.from.id.toString();
+  if (!visibility.canViewTicket(actorId, ticket)) {
+    await middleware.reply(ctx, 'Заявка недоступна: она личная у другого инженера.');
+    return;
+  }
 
   const ticketId = ticket.ticketId;
   const lines: string[] = [];
@@ -670,6 +647,12 @@ const ticketCommand = async (ctx: Context): Promise<void> => {
     }
   }
 
+  // Personal ticket details never render in a shared chat; they go to the actor's bot DM only.
+  if (ctx.chat.type !== 'private' && !visibility.isCommonTicket(ticket)) {
+    const sent = await visibility.sendToStaffPrivate(actorId, lines.join('\n'), { parse_mode });
+    await middleware.reply(ctx, sent ? 'Сведения о заявке отправлены вам в личный чат с ботом.' : visibility.PRIVATE_UNAVAILABLE);
+    return;
+  }
   await middleware.reply(ctx, lines.join('\n'), { parse_mode });
 };
 

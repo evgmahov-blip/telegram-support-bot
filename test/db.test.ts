@@ -12,6 +12,8 @@ const mockBanDeleteOne = jest.fn();
 const mockCreate = jest.fn();
 const mockEventSave = jest.fn().mockResolvedValue(undefined);
 const mockEventFindOne = jest.fn(() => query({ seq: 0 }));
+const mockFind = jest.fn();
+const mockUpdateOne = jest.fn().mockResolvedValue({});
 
 /** Minimal chainable, awaitable query like mongoose returns from findOne(). */
 const query = (result: unknown, reject = false) => {
@@ -32,6 +34,8 @@ jest.mock('mongoose', () => {
     updateMany: mockUpdateMany,
     findOneAndUpdate: mockSupporteeFindOneAndUpdate,
     create: mockCreate,
+    find: mockFind,
+    updateOne: mockUpdateOne,
   };
 
   const counterModel = {
@@ -298,13 +302,15 @@ describe('Database Module', () => {
       const ticketId = await db.addNewTicket('user1', 'support', 'telegram');
 
       expect(ticketId).toBe(8);
-      expect(mockCreate).toHaveBeenCalledWith({
+      expect(mockCreate).toHaveBeenCalledWith(expect.objectContaining({
         userid: 'user1',
         messenger: 'telegram',
         ticketId: 8,
         status: 'open',
         category: 'support',
-      });
+        routing: expect.objectContaining({ state: 'common', offered_to: null, deadline_at: null,
+          audit: [expect.objectContaining({ reason: 'organization_unconfirmed', type: 'ticket.routing_common' })] }),
+      }));
       expect(mockSupporteeFindOneAndUpdate).not.toHaveBeenCalled();
     });
 
@@ -318,6 +324,75 @@ describe('Database Module', () => {
       await db.addNewTicket('user1', undefined as unknown as null, 'telegram');
 
       expect(mockCreate).toHaveBeenCalledWith(expect.objectContaining({ ticketId: 1, category: null }));
+    });
+  });
+
+  describe('declared organization, visibility scope and closure explanation', () => {
+    const chain = () => { const c: any = {}; c.sort = jest.fn(() => c); c.skip = jest.fn(() => c); c.limit = jest.fn(() => c);
+      c.lean = jest.fn().mockResolvedValue([]); return c; };
+    const common = { $and: [{ 'routing.state': { $ne: 'offered' } }, { $or: [{ assigned_to: null }, { common_visible: true }] }] };
+    const active = { status: { $in: ['open', 'waiting_user'] } };
+
+    it('snapshots the declared organization only on the new ticket document', async () => {
+      mockFindOne.mockReturnValue(query({ ticketId: 7 }));
+      mockCounterFindOneAndUpdate.mockResolvedValueOnce({ seq: 7 }).mockResolvedValueOnce({ seq: 8 });
+      await db.addNewTicket('user1', null, 'telegram', 'ООО Ромашка');
+      expect(mockCreate).toHaveBeenCalledWith(expect.objectContaining({ ticketId: 8, declared_organization: 'ООО Ромашка' }));
+      expect(mockSupporteeFindOneAndUpdate).not.toHaveBeenCalled();
+      expect(mockUpdateMany).not.toHaveBeenCalled();
+    });
+
+    it('puts visibility into every staff list query', async () => {
+      mockFind.mockImplementation(chain);
+      await db.listStaffTickets('mine', '42', 0, 7, 6, 'common');
+      expect(mockFind).toHaveBeenLastCalledWith({ $and: [{ ...active, $or: [{ assigned_to: '42' }, { 'routing.state':'offered', 'routing.offered_to':'42' }] }, common] });
+      await db.listStaffTickets('closed', '43', 0, 7, 6);
+      expect(mockFind).toHaveBeenLastCalledWith({ $and: [{ status: 'closed' },
+        { $or: [{ assigned_to:'43' }, { 'routing.state':'offered', 'routing.offered_to':'43' }, common] }] });
+      await db.listStaffTickets('active', '50', 0, 7, 6, 'all');
+      expect(mockFind).toHaveBeenLastCalledWith(active);
+      await db.listStaffTickets('common', '43', 0, 7, 6, 'visible');
+      expect(mockFind).toHaveBeenLastCalledWith({ $and: [{ ...active, ...common },
+        { $or: [{ assigned_to:'43' }, { 'routing.state':'offered', 'routing.offered_to':'43' }, common] }] });
+    });
+
+    it('changing the declaration clears confirmation atomically and retains the previous binding in audit', async () => {
+      await db.saveOrganization('user1','telegram',4,'$literal client name');
+      const call=(db.ClientProfile.findOneAndUpdate as jest.Mock).mock.calls.at(-1)!;
+      expect(call[0]).toEqual({messenger:'telegram',userid:'user1',org_input:{$ne:null},org_input_version:4});
+      const set=call[1][0].$set;
+      expect(set.organization).toEqual({$literal:'$literal client name'});
+      expect(set.organization_verification).toBe('pending');
+      expect(set.confirmed_org_ref).toBeNull();
+      expect(set.org_binding_audit.$concatArrays[1][0]).toMatchObject({
+        action:'declared',old_org_ref:'$confirmed_org_ref',old_organization:'$organization',
+        new_organization:{$literal:'$literal client name'},new_org_ref:null,
+      });
+      expect(set.org_binding_audit_pending).toBe(true);
+      expect(mockUpdateMany).not.toHaveBeenCalled();
+    });
+
+    it('changes explicit common visibility only under the expected owner', async () => {
+      mockSupporteeFindOneAndUpdate.mockResolvedValueOnce(null);
+      await expect(db.setTicketCommonVisibility(7, true, '42')).resolves.toBeNull();
+      expect(mockSupporteeFindOneAndUpdate).toHaveBeenCalledWith(
+        { ticketId: 7, assigned_to: '42', common_visible: { $ne: true } }, { $set: { common_visible: true } }, { new: true });
+    });
+
+    it('appends a closure version and leaves the intent claimable until the ticket really closes', async () => {
+      mockFindOne.mockReturnValue(query(null));
+      mockSupporteeFindOneAndUpdate.mockResolvedValueOnce({ current_version: 2, versions: [{ version: 2, intent_token: 'tok' }] });
+      const intent: any = { token: 'tok', ticketId: 7, base_version: 1, mode: 'close', actor_id: '42',
+        cause: 'не установлена', actions: 'Перезапустили службу', check: '' };
+      const saved = await db.saveClaimedResolution(intent);
+      expect(saved?.current_version).toBe(2);
+      expect(mockSupporteeFindOneAndUpdate).toHaveBeenCalledWith(
+        { ticketId: 7, current_version: 1, 'versions.intent_token': { $ne: 'tok' } },
+        { $push: { versions: expect.objectContaining({ version: 2, cause: 'не установлена', actions: 'Перезапустили службу',
+          check: '', author_id: '42', intent_token: 'tok', closure: true }) }, $set: { current_version: 2 } }, { new: true });
+      expect(mockUpdateOne).not.toHaveBeenCalled();
+      await db.completeResolutionIntent('tok');
+      expect(mockUpdateOne).toHaveBeenCalledWith({ token: 'tok', status: 'saving' }, { $set: { status: 'saved' } });
     });
   });
 

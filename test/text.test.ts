@@ -157,12 +157,12 @@ describe('Text Module', () => {
       );
     });
 
-    it('should show category keyboard for regular messages when conditions are met', () => {
+    it('should show category keyboard for regular messages when conditions are met', async () => {
       const ctx = createMockContext('I need help with something');
       const mockAddon = { platform: 'telegram' };
       const keys = [['Support'], ['Sales']];
 
-      text.handleText(mockAddon as any, ctx, keys);
+      await text.handleText(mockAddon as any, ctx, keys);
 
       expect(mockReply).toHaveBeenCalledWith(
         ctx,

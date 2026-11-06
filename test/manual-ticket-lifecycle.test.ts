@@ -67,15 +67,13 @@ describe('manual ticket delivery guard', () => {
     noClientNetwork();
   });
 
-  it('auto-closes an inactive manual ticket by id without a client message', async () => {
+  it('refuses unattended inactivity auto-close for manual and client tickets alike', async () => {
     openTickets.push({ ...manual }, { ...manual, ticketId: 10, userid: '700', messenger: 'telegram' });
-    transitionTicketStatus.mockResolvedValue({ ...manual, status: 'closed' });
-    await checkAutoClose();
-    expect(transitionTicketStatus).toHaveBeenCalledWith(9, 'closed');
-    expect(add).not.toHaveBeenCalledWith('MANUAL:3f1c', expect.anything(), expect.anything(), expect.anything());
-    expect(recordAnalyticsEvent).toHaveBeenCalledWith('ticket.closed', 9, null, { reason: 'auto_close_inactivity' });
-    // The Telegram ticket after it is still processed (the manual one did not abort the loop).
-    expect(tgSend).toHaveBeenCalledTimes(1);
-    expect(tgSend).toHaveBeenCalledWith('700', expect.any(String), expect.anything());
+    await expect(checkAutoClose()).resolves.toBe(2);
+    expect(transitionTicketStatus).not.toHaveBeenCalled();
+    expect(add).not.toHaveBeenCalled();
+    expect(findOneAndUpdate).not.toHaveBeenCalled();
+    expect(recordAnalyticsEvent).not.toHaveBeenCalledWith('ticket.closed', expect.anything(), expect.anything(), expect.anything());
+    noClientNetwork();
   });
 });

@@ -226,10 +226,47 @@ describe('Users Module', () => {
       expect(clientDeliveries[0][2]).not.toContain('Astra Engineer');
       expect(clientDeliveries[0][2]).not.toContain('engineer-42');
 
-      const staffDelivery = mockSendMessage.mock.calls.find(call => call[0] === 'staff123');
+      // A personal ticket's new content goes only to its owner's bot DM, never to the shared chat.
+      expect(mockSendMessage.mock.calls.find(call => call[0] === 'staff123')).toBeUndefined();
+      const staffDelivery = mockSendMessage.mock.calls.find(call => call[0] === 'engineer-42');
+      expect(staffDelivery?.[2]).toContain('Identity boundary check');
       expect(staffDelivery?.[2]).not.toContain('Assigned:');
       expect(staffDelivery?.[2]).not.toContain('Astra Engineer');
-      expect(staffDelivery?.[2]).not.toContain('engineer-42');
+      expect(mockAddIdAndName).not.toHaveBeenCalled();
+    });
+
+    it('posts only a content-free notice when the owner DM is unavailable', async () => {
+      const ctx = createMockContext('Secret router password');
+      ctx.session.group = 'group456';
+      mockGetTicketByUserId.mockResolvedValue({
+        ticketId: 1007, userid: 'user123', messenger: 'telegram', status: 'open', category: 'general', assigned_to: 'engineer-42',
+      });
+      mockSendMessage.mockImplementation(async (id: string) => {
+        if (id === 'engineer-42') throw { description: 'Forbidden: bot was blocked by the user' };
+        return 'msg_id_129';
+      });
+
+      await expect(users.chat(ctx, { id: 'chat123' })).resolves.toBeUndefined();
+
+      const shared = mockSendMessage.mock.calls.filter(call => call[0] === 'staff123' || call[0] === 'group456');
+      expect(shared).toHaveLength(1);
+      expect(shared[0][0]).toBe('staff123');
+      expect(shared[0][2]).toContain('№ 1007');
+      expect(shared[0][2]).not.toContain('Secret router password');
+      expect(mockAddIdAndName).not.toHaveBeenCalled();
+      mockSendMessage.mockReset();
+    });
+
+    it('keeps an explicitly shared ticket on the common staff surface', async () => {
+      const ctx = createMockContext('Shared question');
+      mockGetTicketByUserId.mockResolvedValue({
+        ticketId: 1008, userid: 'user123', messenger: 'telegram', status: 'open', category: 'general',
+        assigned_to: 'engineer-42', common_visible: true,
+      });
+      mockSendMessage.mockResolvedValue('msg_id_130');
+      await users.chat(ctx, { id: 'chat123' });
+      expect(mockSendMessage).toHaveBeenCalledWith('staff123', 'telegram', expect.stringContaining('Shared question'));
+      expect(mockSendMessage.mock.calls.find(call => call[0] === 'engineer-42')).toBeUndefined();
     });
 
     it('should wait for staff message correlation before completing', async () => {

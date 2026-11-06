@@ -6,6 +6,7 @@ import * as llm from './addons/llm';
 import * as triage from './triage';
 import { sendMessage } from './middleware';
 import * as log from './logger';
+import * as visibility from './ticket-visibility';
 
 /**
  * Generate staff-only AI suggestions for one user message.
@@ -54,12 +55,11 @@ export async function createAIDraft(ticket: ISupportee, ctx: Context): Promise<v
   }
 
   // Plain text on purpose: model output must not inject Telegram markup.
-  await sendMessage(
-    config.staffchat_id,
-    config.staffchat_type,
-    parts.join('\n\n'),
-    {},
-  );
+  if (visibility.isCommonTicket(ticket)) {
+    await sendMessage(config.staffchat_id, config.staffchat_type, parts.join('\n\n'), {});
+  } else {
+    await visibility.notifyTicketStaff(ticket, parts.join('\n\n'), {});
+  }
 
   await db.recordAnalyticsEvent('ai.draft_created', ticket.ticketId, null, {
     reply: Boolean(replyDraft),

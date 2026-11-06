@@ -9,6 +9,9 @@ import * as log from './logger'
 import { persistStaffMessageCorrelation } from './staff-correlation';
 import { refreshStaffCard } from './ticket-ui';
 import { isManualTicket } from './manual-ticket-guard';
+import * as visibility from './ticket-visibility';
+import * as clientOrganization from './client-organization';
+import * as routing from './ticket-routing';
 
 const escapeRegex = (str: string): string => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -83,6 +86,10 @@ async function fileHandler(type: string, bot: Addon, ctx: Context) {
     }
   }
 
+  if (!session.admin && ticket.routing?.state === 'offered') {
+    await routing.deliverOffer(ticket);
+    ticket = await db.getTicketById(ticket.ticketId, null) || ticket;
+  }
   let receiverId: string | number = config.staffchat_id;
   let captionText = `${config.language.ticket} #T${ticket.ticketId
     .toString()
@@ -92,6 +99,11 @@ async function fileHandler(type: string, bot: Addon, ctx: Context) {
     receiverId = ticket.userid;
     captionText = message.caption || '';
   }
+  // A personal ticket's client media goes only to its registered owner's bot DM.
+  const personalRoute = !session.admin && !visibility.isCommonTicket(ticket);
+  const candidateOwner = ticket.routing?.state === 'offered' ? ticket.routing.offered_to : ticket.assigned_to;
+  const personalOwner = personalRoute && candidateOwner && team.getStaffRole(candidateOwner) ? candidateOwner : null;
+  if (personalOwner) receiverId = personalOwner;
 
   if (!['document', 'photo', 'video', 'sticker'].includes(type)) return;
   if (type === 'sticker' && !bot.sendSticker) return;
@@ -120,41 +132,53 @@ async function fileHandler(type: string, bot: Addon, ctx: Context) {
 
   let messageId: string | null | undefined;
   const shouldForwardToGroup = (
+    !personalRoute &&
     !session.admin &&
     session.group !== '' &&
     session.group !== config.staffchat_id
   );
 
-  switch (type) {
-    case 'document':
-      messageId = await bot.sendDocument(receiverId, fileId, commonOptions) as string | null;
-      break;
-    case 'photo':
-      messageId = await bot.sendPhoto(receiverId, fileId, commonOptions) as string | null;
-      break;
-    case 'video':
-      messageId = await bot.sendVideo(receiverId, fileId, commonOptions) as string | null;
-      break;
-    case 'sticker': {
-      const stickerMessageId = await bot.sendSticker!(receiverId, fileId);
-      messageId = typeof stickerMessageId === 'string' ? stickerMessageId : null;
-      break;
+  try {
+    if (personalRoute && !personalOwner) throw new Error(`Owner of personal ticket #T${ticket.ticketId} is not registered staff`);
+    switch (type) {
+      case 'document':
+        messageId = await bot.sendDocument(receiverId, fileId, commonOptions) as string | null;
+        break;
+      case 'photo':
+        messageId = await bot.sendPhoto(receiverId, fileId, commonOptions) as string | null;
+        break;
+      case 'video':
+        messageId = await bot.sendVideo(receiverId, fileId, commonOptions) as string | null;
+        break;
+      case 'sticker': {
+        const stickerMessageId = await bot.sendSticker!(receiverId, fileId);
+        messageId = typeof stickerMessageId === 'string' ? stickerMessageId : null;
+        break;
+      }
+      default:
+        return;
     }
-    default:
-      return;
+  } catch (err) {
+    if (!personalRoute) throw err;
+    log.error(`Личный чат владельца заявки #T${ticket.ticketId} недоступен для файла:`, err);
+    messageId = null;
   }
 
   // Media addons report transport failure by returning null rather than
   // rejecting. Surface that failure so fenced ingress releases the update for
   // retry instead of recording a delivery that never happened. No secondary
   // side effect is started until this primary boundary is confirmed.
-  if (!messageId) {
+  // A blocked owner DM is not retryable and never falls back to the shared chat.
+  if (!messageId && personalRoute) {
+    await sendMessage(config.staffchat_id, config.staffchat_type, visibility.personalUndeliveredNotice(ticket.ticketId), {})
+      .catch(log.error);
+  } else if (!messageId) {
     throw new Error(
       `Primary ${type} delivery failed for #T${ticket.ticketId} to ${receiverId}`,
     );
   }
 
-  if (type === 'sticker' && captionText.trim()) {
+  if (messageId && type === 'sticker' && captionText.trim()) {
     const headerMessenger = session.admin ? ticket.messenger : config.staffchat_type;
     sendMessage(receiverId, headerMessenger, captionText).catch(log.error);
   }
@@ -178,7 +202,7 @@ async function fileHandler(type: string, bot: Addon, ctx: Context) {
 
   // Correlation ids are staff-chat message ids only. A staff -> user Telegram
   // message id belongs to another chat and must never enter internalIds.
-  if (messageId && !session.admin) {
+  if (messageId && !session.admin && !personalRoute) {
     await persistStaffMessageCorrelation(
       ticket.ticketId,
       messageId,
@@ -245,8 +269,22 @@ async function forwardFile(ctx: Context): Promise<string | undefined> {
   }
 
   let ticket = await db.getTicketByUserId(userId, ctx.session.groupCategory);
+  // Media never becomes an organization value; it only waits until the organization is known.
+  const createsTicket = !ticket || ticket.status === 'closed' || Boolean(cache.config.ticket_per_message);
+  let organization: string | null | undefined;
+  if (createsTicket) {
+    const gate = await clientOrganization.requireForNewTicket(ctx);
+    if (!gate.ok) return undefined;
+    organization = gate.organization;
+  }
+  const openTicket = async () => {
+    const planned = typeof db.getClientProfile === 'function' ? await routing.planNewTicketRouting(String(userId), ctx.messenger, organization) : null;
+    if (planned && (planned.routing.state === 'offered' || planned.routing.audit[0]?.reason !== 'organization_unconfirmed')) return db.addNewTicket(userId, ctx.session.groupCategory, ctx.messenger, organization, planned);
+    return organization === undefined ? db.addNewTicket(userId, ctx.session.groupCategory, ctx.messenger)
+      : db.addNewTicket(userId, ctx.session.groupCategory, ctx.messenger, organization);
+  };
   if (!ticket || ticket.status === 'closed') {
-    await db.addNewTicket(userId, ctx.session.groupCategory, ctx.messenger);
+    await openTicket();
     ticket = await db.getTicketByUserId(userId, ctx.session.groupCategory);
   } else if (ticket.status === 'waiting_user') {
     const resumed = await ticketState.resumeWaitingTicket(ticket.ticketId);
@@ -256,14 +294,15 @@ async function forwardFile(ctx: Context): Promise<string | undefined> {
     } else {
       const latest = await db.getTicketById(ticket.ticketId, ctx.session.groupCategory);
       if (latest?.status === 'closed') {
-        await db.addNewTicket(userId, ctx.session.groupCategory, ctx.messenger);
+        organization = await clientOrganization.currentOrganization(ctx);
+        await openTicket();
         ticket = await db.getTicketByUserId(userId, ctx.session.groupCategory);
       } else {
         ticket = latest;
       }
     }
   } else if (cache.config.ticket_per_message) {
-    await db.addNewTicket(userId, ctx.session.groupCategory, ctx.messenger);
+    await openTicket();
     ticket = await db.getTicketByUserId(userId, ctx.session.groupCategory);
   }
 
