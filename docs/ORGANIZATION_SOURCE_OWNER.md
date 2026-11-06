@@ -8,7 +8,7 @@ The only organization identity is `{authority:"support-bot", instance, id}`. `in
 
 Organization cards have `owner_version >= 1`, `active|archived` status, safe display/contact data, at most one primary engineer, unique ascending positive-priority backups, and time-bounded substitutes. Engineer `principal_ref` is canonical and opaque; optional Telegram identity is separate. Ticket `assigned_to` is unrelated to authorization.
 
-Responses use `schema_version:1`, exact source authority/instance, UTC `as_of`, and `source_status`. This factory emits `fresh` only after a fresh central authorization decision and a successful repository read; transport failures return 503 rather than a fake empty result. Detail envelopes carry the item's positive `owner_version`. List items each carry their own authoritative positive `owner_version`, while the list envelope carries the central `scope_version` (there is deliberately no misleading maximum owner version across mixed organizations). A future adapter may represent `stale|unavailable`, but stale data must never authorize access.
+Responses use `schema_version:1`, exact source authority/instance, UTC `as_of`, and `source_status`. This factory emits `fresh` only after a fresh central authorization decision and a successful repository read; transport failures return 503 rather than a fake empty result. An organization item's `owner_version` is the current version of that organization row. A ticket-ref item's `owner_version` is instead the organization owner version stamped on that ticket when it was written: it can be older than the organization's current `owner_version` and must not be presented as the current version. Ticket-ref DTO field names remain unchanged for compatibility. List envelopes carry the central authorization `scope_version`, which is separate from every item stamp, and have no top-level `owner_version`. A future adapter may represent `stale|unavailable`, but stale data must never authorize access.
 
 ## Private routes and authorization
 
@@ -17,7 +17,7 @@ The router factory exposes GET-only logical paths beneath `/internal/v1`:
 - `/organizations`, `/organizations/:organizationId`
 - `/organizations/:organizationId/contacts`
 - `/organizations/:organizationId/engineer-relationships`
-- `/ticket-refs`, `/organizations/:organizationId/ticket-refs/:ticketId`
+- `/ticket-refs`, `/organizations/:organizationId/ticket-refs`, `/organizations/:organizationId/ticket-refs/:ticketId`
 
 It requires both a workload verifier and the central AINOC authorizer. HMAC proves a registered workload and binds an opaque actor; it grants nothing. The central callback freshly verifies enabled principal, enabled RBAC, explicit permission, exact organization allow, and deny-wins for every request/detail. Assignment, contact, chat membership, Telegram identity, and role ordering grant nothing. Unavailable identity/authz is 503 and no prior allow is cached.
 
@@ -26,7 +26,7 @@ It requires both a workload verifier and the central AINOC authorizer. HMAC prov
 | `organizations.read` | org ref/version, status, display name, service contact |
 | `contacts.read` | org ref/version, display name, service contact |
 | `engineer_relationships.read` | org ref/version, engineer names/service contacts, substitute intervals |
-| `ticket_refs.read` | exact org ref/version, ticket id/status |
+| `ticket_refs.read` | exact org ref, ticket owner-version stamp, ticket id/status |
 | `staff_internal.read` | reserved for a separately authorized future projection; not exposed here |
 
 Personal phones, internal notes, message/raw text, logs, prompts, model cost, canonical engineer principals, and Telegram identities are never in client projections.
@@ -69,10 +69,20 @@ Additional canonical-query vectors (values shown after query parsing):
 
 Cursors use a separate key/purpose and bind actor, source, filter, authorization scope version, position, and expiry. Scope or actor changes invalidate them. List authorization supplies exact OrgRefs before any database query; detail always reauthorizes.
 
+### Exact-organization ticket-ref list adapter contract
+
+`GET /internal/v1/organizations/<canonical-uuid>/ticket-refs` is GET-only. `HEAD`, `POST`, and every other method return 405 before workload-proof verification. The only query keys are `limit` and `cursor`; each, when present, must be one non-empty string. `limit` defaults to 50 and must be a decimal integer from 1 through 100. Unknown, repeated, empty, or otherwise invalid query values return 400.
+
+The Python adapter signs the exact path `/internal/v1/organizations/<canonical-uuid>/ticket-refs` and the canonical query using the HMAC mapping above. A valid workload proof establishes only the actor. The source then calls the central authorizer with `{permission:"ticket_refs.read", requested_org:<exact OrgRef>}`. The decision must use strict booleans, enable both the principal and RBAC, not deny, and include that exact `{authority:"support-bot", instance, id}` in `org_refs` before the repository is accessed.
+
+Pagination is ascending by positive safe-integer `ticketId`. Cursor signing uses the existing purpose-separated codec and binds `actor`, source `support-bot:<instance>`, central `scope_version`, and filter `JSON.stringify(["ticket-refs", authority, instance, id])`; `after` is the last positive safe-integer ticket ID. Consequently a cursor cannot be replayed for another organization, actor, source instance, or authorization scope.
+
+Invalid request data or cursors return 400, invalid workload proofs return 401, and central denial returns 403. Central authorization, nonce-store, or repository outages return 503. Any source row that fails validation, including a cross-organization row, rejects the whole page with 503 rather than returning a partial result. Each returned ticket-ref `owner_version` remains the stamp stored on that ticket, even when it is older than the organization's current owner version. The envelope carries only the distinct central `scope_version`; adapters must never map the ticket stamp to `scope_version` or label it as the current organization version.
+
 ## Cabinet adapter and activation gates
 
-A future Python cabinet `OrganizationOwner` adapter maps source `org_ref` unchanged, maps `owner_version` to its scoped version, treats any invalid/unavailable payload as denial, and sends the canonical signed request through a registered private transport. The production central-authz URL, credentials, atomic nonce store, cursor key, and source-instance registry are intentionally unknown here and must be bound by reviewed deployment configuration; no route has been fabricated.
+A future Python cabinet `OrganizationOwner` adapter maps source `org_ref` unchanged, preserves an organization row's `owner_version`, and preserves a ticket-ref `owner_version` only as that ticket's historical owner-version stamp. It must not treat a ticket stamp as the organization's current version or as the central `scope_version`. It treats any invalid/unavailable payload as denial and sends the canonical signed request through a registered private transport. The production central-authz URL, credentials, atomic nonce store, cursor key, and source-instance registry are intentionally unknown here and must be bound by reviewed deployment configuration; no route has been fabricated.
 
 Non-null organization activation remains **blocked**. Existing legacy queries are unscoped. Before writing any non-null organization ticket row, inventory and physically partition every list/detail/count/search/export/history/stream/worker/notification caller, verify legacy behavior, bind the central private route and instance registry, and complete end-to-end cutover review. This slice does not implement assignment, routing, transfer, mutation, publication, release, or deployment.
 
-Run `npm run tsc` and `npm test -- test/organization-foundation.test.ts`. Tests use local crypto and mocked model chains only; no MongoDB, config, provider, Telegram, listener, or network is required.
+Run `npm run tsc`, `npm test -- test/organization-foundation.test.ts`, and `npm test -- test/organization-ticket-list.test.ts`. Tests use local crypto and mocked model chains only; no MongoDB, config, provider, Telegram, listener, or network is required.
