@@ -47,7 +47,8 @@ describe('concise Russian card rendering', () => {
     expect(rendered).toContain('Клиент: Женя');
     expect(rendered).toContain('Инженер: Иван');
     expect(rendered).toContain('Точный текст клиента');
-    expect(rendered).not.toMatch(/Создан|Обновлён|UTC|Приоритет|Категория/);
+    expect(rendered).toContain('Приоритет: Обычный');
+    expect(rendered).not.toMatch(/Создан|Обновлён|UTC|Категория/);
   });
 
   it('keeps nondefault priority and meaningful category', async () => {
@@ -218,7 +219,8 @@ describe('raw ticket card callbacks', () => {
     const c = ctx('tm:active:0', -100, 7, 900);
     edit.mockRejectedValueOnce(new Error('temporary')).mockResolvedValue(undefined);
     const render = require('../src/ticket-ui').answer;
-    await render(c, 'screen', []);
+    await expect(render(c, 'screen', [])).rejects.toThrow('temporary');
+    expect(send).not.toHaveBeenCalled();
     resetRenderStateForTests();
     await render(c, 'screen', []);
     expect(edit).toHaveBeenCalledTimes(2);

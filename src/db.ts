@@ -722,7 +722,7 @@ export async function listUserTickets(userId: string, page: number, pageSize = 6
     .skip(Math.max(0, page) * pageOffsetSize).limit(pageSize).lean<ISupportee[]>();
 }
 
-export type StaffListView = 'new' | 'mine' | 'common' | 'active' | 'closed';
+export type StaffListView = 'new' | 'mine' | 'offered' | 'common' | 'active' | 'closed';
 /** common: shared-surface safe; visible: own + common; all: supervisor/admin authority. */
 export type StaffListScope = 'common' | 'visible' | 'all';
 const COMMON_TICKET_FILTER = { $and: [{ 'routing.state': { $ne: 'offered' } }, { $or: [{ assigned_to: null }, { common_visible: true }] }] };
@@ -731,11 +731,19 @@ export async function listStaffTickets(
   view: StaffListView, actorId: string, page: number, pageSize = 6, pageOffsetSize = pageSize,
   scope: StaffListScope = 'visible',
 ): Promise<ISupportee[]> {
+  const query = staffTicketFilter(view, actorId, scope);
+  return await Supportee.find(query).sort({ updated_at: -1, ticketId: -1 })
+    .skip(Math.max(0, page) * pageOffsetSize).limit(pageSize).lean<ISupportee[]>();
+}
+
+/** Shared by counters and pagination; never count a broader scope than the list. */
+export function staffTicketFilter(view: StaffListView, actorId: string, scope: StaffListScope): Record<string, unknown> {
   const active = { status: { $in: ['open', 'waiting_user'] } };
   const base: Record<string, unknown> = view === 'new'
     ? { ...active, ...COMMON_TICKET_FILTER }
     : view === 'mine'
-      ? { ...active, $or: [{ assigned_to: actorId }, { 'routing.state': 'offered', 'routing.offered_to': actorId }] }
+      ? { ...active, assigned_to: actorId, 'routing.state': { $ne: 'offered' } }
+      : view === 'offered' ? { ...active, 'routing.state': 'offered', ...(scope === 'all' ? {} : { 'routing.offered_to': actorId }) }
       : view === 'common'
         ? { ...active, ...COMMON_TICKET_FILTER }
         : view === 'closed'
@@ -746,8 +754,11 @@ export async function listStaffTickets(
     : scope === 'common' ? COMMON_TICKET_FILTER
       : { $or: [{ assigned_to: actorId }, { 'routing.state': 'offered', 'routing.offered_to': actorId }, COMMON_TICKET_FILTER] };
   const query: Record<string, unknown> = visibility ? { $and: [base, visibility] } : base;
-  return await Supportee.find(query).sort({ updated_at: -1, ticketId: -1 })
-    .skip(Math.max(0, page) * pageOffsetSize).limit(pageSize).lean<ISupportee[]>();
+  return query;
+}
+
+export async function countStaffTickets(view: StaffListView, actorId: string, scope: StaffListScope): Promise<number> {
+  return Supportee.countDocuments(staffTicketFilter(view, actorId, scope));
 }
 
 /** Owner-guarded explicit common visibility change; null when owner or value changed. */

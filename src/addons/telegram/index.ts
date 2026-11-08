@@ -1,3 +1,4 @@
+import { richRejected } from '../../ticket-rich-ui';
 import { Bot, Context as GrammyContext, SessionFlavor, session } from 'grammy';
 import { Addon, Context, Messenger, ModeData, SessionData } from '../../interfaces';
 import { apiThrottler } from '@grammyjs/transformer-throttler';
@@ -107,9 +108,34 @@ class TelegramAddon implements Addon {
     return options;
   }
 
+  async sendRichMessage(chatId: string | number, html: string, options: Record<string, unknown> = {}): Promise<string | null> {
+    assertDeliverableRecipient(chatId);
+    const response = await this.timedApi('sendRichMessage', 'delivery', () =>
+      this.bot.api.raw.sendRichMessage({ ...this.withThread(chatId, options), chat_id: chatId, rich_message: { html } }));
+    return response.message_id.toString();
+  }
+
+  async editRichMessage(chatId: string | number, messageId: number, html: string): Promise<void> {
+    try {
+      await this.timedApi('editMessageText', 'render', () => this.bot.api.raw.editMessageText({
+        chat_id: chatId, message_id: messageId, rich_message: { html },
+      }));
+    } catch (err) {
+      const e = err as { error_code?: number; description?: string };
+      if (!(e.error_code === 400 && /message is not modified/i.test(e.description || ''))) throw err;
+    }
+  }
+
   async sendMessage(chatId: string | number, text: string, options: Record<string, unknown> = {}): Promise<string | null> {
     if (typeof chatId !== 'string' && typeof chatId !== 'number') return null;
     assertDeliverableRecipient(chatId);
+    const html = options.most_rich_html;
+    options = { ...options }; delete options.most_rich_html;
+    if (typeof html === 'string' && typeof this.bot.api.raw?.sendRichMessage === 'function') {
+      const richOptions = { ...options }; delete richOptions.parse_mode; delete richOptions.reply_markup;
+      try { return await this.sendRichMessage(chatId, html, richOptions); }
+      catch (err) { if (!richRejected(err)) throw err; }
+    }
     options = this.withThread(chatId, { ...options, disable_web_page_preview: true });
     const validModes = ['HTML', 'MarkdownV2'];
     if (options?.parse_mode === 'Markdown') {
@@ -136,6 +162,12 @@ class TelegramAddon implements Addon {
   }
 
   async editMessage(chatId: string | number, messageId: number, text: string, options: Record<string, unknown> = {}): Promise<void> {
+    const html = options.most_rich_html;
+    options = { ...options }; delete options.most_rich_html;
+    if (typeof html === 'string' && typeof this.bot.api.raw?.sendRichMessage === 'function') {
+      try { await this.editRichMessage(chatId, messageId, html); return; }
+      catch (err) { if (!richRejected(err)) throw err; }
+    }
     const validModes = ['HTML', 'MarkdownV2'];
     if (!validModes.includes(options.parse_mode as string)) delete options.parse_mode;
     try {

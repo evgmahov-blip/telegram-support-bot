@@ -7,7 +7,7 @@ import * as routing from './ticket-routing';
 import { readRoutingSettings, saveRoutingSetting } from './routing-settings';
 import type { SettingField } from './routing-settings';
 import { validateSchedule } from './routing-policy';
-import { refreshStaffCard } from './ticket-ui';
+import { refreshStaffCard, refreshPrivateRoutingPanel, answer } from './ticket-ui';
 import { Messenger, Context } from './interfaces';
 
 const esc = (v: unknown) => String(v ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
@@ -35,7 +35,7 @@ export async function handleRoutingCallback(ctx: Context): Promise<boolean> {
     const rows = [...cache.staffMembers.values()].filter(m => m.telegram_id !== actor && routing.activeEngineer(m.telegram_id))
       .slice(0,40).map(m => [{ text: m.name, callback_data: 'rt:to:' + id + ':' + version + ':' + m.telegram_id }]);
     rows.push([{ text: 'Отмена', callback_data: 'tm:mine:0' }]);
-    await ctx.answerCbQuery(); await screen(ctx,'Кому предложить заявку № ' + id + '? Срок текущего предложения не продлевается.',rows); return true;
+    await ctx.answerCbQuery(); await answer(ctx,'Кому предложить заявку № ' + id + '? Срок текущего предложения не продлевается.',rows); return true;
   }
   const action = p[1] === 'to' ? 'transfer' : p[1];
   if (!['take','transfer','common'].includes(action)) { await ctx.answerCbQuery('Неизвестное действие.',true);return true; }
@@ -44,6 +44,7 @@ export async function handleRoutingCallback(ctx: Context): Promise<boolean> {
   await routing.flushRoutingAudit(changed);
   if (changed.routing?.state === 'offered') await routing.deliverOffer(changed);
   await refreshStaffCard(id);
+  await refreshPrivateRoutingPanel(ctx, id);
   await ctx.answerCbQuery(changed.routing?.state === 'accepted' ? 'Заявка взята в работу.' : changed.routing?.state === 'common' ? 'Заявка в общей очереди.' : 'Предложение передано.');
   return true;
 }

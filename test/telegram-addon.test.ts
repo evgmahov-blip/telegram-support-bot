@@ -1,5 +1,7 @@
 // Tests for the Telegram addon: ingress dedupe, graceful stop, thread injection and media ids.
 const mockApi = {
+  raw: { sendRichMessage: jest.fn(), editMessageText: jest.fn() },
+  editMessageText: jest.fn(),
   sendMessage: jest.fn().mockResolvedValue({ message_id: 5 }),
   sendPhoto: jest.fn().mockResolvedValue({ message_id: 6 }),
   sendDocument: jest.fn().mockResolvedValue({ message_id: 7 }),
@@ -249,5 +251,70 @@ describe('TelegramAddon', () => {
     const grammyCatch = mockBotCatch.mock.calls[0][0];
     grammyCatch({ error: cause, ctx: rawContext });
     expect(handler).toHaveBeenCalledWith(cause, rawContext);
+  });
+});
+
+
+describe('Rich Telegram transport', () => {
+  const addon = TelegramAddon.getInstance('token');
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockApi.raw.sendRichMessage.mockReset().mockResolvedValue({message_id:71});
+    mockApi.raw.editMessageText.mockReset().mockResolvedValue(true);
+    mockApi.sendMessage.mockResolvedValue({message_id:5});
+  });
+  it('sends exactly one html field and removes classic-only options', async () => {
+    await expect(addon.sendMessage('42','classic',{most_rich_html:'<p>rich</p>',parse_mode:'HTML',reply_markup:{inline_keyboard:[]}})).resolves.toBe('71');
+    expect(mockApi.raw.sendRichMessage).toHaveBeenCalledWith({chat_id:'42',rich_message:{html:'<p>rich</p>'}});
+    expect(mockApi.sendMessage).not.toHaveBeenCalled();
+  });
+  it('edits the existing message through documented rich_message parameter', async () => {
+    await addon.editMessage('42',71,'classic',{most_rich_html:'<p>rich</p>'});
+    expect(mockApi.raw.editMessageText).toHaveBeenCalledWith({chat_id:'42',message_id:71,rich_message:{html:'<p>rich</p>'}});
+    expect(mockApi.sendMessage).not.toHaveBeenCalled();
+  });
+  it('falls back only after a definite unsupported rejection', async () => {
+    mockApi.raw.sendRichMessage.mockRejectedValueOnce({error_code:400,description:'Rich messages not supported'});
+    await expect(addon.sendMessage('42','classic',{most_rich_html:'<p>rich</p>',parse_mode:'HTML'})).resolves.toBe('5');
+    expect(mockApi.sendMessage).toHaveBeenCalledTimes(1);
+    expect(mockApi.sendMessage.mock.calls[0][2]).not.toHaveProperty('most_rich_html');
+  });
+  it.each([new Error('timeout'),{error_code:500,description:'unknown outcome'},{error_code:403,description:'Forbidden'}])('never duplicates a send on %p', async error => {
+    mockApi.raw.sendRichMessage.mockRejectedValueOnce(error);
+    await expect(addon.sendMessage('42','classic',{most_rich_html:'rich'})).rejects.toEqual(error);
+    expect(mockApi.sendMessage).not.toHaveBeenCalled();
+  });
+  it('treats not modified as a completed edit, and propagates unknown edit results', async () => {
+    mockApi.raw.editMessageText.mockRejectedValueOnce({error_code:400,description:'message is not modified'});
+    await expect(addon.editMessage('42',71,'classic',{most_rich_html:'rich'})).resolves.toBeUndefined();
+    mockApi.raw.editMessageText.mockRejectedValueOnce(new Error('timeout'));
+    await expect(addon.editMessage('42',71,'classic',{most_rich_html:'rich'})).rejects.toThrow('timeout');
+    expect(mockApi.editMessageText).not.toHaveBeenCalled(); expect(mockApi.sendMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe('Rich compatibility boundaries', () => {
+  const addon=TelegramAddon.getInstance('token');
+  beforeEach(()=>{jest.clearAllMocks();mockApi.sendMessage.mockResolvedValue({message_id:5});});
+  it('uses classic without a rich request when SDK has no rich method', async()=>{
+    const method=mockApi.raw.sendRichMessage;
+    (mockApi.raw as any).sendRichMessage=undefined;
+    try {
+      await expect(addon.sendMessage('42','classic',{most_rich_html:'rich'})).resolves.toBe('5');
+      expect(mockApi.sendMessage).toHaveBeenCalledTimes(1);
+    } finally {mockApi.raw.sendRichMessage=method;}
+  });
+  it('falls back to a classic edit after definite payload rejection, never sends a new message', async()=>{
+    mockApi.raw.editMessageText.mockRejectedValueOnce({error_code:400,description:"can't parse rich HTML"});
+    await addon.editMessage('42',71,'classic',{most_rich_html:'rich',parse_mode:'HTML'});
+    expect(mockApi.editMessageText).toHaveBeenCalledTimes(1);
+    expect(mockApi.editMessageText.mock.calls[0].slice(0,3)).toEqual(['42',71,'classic']);
+    expect(mockApi.sendMessage).not.toHaveBeenCalled();
+  });
+  it('propagates a confirmed missing rich message to panel recovery without trying another transport', async()=>{
+    const error={error_code:400,description:'message to edit not found'};
+    mockApi.raw.editMessageText.mockRejectedValueOnce(error);
+    await expect(addon.editMessage('42',71,'classic',{most_rich_html:'rich'})).rejects.toEqual(error);
+    expect(mockApi.editMessageText).not.toHaveBeenCalled();expect(mockApi.sendMessage).not.toHaveBeenCalled();
   });
 });

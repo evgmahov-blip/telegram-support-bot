@@ -1,0 +1,166 @@
+{
+  "home": {
+    "bodyHtml": "<b>Мои в работе</b>\nЗаявки\nСтраница 1",
+    "buttons": [
+      [
+        {
+          "text": "🔵 Мои в работе (1)",
+          "callback_data": "tm:mine:0"
+        }
+      ],
+      [
+        {
+          "text": "⏳ Ожидают принятия (1)",
+          "callback_data": "tm:offered:0"
+        }
+      ],
+      [
+        {
+          "text": "🟢 Общие (2)",
+          "callback_data": "tm:common:0"
+        }
+      ],
+      [
+        {
+          "text": "🔵 Моя · #7 · Открыт · Общая",
+          "callback_data": "tc:open:7"
+        }
+      ],
+      [
+        {
+          "text": "🔄 Обновить",
+          "callback_data": "tm:mine:0"
+        },
+        {
+          "text": "🏠 Главная",
+          "callback_data": "tm:home:0"
+        }
+      ]
+    ],
+    "classic": {
+      "text": "<b>Мои в работе</b>\nЗаявки\nСтраница 1",
+      "parse_mode": "HTML",
+      "reply_markup": {
+        "inline_keyboard": [
+          [
+            {
+              "text": "🔵 Мои в работе (1)",
+              "callback_data": "tm:mine:0"
+            }
+          ],
+          [
+            {
+              "text": "⏳ Ожидают принятия (1)",
+              "callback_data": "tm:offered:0"
+            }
+          ],
+          [
+            {
+              "text": "🟢 Общие (2)",
+              "callback_data": "tm:common:0"
+            }
+          ],
+          [
+            {
+              "text": "🔵 Моя · #7 · Открыт · Общая",
+              "callback_data": "tc:open:7"
+            }
+          ],
+          [
+            {
+              "text": "🔄 Обновить",
+              "callback_data": "tm:mine:0"
+            },
+            {
+              "text": "🏠 Главная",
+              "callback_data": "tm:home:0"
+            }
+          ]
+        ]
+      }
+    },
+    "rich_message": {
+      "html": "<h3>Мои в работе</h3><p>Заявки<br>Страница 1</p><tg-button-row><tg-button type=\"callback_data\" style=\"primary\" data=\"tm:mine:0\">🔵 Мои в работе (1)</tg-button></tg-button-row><tg-button-row><tg-button type=\"callback_data\" style=\"primary\" data=\"tm:offered:0\">⏳ Ожидают принятия (1)</tg-button></tg-button-row><tg-button-row><tg-button type=\"callback_data\" style=\"primary\" data=\"tm:common:0\">🟢 Общие (2)</tg-button></tg-button-row><tg-button-row><tg-button type=\"callback_data\" style=\"primary\" data=\"tc:open:7\">🔵 Моя · #7 · Открыт · Общая</tg-button></tg-button-row><tg-button-row><tg-button type=\"callback_data\" style=\"primary\" data=\"tm:mine:0\">🔄 Обновить</tg-button><tg-button type=\"callback_data\" style=\"primary\" data=\"tm:home:0\">🏠 Главная</tg-button></tg-button-row>"
+    }
+  },
+  "offeredCard": {
+    "bodyHtml": "<b>Заявка #8</b>\nСтатус: <b>Открыт</b>\nОжидает принятия · принять до 08.11.2026, 13:00:00 (Europe/Moscow) · 10 рабочих минут; это не срок решения\nОрганизация (со слов клиента): ООО &lt;Пример&gt;\nПривязка организации: не подтверждена\nПриоритет: Обычный\nИнженер: Предложено: Анна\n\n<b>Последнее сообщение</b>\nНе работает принтер.",
+    "buttons": [
+      [
+        {
+          "text": "Взять",
+          "callback_data": "rt:take:8:2"
+        }
+      ],
+      [
+        {
+          "text": "Передать",
+          "callback_data": "rt:transfer:8:2"
+        },
+        {
+          "text": "Сделать общей",
+          "callback_data": "rt:common:8:2"
+        }
+      ],
+      [
+        {
+          "text": "🔄 Обновить",
+          "callback_data": "tc:open:8"
+        },
+        {
+          "text": "📜 История",
+          "callback_data": "tc:h:8:0"
+        }
+      ],
+      [
+        {
+          "text": "🏠 Главная",
+          "callback_data": "tm:home:0"
+        }
+      ]
+    ],
+    "classic": {
+      "text": "<b>Заявка #8</b>\nСтатус: <b>Открыт</b>\nОжидает принятия · принять до 08.11.2026, 13:00:00 (Europe/Moscow) · 10 рабочих минут; это не срок решения\nОрганизация (со слов клиента): ООО &lt;Пример&gt;\nПривязка организации: не подтверждена\nПриоритет: Обычный\nИнженер: Предложено: Анна\n\n<b>Последнее сообщение</b>\nНе работает принтер.",
+      "parse_mode": "HTML",
+      "reply_markup": {
+        "inline_keyboard": [
+          [
+            {
+              "text": "Взять",
+              "callback_data": "rt:take:8:2"
+            }
+          ],
+          [
+            {
+              "text": "Передать",
+              "callback_data": "rt:transfer:8:2"
+            },
+            {
+              "text": "Сделать общей",
+              "callback_data": "rt:common:8:2"
+            }
+          ],
+          [
+            {
+              "text": "🔄 Обновить",
+              "callback_data": "tc:open:8"
+            },
+            {
+              "text": "📜 История",
+              "callback_data": "tc:h:8:0"
+            }
+          ],
+          [
+            {
+              "text": "🏠 Главная",
+              "callback_data": "tm:home:0"
+            }
+          ]
+        ]
+      }
+    },
+    "rich_message": {
+      "html": "<h3>Заявка #8</h3><p>Статус: <b>Открыт</b><br>Ожидает принятия · принять до 08.11.2026, 13:00:00 (Europe/Moscow) · 10 рабочих минут; это не срок решения<br>Организация (со слов клиента): ООО &lt;Пример&gt;<br>Привязка организации: не подтверждена<br>Приоритет: Обычный<br>Инженер: Предложено: Анна<br><br><b>Последнее сообщение</b><br>Не работает принтер.</p><tg-button-row><tg-button type=\"callback_data\" style=\"primary\" data=\"rt:take:8:2\">Взять</tg-button></tg-button-row><tg-button-row><tg-button type=\"callback_data\" style=\"primary\" data=\"rt:transfer:8:2\">Передать</tg-button><tg-button type=\"callback_data\" style=\"primary\" data=\"rt:common:8:2\">Сделать общей</tg-button></tg-button-row><tg-button-row><tg-button type=\"callback_data\" style=\"primary\" data=\"tc:open:8\">🔄 Обновить</tg-button><tg-button type=\"callback_data\" style=\"primary\" data=\"tc:h:8:0\">📜 История</tg-button></tg-button-row><tg-button-row><tg-button type=\"callback_data\" style=\"primary\" data=\"tm:home:0\">🏠 Главная</tg-button></tg-button-row>"
+    }
+  }
+}

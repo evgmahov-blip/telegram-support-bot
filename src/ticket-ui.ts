@@ -20,11 +20,12 @@ import * as visibility from './ticket-visibility';
 import * as clientOrganization from './client-organization';
 import * as routingAdmin from './routing-admin-ui';
 import * as routing from './ticket-routing';
+import { renderClassic, renderRich, boundedText } from './ticket-rich-ui';
 
 const PAGE = 6;
 const PROMPT_MS = 15 * 60 * 1000;
 const RENDER_CACHE_LIMIT = 256;
-export const e = (v: unknown) => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+export const e = (v: unknown) => boundedText(v, 500).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 export type Button = { text: string; callback_data?: string; url?: string };
 const kb = (rows: Button[][]) => ({ inline_keyboard: rows });
 export const STAFF_HOME: Button = { text: '🏠 Главная', callback_data: 'tm:home:0' };
@@ -43,8 +44,8 @@ const eventName: Record<string, string> = {
 const doneText: Record<string, string> = { close: 'Заявка закрыта:', xfer: 'Заявка передана:', cancel: 'Ожидание ответа отменено:',
   share: 'Заявка стала общей:', unshare: 'Заявка стала личной:' };
 // Screens that can carry personal-ticket data open only in the actor's private chat with the bot.
-const PERSONAL_VIEWS = new Set(['mine', 'active', 'closed']);
-const LIST_VIEWS = new Set(['new', 'mine', 'common', 'active', 'closed']);
+const PERSONAL_VIEWS = new Set(['mine', 'offered', 'active', 'closed']);
+const LIST_VIEWS = new Set(['new', 'mine', 'offered', 'common', 'active', 'closed']);
 
 /** Event label for history rows; bounded numbers only, no free text from metadata. */
 function eventLabel(type: string, metadata?: Record<string, any>): string {
@@ -71,14 +72,23 @@ function boundedSet<T>(map: Map<string, T>, key: string, value: T) {
 const messageKey = (chatId: string | number, messageId: number) => `${chatId}:${messageId}`;
 const panelKey = (ctx: Context) => `${ctx.from.id}:${ctx.chat.id}:${ctx.callbackQuery?.message?.message_thread_id ?? ctx.message?.message_thread_id ?? ''}`;
 function renderSignature(text: string, rows: Button[][], parseMode = 'HTML') {
-  return JSON.stringify({ text, markup: { inline_keyboard: rows }, parseMode });
+  return JSON.stringify({ rich: cache.config.telegram_rich_ui === true, text, markup: { inline_keyboard: rows }, parseMode });
+}
+
+function missingMessage(err: unknown): boolean {
+  const x = err as { error_code?: number; description?: string };
+  return x.error_code === 400 && /message to edit not found/i.test(x.description || '');
 }
 
 async function editRendered(chatId: string | number, messageId: number, text: string, rows: Button[][]): Promise<boolean> {
+  ({ text, rows } = renderClassic({ bodyHtml: text, buttons: rows }));
   const key = messageKey(chatId, messageId); const signature = renderSignature(text, rows);
   if (renderedMessages.get(key) === signature) return false;
   try {
+    const rich = cache.config.telegram_rich_ui === true && Number(chatId) > 0 && rows.some(row => row.some(b => /^(tm|tc|rt):/.test(b.callback_data || '')));
+    const extra = rich ? { most_rich_html: renderRich({ bodyHtml: text, buttons: rows }) } : {};
     await TelegramAddon.getInstance().editMessage(chatId, messageId, text, {
+      ...extra,
       parse_mode: 'HTML', reply_markup: { inline_keyboard: rows },
     });
     boundedSet(renderedMessages, key, signature); return true;
@@ -99,6 +109,9 @@ const fmt = (d: unknown) => d ? new Date(d as string).toLocaleString('ru-RU', {
 
 async function staffButtons(t: ISupportee) {
   const id = t.ticketId;
+  if (t.routing?.state === 'offered') return kb([
+    [{ text: 'Открыть предложение в личном чате', callback_data: `tc:open:${id}` }],
+  ]);
   if (t.status === 'closed') {
     const saved = typeof db.getTicketResolution === 'function' && await db.getTicketResolution(id);
     return kb([
@@ -110,7 +123,7 @@ async function staffButtons(t: ISupportee) {
   }
   return kb([
     // A manual ticket has no client channel: «reply» only records work in its history.
-    [{ text: '🙋 Взять', callback_data: `tc:take:${id}` }, { text: isManualTicket(t) ? '📝 Записать ответ' : '✉️ Написать клиенту', callback_data: `tc:reply:${id}` }],
+    [...(!t.assigned_to ? [{ text: '🙋 Взять', callback_data: `tc:take:${id}` }] : []), { text: isManualTicket(t) ? '📝 Записать ответ' : '✉️ Написать клиенту', callback_data: `tc:reply:${id}` }],
     [{ text: t.status === 'waiting_user' ? '▶️ Продолжить работу' : '⏳ Ждём клиента', callback_data: `tc:${t.status === 'waiting_user' ? 'resume' : 'wait'}:${id}` }, { text: '👤 Передать', callback_data: `tc:transfer:${id}` }],
     [{ text: '📜 История', callback_data: `tc:h:${id}:0` }, { text: '📝 Заметка', callback_data: `tc:note:${id}` }],
     [{ text: '🔒 Закрыть', callback_data: `tc:closeask:${id}` }],
@@ -135,23 +148,32 @@ export async function sharedCardText(ticket: ISupportee): Promise<string> {
     '🔒 Личная заявка. Содержимое открывается владельцу и руководителям в личном чате с ботом (кнопка «📜 История»).';
 }
 
+function offerDeadline(ticket: ISupportee): string {
+  const r = ticket.routing;
+  const zone = r?.policy?.schedule?.timezone;
+  if (!r?.deadline_at || !zone || !r.policy) return 'Ожидает принятия · срок не задан';
+  return 'Ожидает принятия · принять до ' + e(new Date(r.deadline_at).toLocaleString('ru-RU', { timeZone: zone }))
+    + ' (' + e(zone) + ') · ' + r.policy.acceptance_minutes + ' рабочих минут; это не срок решения';
+}
+
 export async function cardText(ticket: ISupportee, viewerId?: string): Promise<string> {
   const latest = typeof db.getLatestTicketMessage === 'function' ? await db.getLatestTicketMessage(ticket.ticketId) : null;
-  const owner = ticket.assigned_to ? staffDisplayName(ticket.assigned_to) : 'Не назначен';
-  const preview = latest?.text ? latest.text.replace(/\s+/g, ' ').slice(0, 240) : 'Сообщений пока нет';
+  const owner = ticket.assigned_to ? staffDisplayName(ticket.assigned_to) : ticket.routing?.state === 'offered' ? 'Предложено: ' + staffDisplayName(ticket.routing.offered_to) : 'Не назначен';
+  const preview = latest?.text ? boundedText(latest.text.replace(/\s+/g, ' '), 240) : 'Сообщений пока нет';
   // External client data is rendered on the staff card only; clients never see manual tickets.
   const manual = isManualTicket(ticket);
   const client = manual ? (ticket.external_client || ticket.name || 'Не указан') : (ticket.name || 'Не указан');
   const details = [
-    ticket.routing?.state === 'offered' ? 'Ожидает принятия' : '',
+    ticket.routing?.state === 'offered' ? offerDeadline(ticket) : '',
     viewerId && ticket.assigned_to === viewerId ? '🔵 Моя' : visibility.isCommonTicket(ticket) ? '🟢 Общая' : '',
     manual && ticket.manual_source ? `Источник: ${e(MANUAL_SOURCE_LABELS[ticket.manual_source] || 'Другое')}` : '',
     `Клиент: ${e(client)}`,
     ticket.declared_organization ? `Организация (со слов клиента): ${e(ticket.declared_organization)}` : '',
+    ticket.organization_ref && ticket.organization_binding_version ? 'Привязка организации: подтверждена человеком' : 'Привязка организации: не подтверждена',
     manual && ticket.external_contact ? `Контакт: ${e(ticket.external_contact)}` : '',
     ticket.assigned_to && ticket.common_visible ? 'Видимость: общая' : '',
     ticket.category && !/^(общая|general|common)$/i.test(ticket.category) ? `Категория: ${e(ticket.category)}` : '',
-    ticket.priority && ticket.priority !== 'normal' ? `Приоритет: ${e(priorityName[ticket.priority] || ticket.priority)}` : '',
+    `Приоритет: ${e(priorityName[ticket.priority || 'normal'] || ticket.priority)}`,
   ].filter(Boolean).join('\n');
   return `<b>Заявка #${ticket.ticketId}</b>\n` +
     `Статус: <b>${e(statusName[ticket.status] || ticket.status)}</b>\n` +
@@ -237,7 +259,7 @@ function staffSurface(ctx: Context): boolean {
 
 /** A registered engineer's own private chat with the bot: a private, read-mostly staff surface. */
 export function isStaffPrivate(ctx: Context): boolean {
-  return ctx.chat?.type === 'private' && ctx.messenger === Messenger.TELEGRAM
+  return ctx.chat?.type === 'private' && String(ctx.chat.id) === String(ctx.from?.id) && ctx.messenger === Messenger.TELEGRAM
     && Boolean(team.getStaffRole(String(ctx.from?.id)));
 }
 
@@ -268,6 +290,7 @@ export async function answerForTicket(ctx: Context, ticket: ISupportee, text: st
 }
 
 export async function answer(ctx: Context, text: string, rows: Button[][], visibleFlow = false) {
+  ({ text, rows } = renderClassic({ bodyHtml: text, buttons: rows }));
   const q = ctx.callbackQuery?.message;
   if (q) {
     try {
@@ -286,14 +309,14 @@ export async function answer(ctx: Context, text: string, rows: Button[][], visib
         catch (err) {
           navigationPanels.delete(panelKey(ctx));
           renderedMessages.delete(messageKey(q.chat.id, existingPanel));
-          log.error('Не удалось переиспользовать окно навигации, отправляю новое:', err);
+          if (!missingMessage(err)) throw err;
         }
       }
     } catch (err) {
-      log.error('Не удалось обновить окно навигации, отправляю новое:', err);
+      if (!missingMessage(err)) throw err;
     }
   }
-  const options = { parse_mode: 'HTML', reply_markup: { inline_keyboard: rows },
+  const options = { ...(isStaffPrivate(ctx) && cache.config.telegram_rich_ui === true ? { most_rich_html: renderRich({ bodyHtml: text, buttons: rows }) } : {}), parse_mode: 'HTML', reply_markup: { inline_keyboard: rows },
     message_thread_id: ctx.message?.message_thread_id ?? q?.message_thread_id ?? undefined };
   if (q) {
     const sent = await middleware.sendMessage(q.chat.id, ctx.messenger, text, options);
@@ -335,11 +358,9 @@ export async function showStaffHome(ctx: Context, visibleFlow = false) {
 
 /** Staff home in the engineer's own bot DM: lists only, actions stay on the group card. */
 export async function showStaffPrivateHome(ctx: Context) {
-  await answer(ctx, '<b>Панель поддержки · личный чат</b>\nЗдесь видны ваши и общие заявки. Предложения принимаются и передаются здесь; остальные действия доступны на постоянной карточке заявки.', [
-    [{ text: '🔵 Мои заявки', callback_data: 'tm:mine:0' }, { text: '🟢 Общие заявки', callback_data: 'tm:common:0' }],
-    [{ text: '📂 Все активные', callback_data: 'tm:active:0' }, { text: '✅ Закрытые', callback_data: 'tm:closed:0' }],
-    ...(team.canPerformAction(String(ctx.from.id), 'manage_team') ? [[{ text: '⚙️ Настройки', callback_data: 'cfg:home' }]] : []),
-  ]);
+  if (!isStaffPrivate(ctx)) return;
+  await staffList(ctx, 'mine', 0);
+
 }
 
 async function renderTicketOnClickedCard(ctx: Context, ticket: ISupportee, outcome?: string) {
@@ -349,6 +370,13 @@ async function renderTicketOnClickedCard(ctx: Context, ticket: ISupportee, outco
     ((await staffButtons(ticket)).inline_keyboard as Button[][]));
 }
 
+async function dashboardTabs(actor: string, scope: db.StaffListScope): Promise<Button[][]> {
+  const views: db.StaffListView[] = ['mine', 'offered', 'common'];
+  const counts = await Promise.all(views.map(v => typeof db.countStaffTickets === 'function' ? db.countStaffTickets(v, actor, scope) : null));
+  return views.map((v, i) => [{ text: ['🔵 Мои в работе', '⏳ Ожидают принятия', '🟢 Общие'][i]
+    + (counts[i] == null ? '' : ` (${counts[i]})`), callback_data: `tm:${v}:0` }]);
+}
+
 async function staffList(ctx: Context, view: db.StaffListView, page: number) {
   const actor = ctx.from.id.toString();
   const privateSurface = isStaffPrivate(ctx);
@@ -356,14 +384,20 @@ async function staffList(ctx: Context, view: db.StaffListView, page: number) {
   const scope = visibility.listScope(actor, !privateSurface && !toPrivate);
   const fetched = await db.listStaffTickets(view, actor, page, PAGE + 1, PAGE, scope);
   const more = fetched.length > PAGE; const list = fetched.slice(0, PAGE);
-  const rows: Button[][] = list.map(t => [{ text: (privateSurface || toPrivate ? (t.routing?.state === 'offered' ? 'Ожидает принятия · ' : t.assigned_to === actor ? '🔵 Моя · ' : visibility.isCommonTicket(t) ? '🟢 Общая · ' : '') : '') + `#${t.ticketId} · ${statusName[t.status]} · ${String(t.category || 'Общая').slice(0, 18)}${isManualTicket(t) ? ' · вручную' : ''}`, callback_data: `tc:open:${t.ticketId}` }]);
+  const rows: Button[][] = list.map(t => [{ text: (privateSurface || toPrivate ? (t.routing?.state === 'offered' ? 'Ожидает принятия · ' : t.assigned_to === actor ? '🔵 Моя · ' : visibility.isCommonTicket(t) ? '🟢 Общая · ' : '') : '') + `#${t.ticketId} · ${statusName[t.status]} · ${boundedText(t.category || 'Общая', 18)}${isManualTicket(t) ? ' · вручную' : ''}`, callback_data: `tc:open:${t.ticketId}` }]);
+  if (privateSurface || toPrivate) rows.unshift(...await dashboardTabs(actor, scope));
   const nav: Button[] = [];
   if (page > 0) nav.push({ text: '◀️', callback_data: `tm:${view}:${page-1}` });
   if (more) nav.push({ text: '▶️', callback_data: `tm:${view}:${page+1}` });
   if (nav.length) rows.push(nav);
-  rows.push([{ text: '🏠 Главная', callback_data: 'tm:home:0' }]);
+  if (privateSurface || toPrivate) {
+    rows.push([{ text: '📂 Все активные', callback_data: 'tm:active:0' }, { text: '✅ Закрытые', callback_data: 'tm:closed:0' }]);
+    if (team.canPerformAction(actor, 'manage_team')) rows.push([{ text: '⚙️ Настройки', callback_data: 'cfg:home' }]);
+  }
+  rows.push([{ text: '🔄 Обновить', callback_data: `tm:${view}:${page}` }, { text: '🏠 Главная', callback_data: 'tm:home:0' }]);
   const pageText = page > 0 || more ? `\nСтраница ${page + 1}` : '';
-  const text = `<b>${list.length ? 'Заявки' : 'Заявок нет'}</b>${pageText}`;
+  const label = ({mine:'Мои в работе', offered:'Ожидают принятия', common:'Общие', active:'Все активные', closed:'Закрытые', new:'Новые'} as const)[view];
+  const text = `<b>${label}</b>\n${list.length ? 'Заявки' : 'Заявок нет'}${pageText}`;
   if (toPrivate) await answerPrivately(ctx, text, rows);
   else await answer(ctx, text, rows);
 }
@@ -425,6 +459,7 @@ async function history(ctx: Context, ticket: ISupportee, page: number, staff: bo
 
 export async function handleCallback(ctx: Context): Promise<boolean> {
   const data = ctx.callbackQuery.data || '';
+  if (Buffer.byteLength(data, 'utf8') > 64) { await ctx.answerCbQuery('Некорректная кнопка.', true); return true; }
   if (data.startsWith('rt:')) return routingAdmin.handleRoutingCallback(ctx);
   if (data.startsWith('cfg:')) return routingAdmin.handleAdminCallback(ctx);
   if (data === 'noop') { await ctx.answerCbQuery('Это номер страницы. Используйте стрелки для перехода.', true); return true; }
@@ -493,7 +528,11 @@ export async function handleCallback(ctx: Context): Promise<boolean> {
       await Promise.all([manualIntake.cancelActiveForHome(ctx), staffNameEditor.cancelForHome(ctx), resolutionCase.cancelForHome(ctx)]);
       if (privateStaff) await showStaffPrivateHome(ctx); else await showStaffHome(ctx);
     }
-    else await staffList(ctx, view, Number(p[2]) || 0);
+    else {
+      const page = Number(p[2] ?? 0);
+      if (!Number.isSafeInteger(page) || page < 0 || page > 100000) { await ctx.answerCbQuery('Некорректная страница.', true); return true; }
+      await staffList(ctx, view, page);
+    }
     return true;
   }
   if (p[0] === 'sn') return staffNameEditor.handleCallback(ctx, p);
@@ -537,6 +576,7 @@ export async function handleCallback(ctx: Context): Promise<boolean> {
     if (ownPanel) await ctx.answerCbQuery();
     await refreshStaffCard(id);
     const current = await db.getTicketById(id, null) || ticket;
+    if (!visibility.canViewTicket(actor, current)) { await ctx.answerCbQuery('Заявка больше недоступна.', true); return true; }
     const raw = String(current.staff_card_chat_id || cache.config.staffchat_id).replace(/^-100/, '');
     const url = current.staff_card_message_id ? `https://t.me/c/${raw}/${current.staff_card_message_id}${current.staff_card_thread_id ? `?thread=${current.staff_card_thread_id}` : ''}` : undefined;
     // Lifecycle buttons live only on the canonical card (stale-button guard); for a closed ticket point there for «Вернуть в работу».
@@ -553,9 +593,9 @@ export async function handleCallback(ctx: Context): Promise<boolean> {
     const rows: Button[][] = [
       ...routeRows,
       ...(url ? [[{ text: closed ? 'Перейти к карточке → «Вернуть в работу»' : 'Перейти к постоянной карточке', url }]] : []),
-      [{ text: '📜 История', callback_data: `tc:h:${id}:0` }, ...(closed ? [{ text: '📘 Решение', callback_data: `rs:view:${id}` }] : [])],
+      [{ text: '🔄 Обновить', callback_data: `tc:open:${id}` }, { text: '📜 История', callback_data: `tc:h:${id}:0` }, ...(closed ? [{ text: '📘 Решение', callback_data: `rs:view:${id}` }] : [])],
       [{ text: '⬅️ Назад', callback_data: closed ? 'tm:closed:0' : privateStaff ? 'tm:mine:0' : 'tm:common:0' }, STAFF_HOME]];
-    if (ownPanel) await answer(ctx, text, rows);
+    if (privateStaff || visibility.isCommonTicket(current)) await answer(ctx, text, rows);
     else await answerForTicket(ctx, current, text, rows);
     return true;
   }
@@ -695,4 +735,22 @@ export async function handleCallback(ctx: Context): Promise<boolean> {
   // close/xfer/cancel arrive from transient panels: replace their now-spent buttons with navigation.
   if (!canonicalBinding) await answer(ctx, `${doneText[action] || 'Готово.'} № ${id}`, [[{ text: '⬅️ К заявке', callback_data: `tc:open:${id}` }, STAFF_HOME]]);
   await ctx.answerCbQuery('Готово.'); return true;
+}
+
+/** Re-read after a command: ownership may have changed again before presentation. */
+export async function refreshPrivateRoutingPanel(ctx: Context, ticketId: number): Promise<void> {
+  if (!isStaffPrivate(ctx)) return;
+  const t = await db.getTicketById(ticketId, null);
+  const actor = String(ctx.from.id);
+  if (!t || !visibility.canViewTicket(actor, t)) {
+    await answer(ctx, 'Заявка больше недоступна.', [[STAFF_HOME]]); return;
+  }
+  const r = t.routing;
+  const offered = r?.state === 'offered' && (r.offered_to === actor || team.canPerformAction(actor, 'assign'));
+  await answer(ctx, await cardText(t, actor), [
+    ...(offered ? [[{text:'Взять',callback_data:`rt:take:${ticketId}:${r.version}`},
+      {text:'Передать',callback_data:`rt:transfer:${ticketId}:${r.version}`},
+      {text:'Сделать общей',callback_data:`rt:common:${ticketId}:${r.version}`}]] : []),
+    [{text:'🔄 Обновить / открыть карточку',callback_data:`tc:open:${ticketId}`}], [STAFF_HOME],
+  ]);
 }

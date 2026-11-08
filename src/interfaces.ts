@@ -235,6 +235,8 @@ export enum ParseMode {
 }
 
 export class Config {
+  /** Private staff panels only; classic remains the default. */
+  telegram_rich_ui: boolean = false;
   bot_token: string = '';
   spam_cant_msg: number = 0;
   staffchat_id: string | number = '';
@@ -423,6 +425,8 @@ export class Context {
 }
 
 export interface Addon {
+  sendRichMessage?(chatId: string | number, html: string, options?: Record<string, unknown>): Promise<string | null>;
+  editRichMessage?(chatId: string | number, messageId: number, html: string): Promise<void>;
   platform?: string;
   botInfo?: Record<string, unknown>;
 

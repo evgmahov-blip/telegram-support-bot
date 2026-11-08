@@ -280,3 +280,6 @@ escalation_rules: [] # Auto-escalate tickets based on rules
   #   action: "notify_supervisor" # notify_supervisor or tag_urgent
 
 auto_close_after_days: 0 # Report inactive tickets in the log; they are never closed without cause and performed work (0 = disabled)
+
+# Opt-in Rich HTML for private staff panels; keep false until client E2E validation.
+telegram_rich_ui: false

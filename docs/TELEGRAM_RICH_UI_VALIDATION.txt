@@ -1,0 +1,39 @@
+Task: ao-rem-2c6fa14017ea
+Parent (trusted AOR handoff): 8316bfeabaa19ffded1d25316e566faf551cac33
+Runtime: Node v24.22.2
+No live Telegram/provider/Mongo requests; mocked dependencies.
+
+npx --offline --package=node@24 -c "npm run build"
+
+> telegram-support-bot@5.0.0 build
+> npm run tsc
+
+
+> telegram-support-bot@5.0.0 tsc
+> tsc
+
+
+Targeted test suites (before final concurrent-visibility test)
+
+> telegram-support-bot@5.0.0 test
+> NODE_ENV=test jest --detectOpenHandles --forceExit --runInBand test/ticket-rich-ui.test.ts test/telegram-addon.test.ts test/ticket-visibility-ui.test.ts test/ticket-ui-callbacks.test.ts test/db.test.ts test/routing-admin-ui.test.ts
+
+
+Test Suites: 6 passed, 6 total
+Tests:       148 passed, 148 total
+Snapshots:   0 total
+Time:        2.264 s, estimated 3 s
+Ran all test suites matching test/ticket-rich-ui.test.ts|test/telegram-addon.test.ts|test/ticket-visibility-ui.test.ts|test/ticket-ui-callbacks.test.ts|test/db.test.ts|test/routing-admin-ui.test.ts.
+
+npx --offline --package=node@24 -c "npm test" (final full suite)
+
+> telegram-support-bot@5.0.0 test
+> NODE_ENV=test jest --detectOpenHandles --forceExit --runInBand
+
+
+Test Suites: 64 passed, 64 total
+Tests:       775 passed, 775 total
+Snapshots:   0 total
+Time:        10.89 s, estimated 12 s
+Ran all test suites.
+

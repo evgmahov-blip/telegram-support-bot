@@ -13,6 +13,7 @@ const mockCreate = jest.fn();
 const mockEventSave = jest.fn().mockResolvedValue(undefined);
 const mockEventFindOne = jest.fn(() => query({ seq: 0 }));
 const mockFind = jest.fn();
+const mockCountDocuments = jest.fn();
 const mockUpdateOne = jest.fn().mockResolvedValue({});
 
 /** Minimal chainable, awaitable query like mongoose returns from findOne(). */
@@ -35,6 +36,7 @@ jest.mock('mongoose', () => {
     findOneAndUpdate: mockSupporteeFindOneAndUpdate,
     create: mockCreate,
     find: mockFind,
+    countDocuments: mockCountDocuments,
     updateOne: mockUpdateOne,
   };
 
@@ -345,7 +347,7 @@ describe('Database Module', () => {
     it('puts visibility into every staff list query', async () => {
       mockFind.mockImplementation(chain);
       await db.listStaffTickets('mine', '42', 0, 7, 6, 'common');
-      expect(mockFind).toHaveBeenLastCalledWith({ $and: [{ ...active, $or: [{ assigned_to: '42' }, { 'routing.state':'offered', 'routing.offered_to':'42' }] }, common] });
+      expect(mockFind).toHaveBeenLastCalledWith({ $and: [{ ...active, assigned_to: '42', 'routing.state': { $ne: 'offered' } }, common] });
       await db.listStaffTickets('closed', '43', 0, 7, 6);
       expect(mockFind).toHaveBeenLastCalledWith({ $and: [{ status: 'closed' },
         { $or: [{ assigned_to:'43' }, { 'routing.state':'offered', 'routing.offered_to':'43' }, common] }] });
@@ -416,5 +418,39 @@ describe('Database Module', () => {
       const result = await db.getTicketByUserId('nonexistent', 'support');
       expect(result).toBeNull();
     });
+  });
+});
+
+
+describe('dashboard database scopes and counters', () => {
+  const data = [
+    {ticketId:1, assigned_to:'A', status:'open'},
+    {ticketId:2, assigned_to:'B', status:'open'},
+    {ticketId:3, assigned_to:null, status:'open'},
+    {ticketId:4, assigned_to:'B', common_visible:true, status:'waiting_user'},
+    {ticketId:5, assigned_to:null, routing:{state:'offered',offered_to:'A'},status:'open'},
+    {ticketId:6, assigned_to:null, routing:{state:'offered',offered_to:'B'},status:'open'},
+    {ticketId:7, assigned_to:'A', status:'closed'},
+  ];
+  function matches(t:any,q:any):boolean {
+    return Object.entries(q).every(([k,v]:[string,any]) => {
+      if(k==='$and')return v.every((x:any)=>matches(t,x));
+      if(k==='$or')return v.some((x:any)=>matches(t,x));
+      const value=k.split('.').reduce((a,key)=>a?.[key],t);
+      if(v && typeof v==='object')return '$ne' in v ? value!==v.$ne : v.$in.includes(value);
+      return v===null ? value==null : value===v;
+    });
+  }
+  it.each([
+    ['mine','A','visible',[1]],['offered','A','visible',[5]],['common','A','visible',[3,4]],
+    ['active','A','visible',[1,3,4,5]],['active','B','visible',[2,3,4,6]],
+    ['active','boss','all',[1,2,3,4,5,6]],['offered','boss','all',[5,6]],
+    ['active','A','common',[3,4]],['closed','B','visible',[]],
+  ] as const)('filters %s for %s in %s without foreign records', async(view,actor,scope,ids) => {
+    const filter=db.staffTicketFilter(view,actor,scope);
+    expect(data.filter(t=>matches(t,filter)).map(t=>t.ticketId)).toEqual(ids);
+    mockCountDocuments.mockResolvedValueOnce(ids.length);
+    await expect(db.countStaffTickets(view,actor,scope)).resolves.toBe(ids.length);
+    expect(mockCountDocuments).toHaveBeenLastCalledWith(filter);
   });
 });

@@ -10,7 +10,7 @@ const latest = jest.fn().mockResolvedValue({ text: 'Пароль от роуте
 jest.mock('../src/middleware', () => ({ reply, sendMessage: send }));
 jest.mock('../src/db', () => ({
   getTicketById: getTicket, getTicketByInternalId: jest.fn().mockResolvedValue(null), listUserTickets: jest.fn(),
-  listStaffTickets: jest.fn().mockResolvedValue([]), getLatestTicketMessage: latest, getTicketTimelinePage: timeline,
+  countStaffTickets: jest.fn().mockResolvedValue(null), listStaffTickets: jest.fn().mockResolvedValue([]), getLatestTicketMessage: latest, getTicketTimelinePage: timeline,
   getTicketResolution: jest.fn().mockResolvedValue(null), setTicketCommonVisibility: jest.fn(),
   claimStaffCard: jest.fn(), releaseStaffCardClaim: jest.fn(), bindStaffCard: jest.fn(), clearStaffCardBinding: jest.fn(),
   setPendingTicketAction: jest.fn(), consumePendingTicketAction: jest.fn(), clearPendingTicketAction: jest.fn(),
@@ -181,4 +181,72 @@ describe('explicit common visibility', () => {
     expect(db().recordAnalyticsEventBestEffort).not.toHaveBeenCalled();
     expect(answer).toHaveBeenCalledWith('Владелец или видимость заявки изменились.', true);
   });
+});
+
+describe('private dashboard and Rich HTML opt-in', () => {
+  const cache = () => jest.requireMock('../src/cache').default;
+  beforeEach(() => {
+    jest.clearAllMocks(); resetRenderStateForTests(); getTicket.mockResolvedValue(personalA);
+    cache().config.telegram_rich_ui = true;
+    latest.mockResolvedValue({text:'<script>alert(1)</script>😀'});
+    db().listStaffTickets.mockResolvedValue([]);
+  });
+  afterEach(() => { cache().config.telegram_rich_ui = false; latest.mockResolvedValue({text:'Пароль от роутера 12345'}); });
+  it('projects the private card with escaped data and the same authorized navigation', async () => {
+    getTicket.mockResolvedValue({...personalA,staff_card_chat_id:'-100123'});
+    await handleCallback(dm('tc:open:7'));
+    const call = edit.mock.calls.find(c=>c[0]===42);
+    expect(call[3].most_rich_html).toContain('<h3>Заявка #7</h3>');
+    expect(call[3].most_rich_html).toContain('&lt;script&gt;');
+    expect(call[3].most_rich_html).not.toContain('<script>');
+    expect(call[3].most_rich_html).toContain('data="tc:h:7:0"');
+  });
+  it('denies a foreign or revoked actor before fetching the message preview', async () => {
+    await handleCallback(dm('tc:open:7',43));
+    expect(latest).not.toHaveBeenCalled(); expect(edit).not.toHaveBeenCalled();
+    const staff=cache().staffMembers.get('42'); staff.active=false;
+    try { await handleCallback(dm('tm:home:0')); expect(db().listStaffTickets).not.toHaveBeenCalled(); }
+    finally { delete staff.active; }
+  });
+  it('shows a six-row home and a separate offered queue with matching count scope', async () => {
+    db().countStaffTickets.mockResolvedValue(8);
+    db().listStaffTickets.mockResolvedValue(Array.from({length:7},(_,i)=>({...personalA,ticketId:i+1})));
+    await handleCallback(dm('tm:home:0'));
+    expect(db().listStaffTickets).toHaveBeenCalledWith('mine','42',0,7,6,'visible');
+    expect(db().countStaffTickets).toHaveBeenCalledWith('offered','42','visible');
+    const call=edit.mock.calls.find(c=>c[0]===42);
+    expect(call[3].most_rich_html).toContain('Ожидают принятия (8)');
+    expect(call[3].reply_markup.inline_keyboard.flat().filter((b:any)=>b.callback_data?.startsWith('tc:open:'))).toHaveLength(6);
+    await handleCallback(dm('tm:offered:1'));
+    expect(db().listStaffTickets).toHaveBeenLastCalledWith('offered','42',1,7,6,'visible');
+    db().countStaffTickets.mockResolvedValue(null);
+  });
+  it('does not add personal dashboard counters or rich payload to the group', async () => {
+    await handleCallback(group('tm:home:0',42,900));
+    expect(edit.mock.calls[0][3]).not.toHaveProperty('most_rich_html');
+    expect(db().listStaffTickets).not.toHaveBeenCalled();
+  });
+  it('renders the saved offer deadline but no acceptance timer after taken or restart', async () => {
+    const {cardText}=require('../src/ticket-ui');
+    const offered={...personalA,assigned_to:null,routing:{state:'offered',offered_to:'42',version:2,
+      deadline_at:new Date('2026-11-08T10:00:00Z'),policy:{acceptance_minutes:10,schedule:{timezone:'Europe/Moscow'}}}};
+    const text=await cardText(offered,'42');
+    expect(text).toContain('Ожидает принятия'); expect(text).toContain('Europe/Moscow'); expect(text).toContain('10 рабочих минут');
+    resetRenderStateForTests();
+    const accepted=await cardText({...offered,assigned_to:'42',routing:{...offered.routing,state:'accepted'}},'42');
+    expect(accepted).not.toContain('принять до'); expect(accepted).not.toContain('10 рабочих минут');
+  });
+  it('rejects malformed pagination without touching records', async () => {
+    await handleCallback(dm('tm:mine:-1')); await handleCallback(dm('tm:mine:NaN'));
+    expect(db().listStaffTickets).not.toHaveBeenCalled();
+  });
+});
+
+it('rechecks a concurrent common-to-personal change before projecting into a group', async () => {
+  jest.clearAllMocks(); resetRenderStateForTests();
+  getTicket.mockResolvedValueOnce(common).mockResolvedValue(personalA);
+  await handleCallback(group('tc:open:7',43,900));
+  expect(answer).toHaveBeenCalledWith('Заявка больше недоступна.',true);
+  expect(latest).not.toHaveBeenCalled();
+  expect(send).not.toHaveBeenCalled();
 });
