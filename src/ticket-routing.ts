@@ -115,7 +115,7 @@ export async function deliverOffer(ticket: ISupportee, send: OfferSender = defau
     const prefix = 'rt:', suffix = ':' + ticket.ticketId + ':' + current.version;
     const text = 'Заявка № ' + ticket.ticketId + ': ожидает принятия.\nСрок: ' + new Date(r.deadline_at).toISOString()
       + ' (' + r.policy!.schedule.timezone + ').\nЭто предложение, работа ещё не закреплена.';
-    const result = await send(r.offered_to, text, { reply_markup: { inline_keyboard: [
+    const result = await send(r.offered_to, text, { disable_notification: false, reply_markup: { inline_keyboard: [
       [{ text: 'Взять', callback_data: prefix + 'take' + suffix }, { text: 'Передать', callback_data: prefix + 'transfer' + suffix }],
       [{ text: 'Сделать общей', callback_data: prefix + 'common' + suffix }],
     ] } });

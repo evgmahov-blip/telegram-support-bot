@@ -8,6 +8,7 @@ import * as inline from '../../inline';
 import * as mostCommands from '../../most-commands';
 import * as updateDedup from '../../telegram-update-dedup';
 import cache from '../../cache';
+import { getStaffRole } from '../../team';
 import { registerCommonHandlers } from '../../handlers';
 import * as log from '../../logger'
 import { assertDeliverableRecipient } from '../../manual-ticket-guard';
@@ -96,7 +97,11 @@ class TelegramAddon implements Addon {
   }
 
   private withThread(chatId: string | number, options: Record<string, unknown> = {}): Record<string, unknown> {
-    options = { ...options };
+    const sameChat = (id: unknown) => id != null && String(id) === String(chatId);
+    const staffDestination = sameChat(cache.config.staffchat_id) || Boolean(getStaffRole(String(chatId)))
+      || cache.config.categories?.some(category => sameChat(category.group_id)
+        || category.subgroups?.some(group => sameChat(group.group_id)));
+    options = { ...(staffDestination ? { disable_notification: true } : {}), ...options };
     const threadId = cache.config.staffchat_thread_id;
     if (
       threadId &&

@@ -83,7 +83,7 @@ function findParentCategory(ticketCategory: string | null, chatId: string | numb
 async function forwardReplyToParent(ctx: Context, ticket: ISupportee, staffMessage: string): Promise<void> {
   if (!cache.config.forward_replies_to_parent) return;
   // A personal ticket's reply is never mirrored into a shared parent group.
-  if (!visibility.isCommonTicket(ticket)) return;
+  if (!visibility.isCommonTicket(ticket) || !await visibility.freshTicket(ticket)) return;
   const parent = findParentCategory(ticket.category, ctx.chat.id);
   if (!parent) return;
   const esc = middleware.strictEscape;
@@ -138,10 +138,11 @@ async function recordManualReply(ctx: Context, ticket: ISupportee, senderId: str
 
 /** Handles replies written in the closed staff group. */
 async function chat(ctx: Context) {
-  if (!ctx.session.admin) return;
-  if (cache.config.staffchat_id && String(ctx.chat.id) !== String(cache.config.staffchat_id)) return;
+  const privateStaff = ctx.chat?.type === 'private' && String(ctx.chat.id) === String(ctx.from.id) && Boolean(team.getStaffRole(String(ctx.from.id)));
+  if (!ctx.session.admin && !privateStaff) return;
+  if (!privateStaff && cache.config.staffchat_id && String(ctx.chat.id) !== String(cache.config.staffchat_id)) return;
   const configuredThread = cache.config.staffchat_thread_id;
-  if (configuredThread && ctx.message?.message_thread_id !== configuredThread) {
+  if (!privateStaff && configuredThread && ctx.message?.message_thread_id !== configuredThread) {
     await middleware.reply(ctx, 'Ответы по заявкам принимаются только в настроенной теме поддержки.');
     return;
   }
@@ -210,6 +211,11 @@ async function chat(ctx: Context) {
     return;
   }
 
+  const live = await visibility.freshTicket(ticket);
+  if (!live || !visibility.canViewTicket(senderId, live) || (!privateStaff && !visibility.isCommonTicket(live))) {
+    await middleware.reply(ctx, 'Откройте актуальную личную карточку заявки.'); return;
+  }
+  ticket = live;
   let name: string | null = ticket.name || extractName(replyText);
   if (!name) name = cache.config.language.customer || 'customer';
 
@@ -317,6 +323,7 @@ async function chat(ctx: Context) {
   }
 
   cache.ticketStatus[ticketId] = false;
+  let deliveryAttempted = false;
 
   try {
   if (ticket.userid.includes('WEB')) {
@@ -331,6 +338,9 @@ async function chat(ctx: Context) {
     if (!reserved) await db.persistTicketMessage(ticketId, 'staff', senderId, staffMessage);
     try {
       const socketId = ticket.userid.split('WEB')[1];
+      const live = await visibility.freshTicket(ticket);
+      if (!live || !team.canManageTicket(senderId, live.assigned_to)) return;
+      deliveryAttempted = true;
       cache.io.to(socketId).emit('chat_staff', ticketMsg(name, ctx.message));
       if (reserved) await markDeliveredWithRetry(deliveryKey);
     } catch (e) {
@@ -361,6 +371,9 @@ async function chat(ctx: Context) {
       return;
     }
     if (!reserved) await db.persistTicketMessage(ticketId, 'staff', senderId, staffMessage);
+    const live = await visibility.freshTicket(ticket);
+    if (!live || !team.canManageTicket(senderId, live.assigned_to)) return;
+    deliveryAttempted = true;
     await middleware.sendMessage(ticket.userid, ticket.messenger, replyContent);
     if (reserved) await markDeliveredWithRetry(deliveryKey);
   }
@@ -379,7 +392,7 @@ async function chat(ctx: Context) {
 
   // The shared staff chat does not get a personal ticket's client name.
   const shownName = visibility.isCommonTicket(ticket) ? name : '';
-  middleware.sendMessage(
+  if (!composeInput) middleware.sendMessage(
     ctx.chat.id,
     cache.config.staffchat_type,
     `${cache.config.language.msg_sent}${shownName ? ` ${middleware.strictEscape(shownName)}` : ''}`,
@@ -409,7 +422,12 @@ async function chat(ctx: Context) {
   if (!composeInput && typeof db.clearReplyPrompt === 'function') await db.clearReplyPrompt(ticketId, senderId);
   await refreshStaffCard(ticketId);
   } catch (err) {
-    if (composeClaim && typeof db.releaseReplyCompose === 'function')
+    if (privateStaff && deliveryAttempted) {
+      log.error('Private reply delivery outcome is uncertain; compose remains claimed:', err);
+      await middleware.reply(ctx, 'Результат отправки не подтверждён. Проверьте историю; автоматического повтора не будет.').catch(log.error);
+      return;
+    }
+    if (composeClaim && !deliveryAttempted && typeof db.releaseReplyCompose === 'function')
       await db.releaseReplyCompose(ticketId, senderId, ticket.pending_reply_version, composeClaim).catch(log.error);
     throw err;
   }

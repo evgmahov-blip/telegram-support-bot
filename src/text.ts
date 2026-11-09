@@ -33,12 +33,8 @@ const shouldReplyWithCategoryKeyboard = (ctx: Context): boolean => {
 async function handlePrivateInput(ctx: Context): Promise<boolean> {
   if (ctx.chat?.type !== 'private' || !ctx.message) return false;
   if (team.getStaffRole(String(ctx.from?.id))) {
-    if (await resolutionCase.handleTextInput(ctx)) return true;
-    if (ctx.message.reply_to_message) {
-      // A reply in the DM would otherwise become the engineer's own client ticket.
-      await middleware.reply(ctx, 'Ответ клиенту здесь не отправляется. Используйте «✉️ Написать клиенту» на карточке заявки в рабочей группе.');
-      return true;
-    }
+    await staff.chat(ctx);
+    return true;
   }
   return await clientOrganization.handleTextInput(ctx);
 }
@@ -77,6 +73,7 @@ export async function ticketHandler(bot: Addon, ctx: Context): Promise<ISupporte
       organization = gate.organization;
     }
     const openTicket = async () => {
+      (ctx as any).staffImportantEvent = true;
       if (!createsTicket) organization = await clientOrganization.currentOrganization(ctx);
       const planned = typeof db.getClientProfile === 'function' ? await planNewTicketRouting(String(userId), messenger, organization) : null;
       if (planned && (planned.routing.state === 'offered' || planned.routing.audit[0]?.reason !== 'organization_unconfirmed')) return db.addNewTicket(userId, session.groupCategory, messenger, organization, planned);
@@ -100,6 +97,7 @@ export async function ticketHandler(bot: Addon, ctx: Context): Promise<ISupporte
     } else if (ticket.status === 'waiting_user') {
       const resumed = await ticketState.resumeWaitingTicket(ticket.ticketId);
       if (resumed) {
+        (ctx as any).staffImportantEvent = true;
         ticket = resumed;
         await db.recordAnalyticsEvent('ticket.resumed', ticket.ticketId, null, { reason: 'user_reply' });
       } else {

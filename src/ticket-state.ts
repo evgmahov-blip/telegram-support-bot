@@ -17,10 +17,12 @@ export async function transitionTicketStateFrom(
   target: TicketStatus,
   expectedOwner?: string | null,
   closureResolutionVersion?: number,
+  expectedRoutingVersion?: number,
 ): Promise<ISupportee | null> {
   const states = Array.isArray(expectedStates) ? expectedStates : [expectedStates];
   const filter: Record<string, unknown> = { ticketId, status: { $in: states } };
   if (expectedOwner !== undefined) filter.assigned_to = expectedOwner;
+  if (expectedRoutingVersion !== undefined) filter['routing.version'] = expectedRoutingVersion;
   const values: Record<string, unknown> = {
     status: target,
     closed_at: target === 'closed' ? new Date() : null,
@@ -49,7 +51,7 @@ export async function closeTicketLifecycle(
 ): Promise<{ outcome: 'closed'|'already_closed'|'stale'; ticket: ISupportee | null; notificationFailed?: boolean }> {
   if (ticket.status === 'closed') return { outcome: 'already_closed', ticket };
   const closed = await transitionTicketStateFrom(ticket.ticketId, ['open', 'waiting_user'], 'closed', expectedOwner,
-    options.resolutionVersion);
+    options.resolutionVersion, ticket.routing?.version);
   if (!closed) {
     const current = await db.getTicketById(ticket.ticketId, null);
     return { outcome: current?.status === 'closed' ? 'already_closed' : 'stale', ticket: current };

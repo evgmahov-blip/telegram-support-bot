@@ -21,7 +21,7 @@ export async function takeTicket(
       assigned_to: null,
       'routing.state': { $ne: 'offered' },
     },
-    authorityUpdate({ assigned_to: agentId }),
+    authorityUpdate({ assigned_to: agentId, common_visible: false }),
     { new: true },
   );
 

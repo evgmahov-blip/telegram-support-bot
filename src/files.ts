@@ -42,18 +42,28 @@ async function resolveStaffFileTicket(ctx: Context): Promise<ISupportee | null> 
 async function fileHandler(type: string, bot: Addon, ctx: Context) {
   const { message, session } = ctx;
   const { config } = cache;
+  const actor = String(ctx.from.id);
+  const privateStaff = ctx.chat?.type === 'private' && String(ctx.chat.id) === actor && Boolean(team.getStaffRole(actor));
+  const staffInput = session.admin || privateStaff;
+  let mediaClaim: string | null = null;
   let ticket: ISupportee | null = null;
   let replyText = '';
   let userInfo: string | undefined;
 
-  if (session.admin) {
+  if (staffInput) {
     const actorId = ctx.from.id.toString();
     if (!team.canPerformAction(actorId, 'reply')) {
       await reply(ctx, 'У вас нет прав отвечать по заявкам.');
       return;
     }
 
-    ticket = await resolveStaffFileTicket(ctx);
+    if (privateStaff) {
+      ticket = await db.findActiveReplyCompose(actor, String(ctx.chat.id), null);
+      const replied = (message.reply_to_message as { message_id?: number } | undefined)?.message_id;
+      if (!ticket || ticket.pending_reply_kind !== 'reply' || (replied && replied !== ticket.pending_reply_prompt_id)) {
+        await reply(ctx, 'Откройте личную карточку и выберите «Написать клиенту».'); return;
+      }
+    } else ticket = await resolveStaffFileTicket(ctx);
     if (!ticket) {
       await reply(ctx, config.language.ticketClosedError);
       return;
@@ -86,21 +96,29 @@ async function fileHandler(type: string, bot: Addon, ctx: Context) {
     }
   }
 
-  if (!session.admin && ticket.routing?.state === 'offered') {
+  if (!staffInput && ticket.routing?.state === 'offered') {
     await routing.deliverOffer(ticket);
-    ticket = await db.getTicketById(ticket.ticketId, null) || ticket;
+    const offered = await db.getTicketById(ticket.ticketId, null);
+    if (!offered) return;
+    ticket = offered;
+  }
+  const current = await visibility.freshTicket(ticket);
+  if (!current) return;
+  ticket = current;
+  if (staffInput && (ctx.chat?.type !== 'private' && !visibility.isCommonTicket(ticket))) {
+    await reply(ctx, 'Откройте личную карточку в боте.'); return;
   }
   let receiverId: string | number = config.staffchat_id;
   let captionText = `${config.language.ticket} #T${ticket.ticketId
     .toString()
     .padStart(6, '0')} ${userInfo ?? ''}\n${message.caption || ''}`;
 
-  if (session.admin) {
+  if (staffInput) {
     receiverId = ticket.userid;
     captionText = message.caption || '';
   }
   // A personal ticket's client media goes only to its registered owner's bot DM.
-  const personalRoute = !session.admin && !visibility.isCommonTicket(ticket);
+  const personalRoute = !staffInput && !visibility.isCommonTicket(ticket);
   const candidateOwner = ticket.routing?.state === 'offered' ? ticket.routing.offered_to : ticket.assigned_to;
   const personalOwner = personalRoute && candidateOwner && team.getStaffRole(candidateOwner) ? candidateOwner : null;
   if (personalOwner) receiverId = personalOwner;
@@ -111,34 +129,44 @@ async function fileHandler(type: string, bot: Addon, ctx: Context) {
   // The legacy web widget supports text only. Do not persist a staff file as
   // delivered and do not throw into ingress/retry for a transport that cannot
   // ever handle media.
-  if (session.admin && ticket.userid.includes('WEB')) {
+  if (staffInput && ticket.userid.includes('WEB')) {
     await reply(ctx, 'Отправка файлов в веб-чат не поддерживается.');
     return;
   }
 
   const fileResult = await ctx.getFile();
   const fileId = (fileResult as { file_id: string }).file_id;
-  const commonOptions = { caption: captionText };
+  const commonOptions = { caption: captionText, disable_notification: true };
 
   // Persist immutable conversation history before the primary external
   // delivery side effect. A failure here is safe for ingress to retry.
   const historyText = `[file:${type}]${message.caption ? ` ${message.caption}` : ''}`;
   await db.persistTicketMessage(
     ticket.ticketId,
-    session.admin ? 'staff' : 'user',
-    session.admin ? ctx.from.id.toString() : message.from.id.toString(),
+    staffInput ? 'staff' : 'user',
+    staffInput ? ctx.from.id.toString() : message.from.id.toString(),
     historyText,
   );
 
   let messageId: string | null | undefined;
   const shouldForwardToGroup = (
     !personalRoute &&
-    !session.admin &&
+    !staffInput &&
     session.group !== '' &&
     session.group !== config.staffchat_id
   );
 
   try {
+    const live = await visibility.freshTicket(ticket);
+    if (!live || (staffInput && !team.canManageTicket(String(ctx.from.id), live.assigned_to))) return;
+    if (privateStaff) {
+      mediaClaim = `telegram:${ctx.update_id || message.message_id}:ticket:${ticket.ticketId}:media`;
+      const claimed = await db.claimReplyCompose(ticket.ticketId, actor, String(ctx.chat.id), null,
+        ticket.pending_reply_version, mediaClaim, ticket.assigned_to ?? undefined);
+      if (!claimed) { await reply(ctx, 'Ввод устарел или уже обрабатывается.'); return; }
+      ticket = claimed;
+      if (!await visibility.freshTicket(ticket)) return;
+    }
     if (personalRoute && !personalOwner) throw new Error(`Owner of personal ticket #T${ticket.ticketId} is not registered staff`);
     switch (type) {
       case 'document':
@@ -151,7 +179,7 @@ async function fileHandler(type: string, bot: Addon, ctx: Context) {
         messageId = await bot.sendVideo(receiverId, fileId, commonOptions) as string | null;
         break;
       case 'sticker': {
-        const stickerMessageId = await bot.sendSticker!(receiverId, fileId);
+        const stickerMessageId = await bot.sendSticker!(receiverId, fileId, { disable_notification: true });
         messageId = typeof stickerMessageId === 'string' ? stickerMessageId : null;
         break;
       }
@@ -159,6 +187,10 @@ async function fileHandler(type: string, bot: Addon, ctx: Context) {
         return;
     }
   } catch (err) {
+    if (privateStaff && mediaClaim) {
+      log.error('Private media outcome UNKNOWN; compose remains claimed', err);
+      await reply(ctx, 'Результат отправки не подтверждён. Проверьте историю; автоматического повтора не будет.'); return;
+    }
     if (!personalRoute) throw err;
     log.error(`Личный чат владельца заявки #T${ticket.ticketId} недоступен для файла:`, err);
     messageId = null;
@@ -169,9 +201,13 @@ async function fileHandler(type: string, bot: Addon, ctx: Context) {
   // retry instead of recording a delivery that never happened. No secondary
   // side effect is started until this primary boundary is confirmed.
   // A blocked owner DM is not retryable and never falls back to the shared chat.
+  if (!messageId && privateStaff && mediaClaim) {
+    log.error('Private media outcome UNKNOWN; compose remains claimed');
+    await reply(ctx, 'Результат отправки не подтверждён. Проверьте историю; автоматического повтора не будет.'); return;
+  }
+  if (messageId && mediaClaim) await db.completeReplyCompose(ticket.ticketId, actor, ticket.pending_reply_version, mediaClaim);
   if (!messageId && personalRoute) {
-    await sendMessage(config.staffchat_id, config.staffchat_type, visibility.personalUndeliveredNotice(ticket.ticketId), {})
-      .catch(log.error);
+    log.error('Personal media delivery unavailable or UNKNOWN; no shared fallback');
   } else if (!messageId) {
     throw new Error(
       `Primary ${type} delivery failed for #T${ticket.ticketId} to ${receiverId}`,
@@ -179,30 +215,30 @@ async function fileHandler(type: string, bot: Addon, ctx: Context) {
   }
 
   if (messageId && type === 'sticker' && captionText.trim()) {
-    const headerMessenger = session.admin ? ticket.messenger : config.staffchat_type;
-    sendMessage(receiverId, headerMessenger, captionText).catch(log.error);
+    const headerMessenger = staffInput ? ticket.messenger : config.staffchat_type;
+    sendMessage(receiverId, headerMessenger, captionText, { disable_notification: true }).catch(log.error);
   }
 
-  if (shouldForwardToGroup) {
+  if (shouldForwardToGroup && await visibility.freshTicket(ticket)) {
     switch (type) {
       case 'document':
-        Promise.resolve(bot.sendDocument(session.group, fileId, { caption: captionText })).catch(log.error);
+        Promise.resolve(bot.sendDocument(session.group, fileId, { caption: captionText, disable_notification: true })).catch(log.error);
         break;
       case 'photo':
-        Promise.resolve(bot.sendPhoto(session.group, fileId, { caption: captionText })).catch(log.error);
+        Promise.resolve(bot.sendPhoto(session.group, fileId, { caption: captionText, disable_notification: true })).catch(log.error);
         break;
       case 'video':
-        Promise.resolve(bot.sendVideo(session.group, fileId, { caption: captionText })).catch(log.error);
+        Promise.resolve(bot.sendVideo(session.group, fileId, { caption: captionText, disable_notification: true })).catch(log.error);
         break;
       case 'sticker':
-        Promise.resolve(bot.sendSticker!(session.group, fileId)).catch(log.error);
+        Promise.resolve(bot.sendSticker!(session.group, fileId, { disable_notification: true })).catch(log.error);
         break;
     }
   }
 
   // Correlation ids are staff-chat message ids only. A staff -> user Telegram
   // message id belongs to another chat and must never enter internalIds.
-  if (messageId && !session.admin && !personalRoute) {
+  if (messageId && !staffInput && !personalRoute) {
     await persistStaffMessageCorrelation(
       ticket.ticketId,
       messageId,
@@ -211,7 +247,7 @@ async function fileHandler(type: string, bot: Addon, ctx: Context) {
   }
   await refreshStaffCard(ticket.ticketId);
 
-  if (session.admin) {
+  if (staffInput) {
     const actorId = ctx.from.id.toString();
     if (!ticket.first_response_at) await db.setFirstResponseAt(ticket.ticketId);
     db.recordAnalyticsEventBestEffort(
@@ -241,7 +277,7 @@ async function fileHandler(type: string, bot: Addon, ctx: Context) {
     ? config.language.yourTicketId + ' #T' + ticket.ticketId.toString().padStart(6, '0')
     : ''}`;
 
-  if (session.admin) {
+  if (staffInput) {
     const nameMatch = replyText.match(
       new RegExp(`${escapeRegex(config.language.from)} (.*) ${escapeRegex(config.language.language)}`)
     );

@@ -34,19 +34,22 @@ async function valid(ctx: Context, ticketId: number) {
   const actor = ctx.from.id.toString();
   const ticket = await db.getTicketById(ticketId, null);
   return ticket && ticket.status === 'closed' && team.canPerformAction(actor, 'reply')
-    && team.canManageTicket(actor, ticket.assigned_to) ? ticket : null;
+    && team.canManageTicket(actor, ticket.assigned_to)
+    && (ui.isStaffPrivate(ctx) || visibility.isCommonTicket(ticket)) ? ticket : null;
 }
 
 /** close mode: still active, manageable, and owned by the same engineer as when the explanation started. */
-async function validForClose(ctx: Context, ticketId: number, expectedOwner: string | null | undefined) {
+async function validForClose(ctx: Context, ticketId: number, expectedOwner: string | null | undefined, expectedRoutingVersion?: number | null) {
   const actor = ctx.from.id.toString();
   const ticket = await db.getTicketById(ticketId, null);
   return ticket && ACTIVE.includes(ticket.status) && team.canPerformAction(actor, 'reply')
-    && team.canManageTicket(actor, ticket.assigned_to) && (ticket.assigned_to ?? null) === (expectedOwner ?? null) ? ticket : null;
+    && team.canManageTicket(actor, ticket.assigned_to) && (ticket.assigned_to ?? null) === (expectedOwner ?? null)
+    && (expectedRoutingVersion == null ? !ticket.routing : ticket.routing?.version === expectedRoutingVersion)
+    && (ui.isStaffPrivate(ctx) || visibility.isCommonTicket(ticket)) ? ticket : null;
 }
 
 const usable = (ctx: Context, intent: any) => isClose(intent)
-  ? validForClose(ctx, intent.ticketId, intent.expected_owner) : valid(ctx, intent.ticketId);
+  ? validForClose(ctx, intent.ticketId, intent.expected_owner, intent.expected_routing_version) : valid(ctx, intent.ticketId);
 
 function nav(intent: any): ui.Button[][] {
   return [[{ text: '⬅️ Назад', callback_data: `rs:back:${intent.token}:${intent.version}` },
@@ -72,10 +75,12 @@ function stepText(intent: any): string {
 }
 
 async function showStep(ctx: Context, intent: any) {
+  if (!await usable(ctx, intent)) return;
   await ui.answer(ctx, stepText(intent), stepRows(intent));
 }
 
 async function showPreview(ctx: Context, intent: any) {
+  if (!await usable(ctx, intent)) return;
   if (isClose(intent)) {
     await ui.answer(ctx, `<b>Проверьте закрытие · заявка № ${intent.ticketId}</b>\nАвтор: ${ui.e(staffDisplayName(intent.actor_id))}\n\n<b>Причина</b>\n${ui.e(intent.cause)}\n\n<b>Что сделали</b>\n${ui.e(intent.actions)}\n\n<b>Как проверили результат</b>\n${intent.check ? ui.e(intent.check) : 'не указано'}\n\nЗаявка закроется только вместе с этим решением. Клиент получит лишь уведомление о закрытии; причина и работы остаются внутренними.`, [
       [{ text: '✅ Закрыть заявку', callback_data: `rs:save:${intent.token}:${intent.version}` }, { text: '✏️ Изменить', callback_data: `rs:edit:${intent.token}:${intent.version}` }],
@@ -107,7 +112,7 @@ async function beginIntent(ctx: Context, ticket: ISupportee, mode: db.Resolution
   if (await otherInputActive(actor, chat, thread)) { await notify(ctx, 'Сначала завершите или отмените другой активный ввод.', true); return true; }
   const token = randomUUID().replace(/-/g, '');
   const intent = mode === 'close'
-    ? await db.startResolutionIntent(token, actor, chat, thread, ticket.ticketId, expires(), 'close', ticket.assigned_to ?? null)
+    ? await db.startResolutionIntent(token, actor, chat, thread, ticket.ticketId, expires(), 'close', ticket.assigned_to ?? null, ticket.routing?.version)
     : await db.startResolutionIntent(token, actor, chat, thread, ticket.ticketId, expires());
   if (personal) {
     const sent = await visibility.sendToStaffPrivate(actor, stepText(intent),
@@ -160,7 +165,7 @@ async function saveAndClose(ctx: Context, intent: any, token: string, version: n
   const actor = ctx.from.id.toString(), chat = String(ctx.chat.id), thread = threadOf(ctx);
   const claimed = await db.claimResolutionSave(token, actor, chat, thread, version);
   if (!claimed) { await ctx.answerCbQuery('Подтверждение устарело.', true); return true; }
-  const ticket = await validForClose(ctx, claimed.ticketId, claimed.expected_owner);
+  const ticket = await validForClose(ctx, claimed.ticketId, claimed.expected_owner, claimed.expected_routing_version);
   if (!ticket || !clean(claimed.cause || '') || !clean(claimed.actions || '')) {
     await db.abandonClaimedResolution(token, actor, version);
     await ctx.answerCbQuery(ticket ? 'Причина и выполненные работы обязательны. Заявка осталась открытой.'

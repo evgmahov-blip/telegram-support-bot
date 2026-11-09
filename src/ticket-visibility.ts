@@ -4,6 +4,7 @@ import * as middleware from './middleware';
 import * as log from './logger';
 import { Messenger } from './interfaces';
 import type { ISupportee } from './db';
+import * as db from './db';
 
 type VisibleTicket = Pick<ISupportee, 'assigned_to'> & { common_visible?: boolean | null; routing?: ISupportee['routing'] };
 
@@ -44,7 +45,7 @@ export async function sendToStaffPrivate(staffId: string | null | undefined, tex
   if (!staffId || !team.getStaffRole(String(staffId))) return null;
   if (cache.config.staffchat_type && cache.config.staffchat_type !== Messenger.TELEGRAM) return null;
   try {
-    return await middleware.sendMessage(String(staffId), Messenger.TELEGRAM, text, extra);
+    return await middleware.sendMessage(String(staffId), Messenger.TELEGRAM, text, { disable_notification: true, ...extra });
   } catch (err) {
     const description = String((err as { description?: string }).description || err);
     log.error(`Личный чат сотрудника недоступен: ${description}`);
@@ -52,24 +53,30 @@ export async function sendToStaffPrivate(staffId: string | null | undefined, tex
   }
 }
 
-/**
- * Route a staff notification about a ticket: common tickets go to the shared
- * staff chat, personal tickets only to their owner's DM. When the DM fails the
- * shared chat receives a content-free notice and nothing else.
- */
-export async function notifyTicketStaff(ticket: ISupportee, text: string, extra: Record<string, unknown> = {},
-  sharedFallbackNotice?: string): Promise<{ route: 'shared' | 'owner' | 'undelivered'; messageId: string | null }> {
-  if (isCommonTicket(ticket)) {
-    const messageId = await middleware.sendMessage(cache.config.staffchat_id, cache.config.staffchat_type, text, extra);
-    return { route: 'shared', messageId };
-  }
-  const messageId = await sendToStaffPrivate(ticket.routing?.state === 'offered' ? ticket.routing.offered_to : ticket.assigned_to, text, extra);
-  if (messageId) return { route: 'owner', messageId };
-  await middleware.sendMessage(cache.config.staffchat_id, cache.config.staffchat_type,
-    sharedFallbackNotice || personalUndeliveredNotice(ticket.ticketId), {}).catch(log.error);
-  return { route: 'undelivered', messageId: null };
+/** Fresh routing fence: never reuse a stale destination or broaden visibility. */
+export async function freshTicket(ticket: ISupportee): Promise<ISupportee | null> {
+  const current = await db.getTicketById(ticket.ticketId, null);
+  if (!current || current.assigned_to !== ticket.assigned_to
+    || current.status !== ticket.status
+    || current.pending_reply_version !== ticket.pending_reply_version
+    || +new Date(current.common_visible_since ?? 0) !== +new Date(ticket.common_visible_since ?? 0)
+    || current.common_visible !== ticket.common_visible
+    || current.routing?.version !== ticket.routing?.version
+    || current.routing?.state !== ticket.routing?.state) return null;
+  return current;
 }
 
-export function personalUndeliveredNotice(ticketId: number): string {
-  return `Новое событие по личной заявке № ${ticketId}: владельцу не удалось написать в личный чат с ботом. Владельцу нужно открыть бота и нажать /start; содержимое в общий чат не отправляется.`;
+/** Personal delivery has no shared fallback, including diagnostic notices. */
+export async function notifyTicketStaff(ticket: ISupportee, text: string, extra: Record<string, unknown> = {},
+  _sharedFallbackNotice?: string): Promise<{ route: 'shared' | 'owner' | 'undelivered'; messageId: string | null }> {
+  const current = await freshTicket(ticket);
+  if (!current) return { route: 'undelivered', messageId: null };
+  if (isCommonTicket(current)) {
+    const messageId = await middleware.sendMessage(cache.config.staffchat_id, cache.config.staffchat_type, text, { disable_notification: true, ...extra });
+    return { route: 'shared', messageId };
+  }
+  const messageId = await sendToStaffPrivate(current.routing?.state === 'offered' ? current.routing.offered_to : current.assigned_to, text, extra);
+  if (messageId) return { route: 'owner', messageId };
+  log.error('Personal ticket delivery unavailable');
+  return { route: 'undelivered', messageId: null };
 }

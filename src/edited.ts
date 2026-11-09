@@ -44,33 +44,17 @@ export async function handleEditedMessage(ctx: Context): Promise<boolean> {
     `[${config.language.editedMessage}] ${msg.text}`,
   );
 
-  if (!visibility.isCommonTicket(ticket)) {
-    // A personal ticket's edit goes only to its owner's bot DM; a blocked DM
-    // leaves a content-free notice and is not retried into a shared chat.
-    const delivered = await visibility.sendToStaffPrivate(ticket.routing?.state === 'offered' ? ticket.routing.offered_to : ticket.assigned_to, text, { parse_mode: config.parse_mode });
-    if (!delivered) {
-      await middleware.sendMessage(config.staffchat_id, config.staffchat_type, visibility.personalUndeliveredNotice(ticket.ticketId), {})
-        .catch(log.error);
-    }
-    db.recordAnalyticsEventBestEffort('ticket.message.user', ticket.ticketId, userId);
-    await refreshStaffCard(ticket.ticketId);
-    return true;
+  const sharedAt = ticket.common_visible_since ?? [...(ticket.routing?.audit ?? [])].reverse().find(event => event.type === 'ticket.routing_common')?.at;
+  if (visibility.isCommonTicket(ticket) && sharedAt && +new Date(msg.date * 1000) <= +new Date(sharedAt)) {
+    await refreshStaffCard(ticket.ticketId); return true;
   }
-
-  // Primary staff delivery is authoritative for ingress success. A transport
-  // failure must reject so the fenced Telegram update can be retried.
-  const staffMessageId = await middleware.sendMessage(
-    config.staffchat_id,
-    config.staffchat_type,
-    text,
-  );
-  if (staffMessageId) {
-    await persistStaffMessageCorrelation(ticket.ticketId, staffMessageId, msg.from.first_name);
+  const delivery = await visibility.notifyTicketStaff(ticket, text, { parse_mode: config.parse_mode, disable_notification: true });
+  if (delivery.route === 'shared' && delivery.messageId) {
+    await persistStaffMessageCorrelation(ticket.ticketId, delivery.messageId, msg.from.first_name);
   }
-
-  // Category mirrors are secondary staff surfaces and remain best-effort.
-  if (ctx.session.group && ctx.session.group !== config.staffchat_id) {
-    await middleware.sendMessage(ctx.session.group, ticket.messenger, text).catch(log.error);
+  if (delivery.route === 'shared' && await visibility.freshTicket(ticket)
+    && ctx.session.group && ctx.session.group !== config.staffchat_id) {
+    await middleware.sendMessage(ctx.session.group, ticket.messenger, text, { disable_notification: true }).catch(log.error);
   }
 
   db.recordAnalyticsEventBestEffort('ticket.message.user', ticket.ticketId, userId);

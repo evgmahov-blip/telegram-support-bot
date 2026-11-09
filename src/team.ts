@@ -1,5 +1,6 @@
 import { Context } from './interfaces';
 import cache from './cache';
+import * as visibility from './ticket-visibility';
 import * as db from './db';
 import * as ownership from './ticket-ownership';
 import * as middleware from './middleware';
@@ -90,15 +91,16 @@ export async function takeTicketCommand(ctx: Context, ticketId: number): Promise
     if (!ticket) {
         const current = await db.getTicketById(ticketId, null);
         if (current?.assigned_to) {
-            await middleware.reply(ctx, `Заявка уже назначена сотруднику ${safeStaffName(current.assigned_to)}.`);
+            await middleware.reply(ctx, 'Заявка недоступна для взятия.');
         } else {
             await middleware.reply(ctx, 'Заявка неактивна или её состояние изменилось.');
         }
         return;
     }
 
-    const actorName = safeStaffName(actorId);
-    await middleware.reply(ctx, `Заявка № ${ticketId} взята в работу сотрудником ${actorName}.`);
+    const ui = await import('./ticket-ui.js');
+    await ui.refreshStaffCard(ticketId);
+    await middleware.reply(ctx, 'Готово. Откройте «Мои заявки» в личном чате с ботом.');
     await db.recordAnalyticsEvent('ticket.taken', ticketId, actorId, { owner: actorId });
 }
 
@@ -293,20 +295,13 @@ export async function unmuteTicketCommand(ctx: Context, ticketId: number): Promi
  * Adds an internal note to a ticket (not forwarded to user).
  */
 export async function addInternalNoteCommand(ctx: Context, ticketId: number, text: string, deliveryKey?: string): Promise<void> {
-    const created = await db.addInternalNote(ticketId, ctx.from.id.toString(), text, deliveryKey);
+    const ticket = await db.getTicketById(ticketId, null);
+    const actor = String(ctx.from.id);
+    if (!ticket || ticket.status === 'closed' || !canManageTicket(actor, ticket.assigned_to)
+      || (ctx.chat?.type !== 'private' && !visibility.isCommonTicket(ticket))) return;
+    // No group echo: notes remain available through authorized ticket history.
+    const created = await db.addInternalNote(ticketId, actor, text, deliveryKey);
     if (created === false) return;
-
-    // Show note in staff chat; a personal ticket's note text is not echoed to the shared chat.
-    const esc = middleware.strictEscape;
-    const ticket = typeof db.getTicketById === 'function' ? await db.getTicketById(ticketId, null).catch(() => null) : null;
-    const personal = Boolean(ticket?.assigned_to) && ticket?.common_visible !== true;
-    middleware.sendMessage(
-        cache.config.staffchat_id,
-        cache.config.staffchat_type,
-        `📝 ${cache.config.language.internalNote} #T${ticketId.toString().padStart(6, '0')} (${cache.config.language.noteAddedBy} ${esc(staffDisplayName(ctx.from.id.toString()))})` +
-            (personal ? esc(': сохранена в истории личной заявки.') : `:\n${esc(text)}`),
-        { parse_mode: cache.config.parse_mode },
-    ).catch(log.error);
 
     db.recordAnalyticsEventBestEffort('ticket.note_added', ticketId, ctx.from.id.toString());
 }
@@ -315,6 +310,9 @@ export async function addInternalNoteCommand(ctx: Context, ticketId: number, tex
  * Shows all internal notes for a ticket.
  */
 export async function showNotesCommand(ctx: Context, ticketId: number): Promise<void> {
+    const ticket = await db.getTicketById(ticketId, null);
+    if (!ticket || !visibility.canViewTicket(String(ctx.from.id), ticket)
+      || (ctx.chat?.type !== 'private' && !visibility.isCommonTicket(ticket))) return;
     const notes = await db.getInternalNotes(ticketId);
     if (notes.length === 0) {
         await middleware.reply(ctx, `У заявки № ${ticketId} нет внутренних заметок.`);
@@ -327,6 +325,7 @@ export async function showNotesCommand(ctx: Context, ticketId: number): Promise<
         output += `• [${esc(staffDisplayName(note.author_id))}] ${esc(note.text)}\n`;
     }
 
+    if (!await visibility.freshTicket(ticket)) return;
     await middleware.reply(ctx, output.trim());
 }
 

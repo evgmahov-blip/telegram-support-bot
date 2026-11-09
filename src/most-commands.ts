@@ -11,6 +11,7 @@ import * as middleware from './middleware';
 import { resolveTicketFromReply } from './ticket-resolution';
 import { refreshStaffCard } from './ticket-ui';
 import { staffDisplayName } from './staff-names';
+import * as visibility from './ticket-visibility';
 
 async function resolveRepliedTicket(ctx: Context): Promise<ISupportee | null> {
   const resolved = await resolveTicketFromReply(ctx, null);
@@ -22,6 +23,9 @@ async function requireRepliedTicket(ctx: Context): Promise<ISupportee | null> {
   if (!ticket) {
     await middleware.reply(ctx, 'Reply to a ticket message.');
     return null;
+  }
+  if (ctx.chat.type !== 'private' && (!visibility.isCommonTicket(ticket) || ticket.common_visible_since || ticket.routing?.audit?.some(event => event.type === 'ticket.routing_common'))) {
+    await middleware.reply(ctx, 'Откройте личную карточку в боте.'); return null;
   }
   return ticket;
 }

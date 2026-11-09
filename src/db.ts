@@ -76,6 +76,7 @@ export interface ISupportee extends mongoose.Document {
   declared_organization: string | null;
   // Explicit common visibility for an owned ticket; unassigned tickets are always common.
   common_visible: boolean;
+  common_visible_since?: Date | null;
   // Resolution version written for the closure that produced the current closed state.
   closure_resolution_version: number | null;
   routing?: import('./routing-contract').TicketRouting | null;
@@ -133,6 +134,7 @@ export const SupporteeSchema = new mongoose.Schema<ISupportee>({
   manual_request_key: { type: String, required: false },
   declared_organization: { type: String, default: null },
   common_visible: { type: Boolean, default: false },
+  common_visible_since: { type: Date, default: null },
   closure_resolution_version: { type: Number, default: null },
   routing: { type: mongoose.Schema.Types.Mixed, default: null },
   organization_ref: { type: mongoose.Schema.Types.Mixed, default: null },
@@ -424,7 +426,7 @@ export interface IResolutionIntent extends mongoose.Document {
   status: ResolutionIntentStatus; step: ResolutionStep; version: number; base_version: number;
   cause: string | null; actions: string | null; check: string | null;
   last_consumed_message_id: number | null; edit_return: boolean; expires_at: Date; purge_at: Date;
-  mode?: ResolutionMode; expected_owner?: string | null;
+  mode?: ResolutionMode; expected_owner?: string | null; expected_routing_version?: number | null;
 }
 const ResolutionIntentSchema = new mongoose.Schema<IResolutionIntent>({
   token: { type: String, required: true, unique: true }, actor_id: { type: String, required: true },
@@ -434,7 +436,7 @@ const ResolutionIntentSchema = new mongoose.Schema<IResolutionIntent>({
   base_version: { type: Number, default: 0 }, cause: { type: String, default: null }, actions: { type: String, default: null },
   check: { type: String, default: null }, last_consumed_message_id: { type: Number, default: null },
   edit_return: { type: Boolean, default: false }, expires_at: { type: Date, required: true }, purge_at: { type: Date, required: true },
-  mode: { type: String, enum: ['record', 'close'], default: 'record' }, expected_owner: { type: String, default: null },
+  mode: { type: String, enum: ['record', 'close'], default: 'record' }, expected_owner: { type: String, default: null }, expected_routing_version: { type: Number, default: null },
 });
 ResolutionIntentSchema.index({ actor_id: 1, chat_id: 1, thread_id: 1 }, { unique: true });
 ResolutionIntentSchema.index({ purge_at: 1 }, { expireAfterSeconds: 0 });
@@ -764,7 +766,7 @@ export async function countStaffTickets(view: StaffListView, actorId: string, sc
 /** Owner-guarded explicit common visibility change; null when owner or value changed. */
 export async function setTicketCommonVisibility(ticketId: number, common: boolean, expectedOwner: string) {
   const filter: Record<string, unknown> = { ticketId, assigned_to: expectedOwner, common_visible: common ? { $ne: true } : true };
-  return await Supportee.findOneAndUpdate(filter, { $set: { common_visible: common } }, { new: true }) as ISupportee | null;
+  return await Supportee.findOneAndUpdate(filter, authorityUpdate({ common_visible: common, common_visible_since: common ? new Date() : null }), { new: true }) as ISupportee | null;
 }
 
 export async function claimStaffCard(ticketId: number, claim: string) {
@@ -800,12 +802,14 @@ export async function clearStaffCardBinding(ticketId: number, chatId: string, me
 
 export async function setReplyPrompt(ticketId: number, staffId: string, promptId: number, expiresAt: Date,
   kind: 'reply' | 'note', expectedOwner?: string, chatId?: string, threadId?: number | null, originMessageId?: number,
-  engineerDraft?: import('./ai-engineer-ui').EngineerDraft) {
+  engineerDraft?: import('./ai-engineer-ui').EngineerDraft, expectedRoutingVersion?: number, expectedUpdatedAt?: Date) {
   const query: Record<string, unknown> = { ticketId, status: { $in: ['open', 'waiting_user'] }, $or: [
     { pending_reply_staff_id: null }, { pending_reply_staff_id: { $exists: false } },
     { pending_reply_expires_at: { $lte: new Date() } },
   ] };
   if (expectedOwner !== undefined) query.assigned_to = expectedOwner;
+  if (expectedRoutingVersion !== undefined) query['routing.version'] = expectedRoutingVersion;
+  if (expectedUpdatedAt !== undefined) query.updated_at = expectedUpdatedAt;
   return await Supportee.findOneAndUpdate(
     query,
     [{ $set: {
@@ -1909,7 +1913,7 @@ export async function getTicketResolution(ticketId: number) {
 }
 
 export async function startResolutionIntent(token: string, actorId: string, chatId: string, threadId: number | null,
-  ticketId: number, expiresAt: Date, mode: ResolutionMode = 'record', expectedOwner: string | null = null) {
+  ticketId: number, expiresAt: Date, mode: ResolutionMode = 'record', expectedOwner: string | null = null, expectedRoutingVersion?: number) {
   const existing = await TicketResolution.findOne({ ticketId }) as ITicketResolution | null;
   // A closure explanation is written fresh for this closure; only «record» edits start from the saved case.
   const latest = mode === 'record' ? existing?.versions?.[existing.versions.length - 1] : undefined;
@@ -1917,7 +1921,7 @@ export async function startResolutionIntent(token: string, actorId: string, chat
     { actor_id: actorId, chat_id: chatId, thread_id: threadId },
     { $set: { token, ticketId, status: 'input', step: 'cause', base_version: existing?.current_version || 0,
       cause: latest?.cause || null, actions: latest?.actions || null, check: latest?.check || null,
-      last_consumed_message_id: null, edit_return: false, expires_at: expiresAt, mode, expected_owner: expectedOwner,
+      last_consumed_message_id: null, edit_return: false, expires_at: expiresAt, mode, expected_owner: expectedOwner, expected_routing_version: expectedRoutingVersion ?? null,
       purge_at: new Date(expiresAt.getTime() + RESOLUTION_PURGE_MS) }, $inc: { version: 1 } },
     { upsert: true, new: true, setDefaultsOnInsert: false },
   ) as Promise<IResolutionIntent>;

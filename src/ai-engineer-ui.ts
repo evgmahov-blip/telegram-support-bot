@@ -8,6 +8,7 @@ import { EngineerStore, EngineerTicket, readEngineerRevision } from './ai-engine
 import { engineerPolicy } from './ai-engineer-bridge';
 import { readCatalog, requireCatalogBinding } from './ai-engineer-catalog';
 import { engineerReady } from './ai-engineer-readiness';
+import { isCommonTicket } from './ticket-visibility';
 import { refreshStaffCard } from './ticket-ui';
 
 export interface EngineerDraft {
@@ -30,7 +31,7 @@ function surface(ctx: Context): boolean {
     && (!cache.config.staffchat_thread_id || thread(ctx) === cache.config.staffchat_thread_id));
 }
 function access(ctx: Context, ticket: EngineerTicket): void {
-  ai.requireEngineer(surface(ctx), 'not_authorized');
+  ai.requireEngineer(surface(ctx) && isCommonTicket(ticket as db.ISupportee), 'not_authorized');
   ai.requireEngineer(engineerReady(), 'not_ready');
   ai.requireEngineer(ai.authorized(engineerPolicy(), ticket, actor(ctx)), 'not_authorized');
 }
@@ -64,6 +65,7 @@ function cancelButton(id: number, draft: EngineerDraft): Button[] {
   return [{ text: 'Отменить ввод', callback_data: `ae:abort:${id}:${draft.token}:${draft.version}` }];
 }
 async function showDraft(ctx: Context, id: number, d: EngineerDraft, page = 0): Promise<void> {
+  access(ctx, await store.read(id));
   if (d.step === 'input') {
     await panel(ctx, `Задание ИИ · заявка №${id}\n${d.mode === 'rework' ? 'Опишите, что исправить в заключении' : 'Опишите симптомы и вопрос для диагностики'} одним обычным сообщением в этой теме. До 1000 символов. Не включайте пароли и ключи.`, [cancelButton(id, d)]);
     return;
@@ -116,6 +118,7 @@ async function begin(ctx: Context, ticket: db.ISupportee & EngineerTicket, mode:
     owner: ticket.assigned_to ?? null, epoch: ticket.ai_epoch ?? 0, fingerprint: ai.policyFingerprint(policy),
     base_request: job?.request_id ?? null, task_id: job?.task_id ?? randomUUID(),
     request_id: admission ? admission.request_id : randomUUID(), operation_id: randomUUID() };
+  access(ctx, await store.read(ticket.ticketId));
   const prompt = await middleware.sendMessage(chat, cache.config.staffchat_type,
     `Задание ИИ · заявка №${ticket.ticketId}. Внутренний ввод для оператора.`, { message_thread_id: topic ?? undefined });
   ai.requireEngineer(prompt, 'prompt_unavailable');
@@ -212,6 +215,9 @@ export async function handleEngineerCallback(ctx: Context, p: string[]): Promise
     ai.requireEngineer(surface(ctx), 'not_authorized');
     const id = Number(p[2]), action = p[1];
     const ticket = await store.read(id) as db.ISupportee & EngineerTicket;
+    if (!isCommonTicket(ticket)) {
+      await ctx.answerCbQuery('Откройте личную карточку в боте.', true); return true;
+    }
     ai.requireEngineer(engineerPolicy().staff.some(s => s.telegram_id === actor(ctx)), 'not_authorized');
     if (action === 'view') {
       const job = ticket.ai_engineer;
@@ -324,6 +330,11 @@ export async function handleEngineerText(ctx: Context): Promise<boolean> {
     $expr: { $eq: ['$ai_engineer_draft.compose_version', '$pending_reply_version'] },
   }).lean() as db.ISupportee | null;
   if (!ticket?.ai_engineer_draft) return false;
+  if (!isCommonTicket(ticket)) {
+    await db.clearReplyPrompt(ticket.ticketId, actor(ctx), ticket.pending_reply_version ?? undefined);
+    await panel(ctx, 'Ввод недоступен. Откройте личную карточку в боте.', []);
+    return true;
+  }
   try {
     const live = await store.read(ticket.ticketId) as db.ISupportee & EngineerTicket;
     const d = draftAccess(ctx, live, ticket.ai_engineer_draft.token);
