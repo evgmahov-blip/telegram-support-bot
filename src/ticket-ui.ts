@@ -370,10 +370,10 @@ async function renderTicketOnClickedCard(ctx: Context, ticket: ISupportee, outco
     ((await staffButtons(ticket)).inline_keyboard as Button[][]));
 }
 
-async function dashboardTabs(actor: string, scope: db.StaffListScope): Promise<Button[][]> {
+async function dashboardTabs(actor: string, scope: db.StaffListScope, selected: db.StaffListView): Promise<Button[][]> {
   const views: db.StaffListView[] = ['mine', 'offered', 'common'];
   const counts = await Promise.all(views.map(v => typeof db.countStaffTickets === 'function' ? db.countStaffTickets(v, actor, scope) : null));
-  return views.map((v, i) => [{ text: ['🔵 Мои в работе', '⏳ Ожидают принятия', '🟢 Общие'][i]
+  return views.map((v, i) => [{ text: (v === selected ? '✓ ' : '') + ['🔵 Мои в работе', '⏳ Ожидают принятия', '🟢 Общие'][i]
     + (counts[i] == null ? '' : ` (${counts[i]})`), callback_data: `tm:${v}:0` }]);
 }
 
@@ -385,12 +385,13 @@ async function staffList(ctx: Context, view: db.StaffListView, page: number) {
   const fetched = await db.listStaffTickets(view, actor, page, PAGE + 1, PAGE, scope);
   const more = fetched.length > PAGE; const list = fetched.slice(0, PAGE);
   const rows: Button[][] = list.map(t => [{ text: (privateSurface || toPrivate ? (t.routing?.state === 'offered' ? 'Ожидает принятия · ' : t.assigned_to === actor ? '🔵 Моя · ' : visibility.isCommonTicket(t) ? '🟢 Общая · ' : '') : '') + `#${t.ticketId} · ${statusName[t.status]} · ${boundedText(t.category || 'Общая', 18)}${isManualTicket(t) ? ' · вручную' : ''}`, callback_data: `tc:open:${t.ticketId}` }]);
-  if (privateSurface || toPrivate) rows.unshift(...await dashboardTabs(actor, scope));
+  if (privateSurface || toPrivate) rows.unshift(...await dashboardTabs(actor, scope, view));
   const nav: Button[] = [];
   if (page > 0) nav.push({ text: '◀️', callback_data: `tm:${view}:${page-1}` });
   if (more) nav.push({ text: '▶️', callback_data: `tm:${view}:${page+1}` });
   if (nav.length) rows.push(nav);
   if (privateSurface || toPrivate) {
+    rows.push([{ text: '👁 Пример Rich HTML', callback_data: 'tm:richdemo:0' }]);
     rows.push([{ text: '📂 Все активные', callback_data: 'tm:active:0' }, { text: '✅ Закрытые', callback_data: 'tm:closed:0' }]);
     if (team.canPerformAction(actor, 'manage_team')) rows.push([{ text: '⚙️ Настройки', callback_data: 'cfg:home' }]);
   }
@@ -516,6 +517,23 @@ export async function handleCallback(ctx: Context): Promise<boolean> {
   }
   if (p[0] === 'tm') {
     const privateStaff = isStaffPrivate(ctx);
+    if (p[1] === 'richdemo') {
+      if (!privateStaff) { await ctx.answerCbQuery('Доступно только сотруднику в личном чате.', true); return true; }
+      await ctx.answerCbQuery('Демо: отправляю пример.');
+      const bodyHtml = '<b>Демо · Заявка #DEMO</b>\nОрганизация: ООО «Вымышленный маяк»\nКлиент: Алексей Примеров\nСтатус: В работе\nОписание: синтетический пример обращения.\nВсе данные вымышлены.';
+      const buttons = [[STAFF_HOME]];
+      try {
+        await middleware.sendMessage(ctx.from.id, Messenger.TELEGRAM, bodyHtml, {
+          parse_mode: 'HTML', reply_markup: kb(buttons),
+          most_rich_html: renderRich({ bodyHtml, buttons }),
+          most_rich_fallback_notice: 'Демо: Rich HTML недоступен или отклонён сервером. Ниже обычная classic-карточка.',
+        });
+      } catch (err) {
+        log.error('Rich demo delivery was not confirmed:', err);
+        await middleware.reply(ctx, 'Не удалось подтвердить отправку демо. При неопределённом результате повторная отправка автоматически не выполняется.');
+      }
+      return true;
+    }
     if (!privateStaff && !staffSurface(ctx)) { await ctx.answerCbQuery('Недоступно вне рабочей группы/темы.', true); return true; }
     if (p[1] === 'manual') {
       if (privateStaff) { await ctx.answerCbQuery('Ручная заявка создаётся в рабочей группе.', true); return true; }
@@ -523,7 +541,10 @@ export async function handleCallback(ctx: Context): Promise<boolean> {
     }
     const view = (LIST_VIEWS.has(p[1]) ? p[1] : 'common') as db.StaffListView;
     // A personal list requested from the shared chat acknowledges after its DM delivery.
-    if (p[1] === 'home' || privateStaff || !PERSONAL_VIEWS.has(view)) await ctx.answerCbQuery();
+    if (p[1] === 'home' || privateStaff || !PERSONAL_VIEWS.has(view)) {
+      if (privateStaff && LIST_VIEWS.has(p[1])) await ctx.answerCbQuery('Обновляю список заявок.');
+      else await ctx.answerCbQuery();
+    }
     if (p[1] === 'home') {
       await Promise.all([manualIntake.cancelActiveForHome(ctx), staffNameEditor.cancelForHome(ctx), resolutionCase.cancelForHome(ctx)]);
       if (privateStaff) await showStaffPrivateHome(ctx); else await showStaffHome(ctx);

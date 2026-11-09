@@ -130,12 +130,14 @@ class TelegramAddon implements Addon {
     if (typeof chatId !== 'string' && typeof chatId !== 'number') return null;
     assertDeliverableRecipient(chatId);
     const html = options.most_rich_html;
-    options = { ...options }; delete options.most_rich_html;
+    const fallbackNotice = options.most_rich_fallback_notice;
+    options = { ...options }; delete options.most_rich_html; delete options.most_rich_fallback_notice;
     if (typeof html === 'string' && typeof this.bot.api.raw?.sendRichMessage === 'function') {
       const richOptions = { ...options }; delete richOptions.parse_mode; delete richOptions.reply_markup;
       try { return await this.sendRichMessage(chatId, html, richOptions); }
       catch (err) { if (!richRejected(err)) throw err; }
     }
+    if (typeof fallbackNotice === 'string') text = fallbackNotice + '\n\n' + text;
     options = this.withThread(chatId, { ...options, disable_web_page_preview: true });
     const validModes = ['HTML', 'MarkdownV2'];
     if (options?.parse_mode === 'Markdown') {

@@ -11,7 +11,7 @@ const getResolution = jest.fn().mockResolvedValue(null);
 
 jest.mock('../src/middleware', () => ({ reply, sendMessage: send }));
 jest.mock('../src/db', () => ({
-  getTicketById: getTicket, getTicketByInternalId, listUserTickets: jest.fn(), listStaffTickets: jest.fn(), addNewTicket: jest.fn().mockResolvedValue(9),
+  getTicketById: getTicket, getTicketByInternalId, listUserTickets: jest.fn(), countStaffTickets: jest.fn().mockResolvedValue(0), listStaffTickets: jest.fn(), addNewTicket: jest.fn().mockResolvedValue(9),
   requestNewTicket: jest.fn().mockResolvedValue(null),
   getTicketMessageHistory: jest.fn().mockResolvedValue([]), getLatestTicketMessage: latest,
   getTicketTimelinePage: timeline,
@@ -465,4 +465,79 @@ it('keeps a canonical-card fallback answer in its originating topic', async () =
     expect(send).toHaveBeenLastCalledWith(-100, 'telegram', 'Меню',
       expect.objectContaining({ message_thread_id: 9 }));
   } finally { cache.config.staffchat_thread_id = previous; }
+});
+
+
+describe('private dashboard callback regression', () => {
+  const db = jest.requireMock('../src/db');
+  const registered = () => {
+    let callback: (ctx: Context) => Promise<void>;
+    let start: (ctx: Context) => Promise<void>;
+    require('../src/cache').default.config.pass_start = false;
+    const addon: any = { platform: 'telegram', botInfo: { username: 'demo' }, command: (name: string, fn: any) => { if (name === 'start') start = fn; }, hears: jest.fn(), catch: jest.fn(),
+      on: (event: string, fn: any) => { if (event === 'callback_query') callback = fn; } };
+    require('../src/handlers').registerCommonHandlers(addon, []);
+    return { callback: callback!, start: start! };
+  };
+  const route = (c: Context) => registered().callback(c);
+  beforeEach(() => { jest.clearAllMocks(); resetRenderStateForTests(); getTicketByInternalId.mockResolvedValue(null); db.listStaffTickets.mockResolvedValue([]); });
+  it('opens mine from start, common and offered, and visibly acknowledges an unchanged refresh without duplicates', async () => {
+    const c = ctx('tm:mine:0', 42, 0, 900, 42);
+    c.message = { ...c.callbackQuery.message, text: '/start' } as any;
+    delete c.callbackQuery;
+    await registered().start(c);
+    expect(reply).toHaveBeenCalledWith(c, expect.stringContaining('Мои в работе'), expect.anything());
+    for (const view of ['common', 'mine', 'offered', 'mine', 'mine']) {
+      await route(ctx(`tm:${view}:0`, 42, 0, 900, 42));
+    }
+    expect(answer).toHaveBeenLastCalledWith('Обновляю список заявок.', undefined);
+    expect(edit.mock.calls.at(-1)[2]).toContain('Заявок нет');
+    expect(JSON.stringify(edit.mock.calls.at(-1)[3])).toContain('✓ 🔵 Мои в работе (0)');
+    expect(send).not.toHaveBeenCalled();
+    expect(db.listStaffTickets).toHaveBeenLastCalledWith('mine', '42', 0, 7, 6, 'visible');
+  });
+  it.each([42, 43])('scopes nonempty mine to actor %s', async actor => {
+    db.listStaffTickets.mockResolvedValue([{...ticket, assigned_to: String(actor)}]);
+    db.countStaffTickets.mockResolvedValue(1);
+    await route(ctx('tm:mine:0', actor, 0, 900, actor));
+    expect(db.listStaffTickets.mock.calls.at(-1)[1]).toBe(String(actor));
+    expect(edit.mock.calls.at(-1)[2]).toContain('Заявки');
+  });
+  it('routes a historical mine callback from the allowed group only to DM', async () => {
+    await route(ctx('tm:mine:0'));
+    expect(send).toHaveBeenCalledWith('42', Messenger.TELEGRAM, expect.stringContaining('Мои в работе'), expect.anything());
+    expect(edit).not.toHaveBeenCalled();
+    expect(db.countStaffTickets).toHaveBeenCalledWith('mine', '42', 'visible');
+  });
+  it('keeps supervisor mine actor-scoped while retaining the existing all visibility scope', async () => {
+    const members = require('../src/cache').default.staffMembers;
+    members.set('50', {telegram_id:'50', name:'Руководитель', role:'supervisor'});
+    try {
+      await route(ctx('tm:mine:0', 50, 0, 900, 50));
+      expect(db.listStaffTickets).toHaveBeenLastCalledWith('mine', '50', 0, 7, 6, 'all');
+      expect(db.countStaffTickets).toHaveBeenCalledWith('mine', '50', 'all');
+    } finally { members.delete('50'); }
+  });
+  it('exposes synthetic rich demo with global opt-in off and without ticket reads', async () => {
+    await route(ctx('tm:richdemo:0', 42, 0, 900, 42));
+    expect(send).toHaveBeenCalledWith(42, Messenger.TELEGRAM, expect.stringContaining('Демо'), expect.objectContaining({most_rich_html: expect.stringContaining('<h3>Демо')}));
+    expect(getTicket).not.toHaveBeenCalled(); expect(db.listStaffTickets).not.toHaveBeenCalled();
+  });
+  it('does not retry demo after UNKNOWN and explains the uncertain result', async () => {
+    send.mockRejectedValueOnce(new Error('timeout'));
+    await route(ctx('tm:richdemo:0', 42, 0, 900, 42));
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(reply).toHaveBeenCalledWith(expect.anything(), expect.stringContaining('Не удалось подтвердить'));
+  });
+  it('rejects a revoked employee demo', async () => {
+    const member = require('../src/cache').default.staffMembers.get('42');
+    member.active = false;
+    try { await route(ctx('tm:richdemo:0', 42, 0, 900, 42)); expect(send).not.toHaveBeenCalled(); }
+    finally { delete member.active; }
+  });
+  it.each([[700,700],[-100,42],[43,42]])('rejects forged demo on chat %s actor %s', async (chat, actor) => {
+    await route(ctx('tm:richdemo:0', chat, 7, 900, actor));
+    expect(send).not.toHaveBeenCalled(); expect(edit).not.toHaveBeenCalled();
+    expect(answer).toHaveBeenCalledWith(expect.any(String), true);
+  });
 });

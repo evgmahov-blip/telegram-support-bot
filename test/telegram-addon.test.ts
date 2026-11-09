@@ -275,13 +275,14 @@ describe('Rich Telegram transport', () => {
   });
   it('falls back only after a definite unsupported rejection', async () => {
     mockApi.raw.sendRichMessage.mockRejectedValueOnce({error_code:400,description:'Rich messages not supported'});
-    await expect(addon.sendMessage('42','classic',{most_rich_html:'<p>rich</p>',parse_mode:'HTML'})).resolves.toBe('5');
+    await expect(addon.sendMessage('42','classic',{most_rich_html:'<p>rich</p>',most_rich_fallback_notice:'Демо: classic',parse_mode:'HTML'})).resolves.toBe('5');
+    expect(mockApi.sendMessage.mock.calls[0][1]).toBe('Демо: classic\n\nclassic');
     expect(mockApi.sendMessage).toHaveBeenCalledTimes(1);
     expect(mockApi.sendMessage.mock.calls[0][2]).not.toHaveProperty('most_rich_html');
   });
   it.each([new Error('timeout'),{error_code:500,description:'unknown outcome'},{error_code:403,description:'Forbidden'}])('never duplicates a send on %p', async error => {
     mockApi.raw.sendRichMessage.mockRejectedValueOnce(error);
-    await expect(addon.sendMessage('42','classic',{most_rich_html:'rich'})).rejects.toEqual(error);
+    await expect(addon.sendMessage('42','classic',{most_rich_html:'rich',most_rich_fallback_notice:'Демо: classic'})).rejects.toEqual(error);
     expect(mockApi.sendMessage).not.toHaveBeenCalled();
   });
   it('treats not modified as a completed edit, and propagates unknown edit results', async () => {
@@ -300,7 +301,8 @@ describe('Rich compatibility boundaries', () => {
     const method=mockApi.raw.sendRichMessage;
     (mockApi.raw as any).sendRichMessage=undefined;
     try {
-      await expect(addon.sendMessage('42','classic',{most_rich_html:'rich'})).resolves.toBe('5');
+      await expect(addon.sendMessage('42','classic',{most_rich_html:'rich',most_rich_fallback_notice:'Демо: classic'})).resolves.toBe('5');
+      expect(mockApi.sendMessage.mock.calls[0][1]).toBe('Демо: classic\n\nclassic');
       expect(mockApi.sendMessage).toHaveBeenCalledTimes(1);
     } finally {mockApi.raw.sendRichMessage=method;}
   });
@@ -314,7 +316,7 @@ describe('Rich compatibility boundaries', () => {
   it('propagates a confirmed missing rich message to panel recovery without trying another transport', async()=>{
     const error={error_code:400,description:'message to edit not found'};
     mockApi.raw.editMessageText.mockRejectedValueOnce(error);
-    await expect(addon.editMessage('42',71,'classic',{most_rich_html:'rich'})).rejects.toEqual(error);
+    await expect(addon.editMessage('42',71,'classic',{most_rich_html:'rich',most_rich_fallback_notice:'Демо: classic'})).rejects.toEqual(error);
     expect(mockApi.editMessageText).not.toHaveBeenCalled();expect(mockApi.sendMessage).not.toHaveBeenCalled();
   });
 });
