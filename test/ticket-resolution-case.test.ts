@@ -4,7 +4,7 @@ const reply = jest.fn().mockResolvedValue(undefined);
 const send = jest.fn().mockResolvedValue('5');
 const cb = jest.fn().mockResolvedValue(undefined);
 const closeLifecycle = jest.fn();
-const ticket: any = { ticketId: 7, status: 'closed', assigned_to: '42' };
+const ticket: any = { ticketId: 7, status: 'closed', assigned_to: '42', common_visible: true };
 const intent: any = { token: 'tok', actor_id: '42', chat_id: '-100', thread_id: 9, ticketId: 7,
   status: 'input', step: 'cause', version: 3, base_version: 0, cause: null, actions: null, check: null };
 
@@ -109,7 +109,7 @@ describe('human-recorded ticket resolution flow', () => {
 });
 
 describe('required closure explanation (close mode)', () => {
-  const open: any = { ticketId: 7, status: 'open', assigned_to: '42', userid: 'client', messenger: 'telegram' };
+  const open: any = { ticketId: 7, status: 'open', assigned_to: '42', common_visible: true, userid: 'client', messenger: 'telegram' };
   const closeIntent: any = { ...intent, mode: 'close', expected_owner: '42' };
   const ready: any = { ...closeIntent, status: 'preview', step: null, cause: 'Истёк сертификат', actions: 'Перевыпустили сертификат', check: '' };
   beforeEach(() => { jest.clearAllMocks(); db.getTicketById.mockResolvedValue(open); team.canPerformAction.mockReturnValue(true);
@@ -119,7 +119,7 @@ describe('required closure explanation (close mode)', () => {
     const common = { ...open, assigned_to: null };
     db.startResolutionIntent.mockResolvedValue({ ...closeIntent, expected_owner: null });
     await flow.startClose(ctx('tc:closeask:7'), common);
-    expect(db.startResolutionIntent).toHaveBeenCalledWith(expect.any(String), '42', '-100', 9, 7, expect.any(Date), 'close', null);
+    expect(db.startResolutionIntent).toHaveBeenCalledWith(expect.any(String), '42', '-100', 9, 7, expect.any(Date), 'close', null, undefined);
     expect(answer.mock.calls.at(-1)[1]).toContain('Закрытие заявки № 7');
     expect(JSON.stringify(answer.mock.calls.at(-1)[2])).toContain('rs:unknown:tok:3');
     expect(send).not.toHaveBeenCalled(); expect(closeLifecycle).not.toHaveBeenCalled();
@@ -127,8 +127,8 @@ describe('required closure explanation (close mode)', () => {
 
   it('collects a personal ticket explanation only in the actor DM', async () => {
     db.startResolutionIntent.mockResolvedValue({ ...closeIntent, chat_id: '42', thread_id: null });
-    await flow.startClose(ctx('tc:closeask:7'), open);
-    expect(db.startResolutionIntent).toHaveBeenCalledWith(expect.any(String), '42', '42', null, 7, expect.any(Date), 'close', '42');
+    await flow.startClose(ctx('tc:closeask:7'), { ...open, common_visible: false });
+    expect(db.startResolutionIntent).toHaveBeenCalledWith(expect.any(String), '42', '42', null, 7, expect.any(Date), 'close', '42', undefined);
     expect(send).toHaveBeenCalledWith('42', 'telegram', expect.stringContaining('Закрытие заявки № 7'), expect.anything());
     expect(answer).not.toHaveBeenCalled();
     expect(cb).toHaveBeenCalledWith('Заполните причину и выполненные работы в личном чате с ботом.', false);
@@ -137,7 +137,7 @@ describe('required closure explanation (close mode)', () => {
   it('cancels the intent and never falls back to the shared chat when the DM is blocked', async () => {
     db.startResolutionIntent.mockResolvedValue({ ...closeIntent, chat_id: '42', thread_id: null });
     send.mockRejectedValueOnce({ description: 'Forbidden: bot was blocked by the user' });
-    await flow.startClose(ctx('tc:closeask:7'), open);
+    await flow.startClose(ctx('tc:closeask:7'), { ...open, common_visible: false });
     expect(db.cancelResolutionIntent).toHaveBeenCalledWith('42', '42', null, 3);
     expect(answer).not.toHaveBeenCalled();
     expect(cb).toHaveBeenCalledWith(expect.stringContaining('/start'), true);

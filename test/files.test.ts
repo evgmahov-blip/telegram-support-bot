@@ -39,6 +39,7 @@ jest.mock('../src/ticket-state', () => ({
 jest.mock('../src/team', () => ({
   canPerformAction: mockCanPerformAction,
   canManageTicket: mockCanManageTicket,
+  getStaffRole: jest.fn((id) => id === 'agent1' ? 'agent' : null),
 }));
 
 jest.mock('../src/cache', () => ({
@@ -185,10 +186,16 @@ describe('Files Module', () => {
       const ctx = createMockContext();
       const waiting = { ...activeTicket, status: 'waiting_user' };
       const resumed = { ...activeTicket, status: 'open' };
-      mockGetTicketByUserId.mockResolvedValue(waiting);
+      mockGetTicketByUserId.mockResolvedValueOnce(waiting).mockResolvedValue(resumed);
+      mockGetTicketById.mockResolvedValue(resumed);
       mockResumeWaitingTicket.mockResolvedValue(resumed);
+      const bot = { sendDocument: jest.fn().mockResolvedValue('900') } as any;
 
-      await files.forwardFile(ctx);
+      await files.fileHandler('document', bot, ctx);
+
+      expect(bot.sendDocument).toHaveBeenCalledWith('agent1', 'file-1',
+        expect.objectContaining({ disable_notification: false }));
+      expect(mockSendMessage.mock.calls.some(call => call[0] === 'staff123')).toBe(false);
 
       expect(mockResumeWaitingTicket).toHaveBeenCalledWith(1001);
       expect(mockRecordAnalyticsEvent).toHaveBeenCalledWith(
@@ -208,6 +215,7 @@ describe('Files Module', () => {
       await files.forwardFile(ctx);
 
       expect(mockAddNewTicket).toHaveBeenCalledWith('user123', 'support', 'telegram');
+      expect((ctx as any).staffImportantEvent).toBe(true);
     });
 
     it('does not create tickets for staff file replies', async () => {
@@ -237,14 +245,15 @@ describe('Files Module', () => {
 
     it('uses message-id correlation and the exact replied ticket', async () => {
       const ctx = createMockContext('supergroup', true);
-      const olderTicket = { ...activeTicket, ticketId: 41, userid: 'user123', assigned_to: 'agent1' };
+      const olderTicket = { ...activeTicket, ticketId: 41, userid: 'user123', assigned_to: 'agent1', common_visible: true };
       mockGetTicketByInternalId.mockResolvedValue(olderTicket);
+      mockGetTicketById.mockResolvedValue(olderTicket);
 
       await files.fileHandler('document', bot, ctx);
 
       expect(mockGetTicketByInternalId).toHaveBeenCalledWith(777);
       expect(mockGetTicketByUserId).not.toHaveBeenCalled();
-      expect(bot.sendDocument).toHaveBeenCalledWith('user123', 'file-1', { caption: '' });
+      expect(bot.sendDocument).toHaveBeenCalledWith('user123', 'file-1', { caption: '', disable_notification: true });
       expect(mockAddIdAndName).not.toHaveBeenCalled();
       expect(mockPersistTicketMessage).toHaveBeenCalledWith(
         41,

@@ -34,7 +34,7 @@ import { canViewTicket, isCommonTicket, listScope } from '../src/ticket-visibili
 import { Context, Messenger } from '../src/interfaces';
 
 const personalA: any = { ticketId: 7, userid: 'client', messenger: 'telegram', status: 'open', assigned_to: '42', name: 'Клиент Иванов',
-  category: null, priority: 'normal', staff_card_chat_id: '-100', staff_card_message_id: 55, staff_card_thread_id: 7 };
+  updated_at: new Date('2026-11-09T00:00:00Z'), category: null, priority: 'normal', staff_card_chat_id: '-100', staff_card_message_id: 55, staff_card_thread_id: 7 };
 const closedA: any = { ...personalA, status: 'closed' };
 const common: any = { ...personalA, assigned_to: null };
 const shared: any = { ...personalA, common_visible: true };
@@ -49,6 +49,7 @@ function dm(data: string, actor = 42): Context {
   return { messenger: Messenger.TELEGRAM, chat: q.message.chat, from: q.from, session: { admin: false, groupCategory: null },
     callbackQuery: q, answerCbQuery: answer } as unknown as Context;
 }
+const version = +new Date(personalA.updated_at);
 const db = () => jest.requireMock('../src/db');
 const groupRenders = () => edit.mock.calls.filter(c => String(c[0]) === '-100' && c[1] !== 55);
 const sharedSends = () => send.mock.calls.filter(c => String(c[0]) === '-100');
@@ -104,11 +105,12 @@ describe('staff read paths enforce visibility', () => {
     expect(groupRenders()).toHaveLength(0); expect(sharedSends()).toHaveLength(0);
   });
 
-  it('renders common tickets in place on the shared panel', async () => {
+  it('delivers requested common-ticket history privately', async () => {
     getTicket.mockResolvedValue(common);
     await handleCallback(group('tc:h:7:0', 43, 900));
-    expect(edit).toHaveBeenCalledWith(-100, 900, expect.stringContaining('История заявки № 7'), expect.anything());
-    expect(send).not.toHaveBeenCalled();
+    expect(send).toHaveBeenCalledWith('43', 'telegram', expect.stringContaining('История заявки № 7'), expect.anything());
+    expect(edit).not.toHaveBeenCalled();
+    expect(sharedSends()).toHaveLength(0);
   });
 
   it('renders the DM detail in place on the engineer private surface', async () => {
@@ -117,9 +119,9 @@ describe('staff read paths enforce visibility', () => {
     expect(sharedSends()).toHaveLength(0);
   });
 
-  it('keeps the engineer DM read-only and never lets B open A\'s ticket there', async () => {
+  it('rejects an unversioned DM mutation and never lets B open A\'s ticket there', async () => {
     await handleCallback(dm('tc:take:7', 42));
-    expect(answer).toHaveBeenCalledWith('Это действие выполняется на карточке в рабочей группе.', true);
+    expect(answer).toHaveBeenCalledWith('Кнопка устарела. Обновите личную карточку.', true);
     await handleCallback(dm('tc:open:7', 43));
     expect(answer).toHaveBeenCalledWith(expect.stringContaining('недоступна'), true);
     expect(edit).not.toHaveBeenCalled();
@@ -163,21 +165,29 @@ describe('explicit common visibility', () => {
   it('owner shares a personal ticket with an owner-guarded, audited change', async () => {
     db().setTicketCommonVisibility.mockResolvedValueOnce(shared);
     await handleCallback(group('tc:share:7', 42));
+    expect(answer).toHaveBeenCalledWith('Откройте личную карточку заявки в боте.', true);
+    expect(db().setTicketCommonVisibility).not.toHaveBeenCalled();
+    await handleCallback(dm(`tc:share:7:v${version}`, 42));
     expect(db().setTicketCommonVisibility).toHaveBeenCalledWith(7, true, '42');
     expect(db().recordAnalyticsEventBestEffort).toHaveBeenCalledWith('ticket.visibility_changed', 7, '42', { common: true, owner: '42' });
   });
 
   it('another agent cannot change it and a stale card button is refused', async () => {
-    await handleCallback(group('tc:share:7', 43));
-    expect(answer).toHaveBeenCalledWith(expect.stringContaining('Видимость меняет'), true);
-    await handleCallback(group('tc:share:7', 42, 54));
-    expect(answer).toHaveBeenCalledWith('Кнопка устарела. Откройте актуальную карточку.', true);
+    await handleCallback(dm(`tc:share:7:v${version}`, 43));
+    expect(answer).toHaveBeenLastCalledWith(expect.stringContaining('недоступна'), true);
+    getTicket.mockResolvedValue(shared);
+    await handleCallback(dm(`tc:unshare:7:v${version}`, 43));
+    expect(answer).toHaveBeenLastCalledWith(expect.stringContaining('Видимость меняет'), true);
+    getTicket.mockResolvedValue(personalA);
+    await handleCallback(dm(`tc:share:7:v${version - 1}`, 42));
+    expect(answer).toHaveBeenLastCalledWith('Кнопка устарела. Обновите личную карточку.', true);
     expect(db().setTicketCommonVisibility).not.toHaveBeenCalled();
   });
 
   it('a lost CAS (owner changed meanwhile) records nothing', async () => {
     db().setTicketCommonVisibility.mockResolvedValueOnce(null);
-    await handleCallback(group('tc:unshare:7', 50));
+    await handleCallback(dm(`tc:share:7:v${version}`, 42));
+    expect(db().setTicketCommonVisibility).toHaveBeenCalledWith(7, true, '42');
     expect(db().recordAnalyticsEventBestEffort).not.toHaveBeenCalled();
     expect(answer).toHaveBeenCalledWith('Владелец или видимость заявки изменились.', true);
   });

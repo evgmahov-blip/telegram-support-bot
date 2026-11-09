@@ -35,7 +35,7 @@ jest.mock('../src/logger', () => ({ info: jest.fn(), error: jest.fn() }));
 import { chat } from '../src/staff';
 
 const base = { ticketId: 42, userid: 'user42', messenger: 'telegram', status: 'open', name: 'Клиент',
-  assigned_to: '11', first_response_at: new Date(), category: null, pending_reply_prompt_id: 700,
+  assigned_to: '11', common_visible: true, first_response_at: new Date(), category: null, pending_reply_prompt_id: 700,
   pending_reply_staff_id: '11', pending_reply_kind: 'reply', pending_reply_expires_at: new Date(Date.now() + 60_000),
   pending_reply_chat_id: '-100', pending_reply_thread_id: 7, pending_reply_version: 3 };
 const context = (text = 'Готово', actor = '11', thread = 7): any => ({ update_id: 9001,

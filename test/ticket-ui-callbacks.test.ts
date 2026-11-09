@@ -35,11 +35,12 @@ jest.mock('../src/cache', () => ({ __esModule: true, default: { config: {
 import { cardText, handleCallback, refreshStaffCard, resetRenderStateForTests } from '../src/ticket-ui';
 import { Context, Messenger } from '../src/interfaces';
 
+// Group callback cases use an explicitly shared ticket; personal routing is checked separately.
 const ticket: any = { ticketId: 7, userid: 'client', messenger: 'telegram', status: 'open', assigned_to: '42',
-  category: null, priority: 'normal', staff_card_chat_id: '-100', staff_card_message_id: 55, staff_card_thread_id: 7 };
+  common_visible: true, common_visible_since: new Date('2026-01-01T00:00:00Z'), updated_at: new Date('2026-01-01T00:00:00Z'), category: null, priority: 'normal', staff_card_chat_id: '-100', staff_card_message_id: 55, staff_card_thread_id: 7 };
 
 describe('concise Russian card rendering', () => {
-  beforeEach(() => { jest.clearAllMocks(); resetRenderStateForTests(); latest.mockResolvedValue({ text: 'Точный текст клиента' }); });
+  beforeEach(() => { jest.clearAllMocks(); resetRenderStateForTests(); latest.mockResolvedValue({ text: 'Точный текст клиента', timestamp: new Date('2026-01-02T00:00:00Z') }); });
 
   it('shows client and useful state while omitting routine clutter', async () => {
     const rendered = await cardText({ ...ticket, name: 'Женя', created_at: new Date(), updated_at: new Date() });
@@ -145,7 +146,7 @@ describe('raw ticket card callbacks', () => {
     expect(send).toHaveBeenCalledWith('-100', 'telegram', expect.stringContaining('tg://user?id=42'),
       expect.objectContaining({ parse_mode: 'HTML' }));
     expect(send.mock.calls.at(-1)[3].reply_markup).toBeUndefined();
-    expect(db.setReplyPrompt).toHaveBeenCalledWith(7, '42', 88, expect.any(Date), 'reply', '42');
+    expect(db.setReplyPrompt).toHaveBeenCalledWith(7, '42', 88, expect.any(Date), 'reply', '42', '-100', 7, 55, undefined, undefined, ticket.updated_at);
   });
 
   it('uses real numeric staff role checks and rejects an unknown actor exactly', async () => {
@@ -163,7 +164,7 @@ describe('raw ticket card callbacks', () => {
   it('re-reads and retries a card edit when updated_at advances concurrently', async () => {
     const old = { ...ticket, updated_at: new Date('2026-01-01T00:00:00Z') };
     const fresh = { ...old, status: 'waiting_user', updated_at: new Date('2026-01-01T00:00:01Z') };
-    getTicket.mockResolvedValueOnce(old).mockResolvedValueOnce(fresh).mockResolvedValueOnce(fresh);
+    getTicket.mockResolvedValueOnce(old).mockResolvedValueOnce(old).mockResolvedValue(fresh);
     await refreshStaffCard(7);
     expect(edit).toHaveBeenCalledTimes(2);
     expect(edit.mock.calls[1][2]).toContain('Ждём клиента');
@@ -242,19 +243,20 @@ describe('raw ticket card callbacks', () => {
     getTicket.mockResolvedValue({ ...ticket, assigned_to: null });
     const events = Array.from({ length: 7 }, (_, i) => ({ at: new Date(2026, 0, i + 1), kind: 'user', text: `m${i + 1}` }));
     timeline.mockResolvedValueOnce(events).mockResolvedValueOnce([events[6]]);
-    await handleCallback(ctx('tc:h:7:0', -100, 7, 900));
+    await handleCallback(ctx('tc:h:7:0', 42, 0, 900));
     expect(JSON.stringify(edit.mock.calls.at(-1)?.[3]?.reply_markup)).toContain('tc:h:7:1');
-    await handleCallback(ctx('tc:h:7:1', -100, 7, 900));
+    await handleCallback(ctx('tc:h:7:1', 42, 0, 900));
     expect(timeline).toHaveBeenLastCalledWith(7, 1, 7, true, 6);
     const second = JSON.stringify(edit.mock.calls.at(-1)?.[3]?.reply_markup);
     expect(second).toContain('tc:h:7:0'); expect(second).not.toContain('tc:h:7:2');
   });
 
   it('keeps a personal ticket\'s client content off the shared canonical card', async () => {
-    latest.mockResolvedValue({ text: 'Точный текст клиента' });
+    latest.mockResolvedValue({ text: 'Точный текст клиента', timestamp: new Date('2026-01-02T00:00:00Z') });
+    getTicket.mockResolvedValue({ ...ticket, common_visible: false });
     await refreshStaffCard(7);
     const rendered = String(edit.mock.calls.at(-1)?.[2]);
-    expect(rendered).toContain('Заявка #7'); expect(rendered).toContain('Личная заявка');
+    expect(rendered).toBe('🔒 Личная заявка.');
     expect(rendered).not.toContain('Точный текст клиента');
     getTicket.mockResolvedValue({ ...ticket, assigned_to: null });
     resetRenderStateForTests();
@@ -336,7 +338,7 @@ describe('Home navigation on every ticket screen', () => {
     await handleCallback(ctx('tc:note:7'));
     // The ordinary-text prompt stays keyboard-free; the inline panel carries cancel + Home.
     expect(send.mock.calls.at(-1)[3].reply_markup).toBeUndefined();
-    expect(data(rowsOf('Ожидаю заметку'))).toEqual(['tc:cancel:7:88', 'tc:open:7', 'tm:home:0']);
+    expect(data(rowsOf('Ввод открыт на 15 минут.'))).toEqual(['tc:cancel:7:88', 'tc:open:7', 'tm:home:0']);
   });
 
   it('replaces spent buttons with Home after transfer and cancel', async () => {
@@ -403,7 +405,7 @@ describe('staff «Вернуть в работу» on a closed canonical card', 
   it('reopens the same ticket via owner-guarded CAS, audits once and refreshes the canonical card', async () => {
     state.transitionTicketStateFrom.mockResolvedValueOnce({ ...closed, status: 'open', closed_at: null });
     await handleCallback(ctx('tc:reopen:7'));
-    expect(state.transitionTicketStateFrom).toHaveBeenCalledWith(7, 'closed', 'open', '42');
+    expect(state.transitionTicketStateFrom).toHaveBeenCalledWith(7, 'closed', 'open', '42', undefined, undefined);
     expect(db.recordAnalyticsEventBestEffort).toHaveBeenCalledTimes(1);
     expect(db.recordAnalyticsEventBestEffort).toHaveBeenCalledWith('ticket.reopened', 7, '42');
     expect(edit).toHaveBeenCalledWith('-100', 55, expect.stringContaining('Заявка #7'), expect.anything());

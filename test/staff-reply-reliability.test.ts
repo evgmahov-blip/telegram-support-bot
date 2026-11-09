@@ -67,6 +67,7 @@ jest.mock('../src/db', () => ({
 jest.mock('../src/team', () => ({
   canPerformAction: mockCanPerformAction,
   canManageTicket: mockCanManageTicket,
+  getStaffRole: jest.fn(() => 'agent'),
   addInternalNoteCommand: mockAddInternalNote,
 }));
 
@@ -127,6 +128,7 @@ function openTicket(): any {
     status: 'open',
     name: 'Jane',
     assigned_to: null,
+    common_visible: true,
     first_response_at: null,
     category: null,
   };
@@ -140,7 +142,7 @@ describe('staff reply delivery reliability', () => {
     mockCanPerformAction.mockReturnValue(true);
     mockCanManageTicket.mockReturnValue(true);
     mockGetTicketByInternalId.mockResolvedValue(openTicket());
-    mockGetTicketById.mockResolvedValue(openTicket());
+    mockGetTicketById.mockImplementation(() => mockGetTicketByInternalId());
     mockPersistTicketMessage.mockResolvedValue(undefined);
     mockSetFirstResponseAt.mockResolvedValue(undefined);
     mockTransitionTicketStatus.mockResolvedValue(null);

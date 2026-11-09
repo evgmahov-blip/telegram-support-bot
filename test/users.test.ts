@@ -16,6 +16,7 @@ jest.mock('../src/middleware', () => ({
 jest.mock('../src/db', () => ({
   add: mockAdd,
   getTicketByUserId: mockGetTicketByUserId,
+  getTicketById: jest.fn().mockImplementation(() => mockGetTicketByUserId()),
   addIdAndName: mockAddIdAndName,
   addTicketMessage: jest.fn().mockResolvedValue(undefined),
   persistTicketMessage: jest.fn().mockResolvedValue(undefined),
@@ -202,7 +203,8 @@ describe('Users Module', () => {
       expect(mockSendMessage).toHaveBeenCalledWith(
         'staff123',
         'telegram',
-        expect.stringContaining('#T001001')
+        expect.stringContaining('#T001001'),
+        expect.objectContaining({ disable_notification: true })
       );
     });
 
@@ -235,7 +237,7 @@ describe('Users Module', () => {
       expect(mockAddIdAndName).not.toHaveBeenCalled();
     });
 
-    it('posts only a content-free notice when the owner DM is unavailable', async () => {
+    it('never posts a group fallback when the owner DM is unavailable', async () => {
       const ctx = createMockContext('Secret router password');
       ctx.session.group = 'group456';
       mockGetTicketByUserId.mockResolvedValue({
@@ -249,10 +251,7 @@ describe('Users Module', () => {
       await expect(users.chat(ctx, { id: 'chat123' })).resolves.toBeUndefined();
 
       const shared = mockSendMessage.mock.calls.filter(call => call[0] === 'staff123' || call[0] === 'group456');
-      expect(shared).toHaveLength(1);
-      expect(shared[0][0]).toBe('staff123');
-      expect(shared[0][2]).toContain('№ 1007');
-      expect(shared[0][2]).not.toContain('Secret router password');
+      expect(shared).toHaveLength(0);
       expect(mockAddIdAndName).not.toHaveBeenCalled();
       mockSendMessage.mockReset();
     });
@@ -265,7 +264,7 @@ describe('Users Module', () => {
       });
       mockSendMessage.mockResolvedValue('msg_id_130');
       await users.chat(ctx, { id: 'chat123' });
-      expect(mockSendMessage).toHaveBeenCalledWith('staff123', 'telegram', expect.stringContaining('Shared question'));
+      expect(mockSendMessage).toHaveBeenCalledWith('staff123', 'telegram', expect.stringContaining('Shared question'), expect.objectContaining({ disable_notification: true }));
       expect(mockSendMessage.mock.calls.find(call => call[0] === 'engineer-42')).toBeUndefined();
     });
 
@@ -349,7 +348,8 @@ describe('Users Module', () => {
       expect(mockSendMessage).toHaveBeenCalledWith(
         'staff123',
         'telegram',
-        expect.stringContaining('#T001002')
+        expect.stringContaining('#T001002'),
+        expect.objectContaining({ disable_notification: true })
       );
     });
 
@@ -392,7 +392,8 @@ describe('Users Module', () => {
       expect(mockSendMessage).toHaveBeenCalledWith(
         'staff123',
         'telegram',
-        expect.stringContaining('#T001003')
+        expect.stringContaining('#T001003'),
+        expect.objectContaining({ disable_notification: true })
       );
       
       expect(mockSendMessage).toHaveBeenCalledWith(

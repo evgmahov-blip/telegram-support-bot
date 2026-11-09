@@ -178,7 +178,11 @@ describe('parseTicketArg', () => {
 });
 
 describe('ticketCommand (#85)', () => {
-  beforeEach(() => jest.clearAllMocks());
+  beforeEach(() => {
+    jest.clearAllMocks();
+    jest.requireMock('../src/db').getTicketById.mockImplementation(() => mockGetByTicketId());
+  });
+  afterEach(() => jest.requireMock('../src/db').getTicketById.mockReset().mockResolvedValue(null));
 
   const ticket = {
     ticketId: 1234,
@@ -245,25 +249,25 @@ describe('ticketCommand (#85)', () => {
     expect(mockSendMessage).not.toHaveBeenCalled();
   });
 
-  it('sends personal ticket details from a shared chat only to the actor DM', async () => {
+  it('requires the private card for personal ticket details requested in a group', async () => {
     mockGetByTicketId.mockResolvedValue(ticket);
-    mockSendMessage.mockResolvedValueOnce('501');
     const ctx = makeCtx(true, { match: '1234' } as Partial<Context>);
     ctx.chat.type = 'supergroup';
     await commands.ticketCommand(ctx);
-    expect(mockSendMessage).toHaveBeenCalledWith('user123', 'telegram', expect.stringContaining('customer: Alice'), expect.anything());
+    expect(mockSendMessage).not.toHaveBeenCalled();
+    expect(mockReply).toHaveBeenCalledWith(ctx, 'Откройте личную карточку в боте.');
     expect(mockReply).toHaveBeenCalledTimes(1);
     expect(mockReply.mock.calls[0][1]).not.toContain('Alice');
   });
 
   it('does not fall back to the shared chat when the DM is unavailable', async () => {
     mockGetByTicketId.mockResolvedValue(ticket);
-    mockSendMessage.mockRejectedValueOnce({ description: 'Forbidden: bot was blocked by the user' });
     const ctx = makeCtx(true, { match: '1234' } as Partial<Context>);
     ctx.chat.type = 'supergroup';
     await commands.ticketCommand(ctx);
     expect(mockReply).toHaveBeenCalledTimes(1);
-    expect(mockReply.mock.calls[0][1]).toContain('/start');
+    expect(mockSendMessage).not.toHaveBeenCalled();
+    expect(mockReply.mock.calls[0][1]).toBe('Откройте личную карточку в боте.');
     expect(mockReply.mock.calls[0][1]).not.toContain('Alice');
   });
 });
@@ -348,7 +352,7 @@ describe('user /close (#112)', () => {
 
     expect(mockCloseTicketLifecycle).not.toHaveBeenCalled();
     expect(mockSendMessage).toHaveBeenCalledTimes(1);
-    expect(mockSendMessage).toHaveBeenCalledWith('999', 'telegram', expect.stringContaining('№ 8'), {});
+    expect(mockSendMessage).toHaveBeenCalledWith('999', 'telegram', expect.stringContaining('№ 8'), { disable_notification: true });
   });
 
   it('tells the user when there is no active ticket', async () => {

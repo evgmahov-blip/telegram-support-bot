@@ -136,7 +136,8 @@ async function fileHandler(type: string, bot: Addon, ctx: Context) {
 
   const fileResult = await ctx.getFile();
   const fileId = (fileResult as { file_id: string }).file_id;
-  const commonOptions = { caption: captionText, disable_notification: true };
+  const quiet = staffInput || ticket.routing?.state === 'offered' || !(ctx as any).staffImportantEvent;
+  const commonOptions = { caption: captionText, disable_notification: quiet };
 
   // Persist immutable conversation history before the primary external
   // delivery side effect. A failure here is safe for ingress to retry.
@@ -179,7 +180,7 @@ async function fileHandler(type: string, bot: Addon, ctx: Context) {
         messageId = await bot.sendVideo(receiverId, fileId, commonOptions) as string | null;
         break;
       case 'sticker': {
-        const stickerMessageId = await bot.sendSticker!(receiverId, fileId, { disable_notification: true });
+        const stickerMessageId = await bot.sendSticker!(receiverId, fileId, { disable_notification: quiet });
         messageId = typeof stickerMessageId === 'string' ? stickerMessageId : null;
         break;
       }
@@ -222,16 +223,16 @@ async function fileHandler(type: string, bot: Addon, ctx: Context) {
   if (shouldForwardToGroup && await visibility.freshTicket(ticket)) {
     switch (type) {
       case 'document':
-        Promise.resolve(bot.sendDocument(session.group, fileId, { caption: captionText, disable_notification: true })).catch(log.error);
+        Promise.resolve(bot.sendDocument(session.group, fileId, { caption: captionText, disable_notification: quiet })).catch(log.error);
         break;
       case 'photo':
-        Promise.resolve(bot.sendPhoto(session.group, fileId, { caption: captionText, disable_notification: true })).catch(log.error);
+        Promise.resolve(bot.sendPhoto(session.group, fileId, { caption: captionText, disable_notification: quiet })).catch(log.error);
         break;
       case 'video':
-        Promise.resolve(bot.sendVideo(session.group, fileId, { caption: captionText, disable_notification: true })).catch(log.error);
+        Promise.resolve(bot.sendVideo(session.group, fileId, { caption: captionText, disable_notification: quiet })).catch(log.error);
         break;
       case 'sticker':
-        Promise.resolve(bot.sendSticker!(session.group, fileId, { disable_notification: true })).catch(log.error);
+        Promise.resolve(bot.sendSticker!(session.group, fileId, { disable_notification: quiet })).catch(log.error);
         break;
     }
   }
@@ -307,6 +308,7 @@ async function forwardFile(ctx: Context): Promise<string | undefined> {
   let ticket = await db.getTicketByUserId(userId, ctx.session.groupCategory);
   // Media never becomes an organization value; it only waits until the organization is known.
   const createsTicket = !ticket || ticket.status === 'closed' || Boolean(cache.config.ticket_per_message);
+  if (createsTicket) (ctx as any).staffImportantEvent = true;
   let organization: string | null | undefined;
   if (createsTicket) {
     const gate = await clientOrganization.requireForNewTicket(ctx);
@@ -325,11 +327,13 @@ async function forwardFile(ctx: Context): Promise<string | undefined> {
   } else if (ticket.status === 'waiting_user') {
     const resumed = await ticketState.resumeWaitingTicket(ticket.ticketId);
     if (resumed) {
+      (ctx as any).staffImportantEvent = true;
       ticket = resumed;
       await db.recordAnalyticsEvent('ticket.resumed', ticket.ticketId, null, { reason: 'user_file' });
     } else {
       const latest = await db.getTicketById(ticket.ticketId, ctx.session.groupCategory);
       if (latest?.status === 'closed') {
+        (ctx as any).staffImportantEvent = true;
         organization = await clientOrganization.currentOrganization(ctx);
         await openTicket();
         ticket = await db.getTicketByUserId(userId, ctx.session.groupCategory);
