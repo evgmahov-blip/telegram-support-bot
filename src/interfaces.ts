@@ -300,6 +300,7 @@ export class Config {
   discord_bot_token: string = '';
   discord_channel_id: string = '';
   api_enabled: boolean = false;
+  organization_private_runtime_module?: string;
   api_token: string = '';
   api_port: number = 8081;
   api_host: string = '127.0.0.1';

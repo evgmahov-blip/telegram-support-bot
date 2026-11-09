@@ -3,6 +3,7 @@ import { rateLimit } from 'express-rate-limit';
 import cache from './cache';
 import * as db from './db';
 import * as log from './logger';
+import { mountOrganizationRuntime } from './organization-runtime';
 
 let server: any = null;
 
@@ -11,12 +12,14 @@ function configView(): {
   api_token?: string;
   api_port?: number;
   api_host?: string;
+  organization_private_runtime_module?: string;
 } {
   return cache.config as unknown as {
     api_enabled?: boolean;
     api_token?: string;
     api_port?: number;
     api_host?: string;
+    organization_private_runtime_module?: string;
   };
 }
 
@@ -84,6 +87,8 @@ export function startEventsApi(): any {
       : since;
     res.status(200).json({ events, next_since: nextSince, has_more: hasMore });
   });
+
+  mountOrganizationRuntime(app, config.organization_private_runtime_module, db.Supportee);
 
   const port = Number(config.api_port || 8081);
   const host = String(process.env.API_HOST || config.api_host || '127.0.0.1');
