@@ -149,7 +149,7 @@ export async function transferTicketCommand(
     const targetName = safeStaffName(targetId);
     await middleware.reply(ctx, `Заявка № ${ticketId} передана сотруднику ${targetName}.`);
 
-    if (targetId !== actorId) {
+    if (!transferred.routing && targetId !== actorId) {
         middleware.sendMessage(
             targetId,
             cache.config.staffchat_type,
@@ -218,7 +218,7 @@ export async function assignTicketCommand(ctx: Context, targetId: string, ticket
     await middleware.reply(ctx, `${cache.config.language.ticketAssignedTo} ${memberName}`);
 
     // Notify the assigned agent
-    if (targetId !== ctx.from.id) {
+    if (targetId !== String(ctx.from.id)) {
         middleware.sendMessage(
             targetId,
             cache.config.staffchat_type,

@@ -24,7 +24,7 @@ export function isCommonTicket(ticket: VisibleTicket): boolean {
 export function canViewTicket(actorId: string, ticket: VisibleTicket): boolean {
   const role = team.getStaffRole(actorId);
   if (role === 'admin' || role === 'supervisor') return true;
-  return role === 'agent' && (ticket.assigned_to === actorId || ticket.routing?.offered_to === actorId || isCommonTicket(ticket));
+  return role === 'agent' && (ticket.assigned_to === actorId || (ticket.routing?.state === 'offered' && ticket.routing.offered_to === actorId) || isCommonTicket(ticket));
 }
 
 /** List scope for an actor; a shared chat only ever lists common tickets. */

@@ -188,9 +188,6 @@ const closeCommand = async (ctx: Context): Promise<void> => {
     await middleware.reply(ctx, 'Не удалось найти заявку по сообщению.');
     return;
   }
-  if (ctx.chat.type !== 'private' && !visibility.isCommonTicket(resolved.ticket)) {
-    await middleware.reply(ctx, 'Откройте личную карточку в боте.'); return;
-  }
   const { ticket, ticketIdStr } = resolved;
   const actorId = ctx.from.id.toString();
   const role = team.getStaffRole(actorId);
@@ -207,6 +204,9 @@ const closeCommand = async (ctx: Context): Promise<void> => {
       ? 'Эта заявка назначена другому сотруднику.'
       : 'Сначала возьмите заявку командой /take.');
     return;
+  }
+  if (ctx.chat.type !== 'private' && !visibility.isCommonTicket(ticket)) {
+    await middleware.reply(ctx, 'Откройте личную карточку в боте.'); return;
   }
   // Same route as the card button: the closure happens only with its cause and performed work.
   await resolutionCase.startClose(ctx, ticket);
@@ -250,9 +250,6 @@ const banCommand = async (ctx: Context): Promise<void> => {
     await middleware.reply(ctx, 'Не удалось найти заявку по сообщению.');
     return;
   }
-  if (ctx.chat.type !== 'private' && !visibility.isCommonTicket(resolved.ticket)) {
-    await middleware.reply(ctx, 'Откройте личную карточку в боте.'); return;
-  }
   const { ticket, ticketIdStr } = resolved;
   if (isManualTicket(ticket)) {
     await middleware.reply(ctx, 'Ручная заявка не связана с аккаунтом клиента; блокировать некого.');
@@ -282,9 +279,6 @@ const reopenCommand = async (ctx: Context): Promise<void> => {
     await middleware.reply(ctx, 'Не удалось найти заявку по сообщению.');
     return;
   }
-  if (ctx.chat.type !== 'private' && !visibility.isCommonTicket(resolved.ticket)) {
-    await middleware.reply(ctx, 'Откройте личную карточку в боте.'); return;
-  }
   const { ticket, ticketIdStr } = resolved;
 
   const reopened = await db.transitionTicketStatus(ticket.ticketId, 'open');
@@ -313,9 +307,6 @@ const unbanCommand = async (ctx: Context): Promise<void> => {
   if (!resolved) {
     await middleware.reply(ctx, 'Не удалось найти заявку по сообщению.');
     return;
-  }
-  if (ctx.chat.type !== 'private' && !visibility.isCommonTicket(resolved.ticket)) {
-    await middleware.reply(ctx, 'Откройте личную карточку в боте.'); return;
   }
   const { ticket, ticketIdStr } = resolved;
 
@@ -357,9 +348,6 @@ const assignCommand = async (ctx: Context): Promise<void> => {
     await middleware.reply(ctx, 'Не удалось определить заявку по сообщению.');
     return;
   }
-  if (ctx.chat.type !== 'private' && !visibility.isCommonTicket(resolved.ticket)) {
-    await middleware.reply(ctx, 'Откройте личную карточку в боте.'); return;
-  }
 
   await team.assignTicketCommand(ctx, args.trim(), parseInt(resolved.ticketIdStr));
   await refreshStaffCard(parseInt(resolved.ticketIdStr));
@@ -381,9 +369,6 @@ const unassignCommand = async (ctx: Context): Promise<void> => {
   if (!resolved) {
     await middleware.reply(ctx, 'Не удалось определить заявку по сообщению.');
     return;
-  }
-  if (ctx.chat.type !== 'private' && !visibility.isCommonTicket(resolved.ticket)) {
-    await middleware.reply(ctx, 'Откройте личную карточку в боте.'); return;
   }
 
   await team.unassignTicketCommand(ctx, parseInt(resolved.ticketIdStr));
@@ -412,9 +397,6 @@ const tagCommand = async (ctx: Context): Promise<void> => {
     await middleware.reply(ctx, 'Не удалось определить заявку по сообщению.');
     return;
   }
-  if (ctx.chat.type !== 'private' && !visibility.isCommonTicket(resolved.ticket)) {
-    await middleware.reply(ctx, 'Откройте личную карточку в боте.'); return;
-  }
 
   const tags = args.split(',').map((t: string) => t.trim()).filter(Boolean);
   await team.addTagsCommand(ctx, parseInt(resolved.ticketIdStr), tags);
@@ -441,9 +423,6 @@ const untagCommand = async (ctx: Context): Promise<void> => {
   if (!resolved) {
     await middleware.reply(ctx, 'Не удалось определить заявку по сообщению.');
     return;
-  }
-  if (ctx.chat.type !== 'private' && !visibility.isCommonTicket(resolved.ticket)) {
-    await middleware.reply(ctx, 'Откройте личную карточку в боте.'); return;
   }
 
   await team.removeTagCommand(ctx, parseInt(resolved.ticketIdStr), args.trim());
@@ -472,9 +451,6 @@ const priorityCommand = async (ctx: Context): Promise<void> => {
     await middleware.reply(ctx, 'Не удалось определить заявку по сообщению.');
     return;
   }
-  if (ctx.chat.type !== 'private' && !visibility.isCommonTicket(resolved.ticket)) {
-    await middleware.reply(ctx, 'Откройте личную карточку в боте.'); return;
-  }
 
   await team.setPriorityCommand(ctx, parseInt(resolved.ticketIdStr, 10), args as import('./interfaces').TicketPriority);
   await refreshStaffCard(parseInt(resolved.ticketIdStr, 10));
@@ -497,9 +473,6 @@ const muteCommand = async (ctx: Context): Promise<void> => {
     await middleware.reply(ctx, 'Не удалось определить заявку по сообщению.');
     return;
   }
-  if (ctx.chat.type !== 'private' && !visibility.isCommonTicket(resolved.ticket)) {
-    await middleware.reply(ctx, 'Откройте личную карточку в боте.'); return;
-  }
 
   await team.muteTicketCommand(ctx, parseInt(resolved.ticketIdStr));
 };
@@ -520,9 +493,6 @@ const unmuteCommand = async (ctx: Context): Promise<void> => {
   if (!resolved) {
     await middleware.reply(ctx, 'Не удалось определить заявку по сообщению.');
     return;
-  }
-  if (ctx.chat.type !== 'private' && !visibility.isCommonTicket(resolved.ticket)) {
-    await middleware.reply(ctx, 'Откройте личную карточку в боте.'); return;
   }
 
   await team.unmuteTicketCommand(ctx, parseInt(resolved.ticketIdStr));
@@ -550,9 +520,6 @@ const noteCommand = async (ctx: Context): Promise<void> => {
     await middleware.reply(ctx, 'Не удалось определить заявку по сообщению.');
     return;
   }
-  if (ctx.chat.type !== 'private' && !visibility.isCommonTicket(resolved.ticket)) {
-    await middleware.reply(ctx, 'Откройте личную карточку в боте.'); return;
-  }
 
   await team.addInternalNoteCommand(ctx, parseInt(resolved.ticketIdStr), args);
   await refreshStaffCard(parseInt(resolved.ticketIdStr));
@@ -574,9 +541,6 @@ const notesCommand = async (ctx: Context): Promise<void> => {
   if (!resolved) {
     await middleware.reply(ctx, 'Не удалось определить заявку по сообщению.');
     return;
-  }
-  if (ctx.chat.type !== 'private' && !visibility.isCommonTicket(resolved.ticket)) {
-    await middleware.reply(ctx, 'Откройте личную карточку в боте.'); return;
   }
 
   await team.showNotesCommand(ctx, parseInt(resolved.ticketIdStr));

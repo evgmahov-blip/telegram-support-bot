@@ -200,7 +200,7 @@ export async function refreshStaffCard(ticketId: number): Promise<void> {
       try {
       for (let attempt = 0; attempt < 2; attempt += 1) {
         const text = await sharedCardText(ticket);
-        const opts = { parse_mode: 'HTML', reply_markup: visibility.isCommonTicket(ticket) ? await staffButtons(ticket) : kb([]) };
+        const opts = { parse_mode: 'HTML', disable_notification: true, reply_markup: visibility.isCommonTicket(ticket) ? await staffButtons(ticket) : kb([]) };
         const rows = (opts.reply_markup as { inline_keyboard: Button[][] }).inline_keyboard;
         if (!await visibility.freshTicket(ticket)) return;
         await editRendered(cardChatId, cardMessageId, text, rows);
@@ -225,7 +225,7 @@ export async function refreshStaffCard(ticketId: number): Promise<void> {
     }
     if (!visibility.isCommonTicket(ticket)) return;
     const text = await sharedCardText(ticket);
-    const opts = { parse_mode: 'HTML', reply_markup: visibility.isCommonTicket(ticket) ? await staffButtons(ticket) : kb([]) };
+    const opts = { parse_mode: 'HTML', disable_notification: true, reply_markup: visibility.isCommonTicket(ticket) ? await staffButtons(ticket) : kb([]) };
     if (typeof db.claimStaffCard !== 'function') return;
     const claim = randomUUID();
     const claimed = await db.claimStaffCard(ticketId, claim);

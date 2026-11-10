@@ -82,6 +82,7 @@ const makeCtx = (reply: Record<string, unknown>, match?: string): Context => ({
     text: '',
     reply_to_message: reply,
   },
+  chat: { id: '-100', type: 'supergroup' },
   session: { admin: true },
   from: { id: 'agent-1' },
   match,
@@ -173,7 +174,7 @@ describe('MOST ticket commands', () => {
   });
 
   it('/queue without a target shows current and available queues', async () => {
-    mockGetTicketByInternalId.mockResolvedValue({ ticketId: 18, assigned_to: 'agent-1' });
+    mockGetTicketByInternalId.mockResolvedValue({ ticketId: 18, assigned_to: 'agent-1', common_visible: true });
     const ctx = makeCtx({ message_id: 503, text: '', caption: '' });
 
     await commands.queueCommand(ctx);
@@ -186,7 +187,7 @@ describe('MOST ticket commands', () => {
   });
 
   it('/queue moves an owned agent ticket with an owner CAS guard', async () => {
-    mockGetTicketByInternalId.mockResolvedValue({ ticketId: 18, assigned_to: 'agent-1' });
+    mockGetTicketByInternalId.mockResolvedValue({ ticketId: 18, assigned_to: 'agent-1', common_visible: true });
     const ctx = makeCtx({ message_id: 503, text: '', caption: '' }, 'billing');
 
     await commands.queueCommand(ctx);
@@ -201,7 +202,7 @@ describe('MOST ticket commands', () => {
   });
 
   it('/queue refuses another agents ticket', async () => {
-    mockGetTicketByInternalId.mockResolvedValue({ ticketId: 18, assigned_to: 'agent-2' });
+    mockGetTicketByInternalId.mockResolvedValue({ ticketId: 18, assigned_to: 'agent-2', common_visible: true });
     mockCanManageTicket.mockReturnValue(false);
     const ctx = makeCtx({ message_id: 503, text: '', caption: '' }, 'infra');
 
@@ -217,7 +218,7 @@ describe('MOST ticket commands', () => {
   it('/priority uses owner/state CAS and records an audit event', async () => {
     mockGetTicketByInternalId.mockResolvedValue({
       ticketId: 19,
-      assigned_to: 'agent-1',
+      assigned_to: 'agent-1', common_visible: true,
       priority: TicketPriority.NORMAL,
       status: 'open',
     });
@@ -235,7 +236,7 @@ describe('MOST ticket commands', () => {
   });
 
   it('/note writes only after the active owner guard and never echoes note text', async () => {
-    mockGetTicketByInternalId.mockResolvedValue({ ticketId: 20, assigned_to: 'agent-1', status: 'open' });
+    mockGetTicketByInternalId.mockResolvedValue({ ticketId: 20, assigned_to: 'agent-1', common_visible: true, status: 'open' });
     const ctx = makeCtx({ message_id: 505, text: '', caption: '' }, 'secret internal note');
 
     await commands.noteCommand(ctx);
@@ -247,7 +248,7 @@ describe('MOST ticket commands', () => {
   });
 
   it('/notes is owner-scoped and stays inside the staff reply surface', async () => {
-    mockGetTicketByInternalId.mockResolvedValue({ ticketId: 20, assigned_to: 'agent-1', status: 'open' });
+    mockGetTicketByInternalId.mockResolvedValue({ ticketId: 20, assigned_to: 'agent-1', common_visible: true, status: 'open' });
     mockGetInternalNotes.mockResolvedValue([
       { author_id: 'agent-1', text: 'internal only' },
     ]);
@@ -264,7 +265,7 @@ describe('MOST ticket commands', () => {
   });
 
   it('/history shows event type and actor without metadata payloads', async () => {
-    mockGetTicketByInternalId.mockResolvedValue({ ticketId: 20, assigned_to: 'agent-1', status: 'open' });
+    mockGetTicketByInternalId.mockResolvedValue({ ticketId: 20, assigned_to: 'agent-1', common_visible: true, status: 'open' });
     mockGetTicketAuditHistory.mockResolvedValue([
       {
         type: 'ticket.priority_changed',
@@ -286,7 +287,7 @@ describe('MOST ticket commands', () => {
   });
 
   it('sends a canned response through the normal staff reply path', async () => {
-    mockGetTicketByInternalId.mockResolvedValue({ ticketId: 21, assigned_to: 'agent-1', status: 'open' });
+    mockGetTicketByInternalId.mockResolvedValue({ ticketId: 21, assigned_to: 'agent-1', common_visible: true, status: 'open' });
     const ctx = makeCtx({ message_id: 507, text: '', caption: '' });
 
     await commands.cannedResponseCommand(ctx, 'hello', 'Hello from support');
@@ -302,7 +303,7 @@ describe('MOST ticket commands', () => {
   });
 
   it('never sends a canned response to a closed ticket', async () => {
-    mockGetTicketByInternalId.mockResolvedValue({ ticketId: 22, assigned_to: 'agent-1', status: 'closed' });
+    mockGetTicketByInternalId.mockResolvedValue({ ticketId: 22, assigned_to: 'agent-1', common_visible: true, status: 'closed' });
     const ctx = makeCtx({ message_id: 508, text: '', caption: '' });
 
     await commands.cannedResponseCommand(ctx, 'hello', 'Hello from support');

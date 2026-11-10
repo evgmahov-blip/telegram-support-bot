@@ -29,7 +29,7 @@ jest.mock('../src/db', () => ({
   markStaffReplyDelivered: jest.fn(), clearReplyPrompt: mockClearReplyPrompt, recordAnalyticsEventBestEffort: mockRecordEventBestEffort,
   setFirstResponseAt: mockSetFirstResponseAt, transitionTicketStatus: mockTransitionTicketStatus,
 }));
-jest.mock('../src/team', () => ({ canPerformAction: () => true, canManageTicket: mockCanManageTicket, addInternalNoteCommand: jest.fn() }));
+jest.mock('../src/team', () => ({ getStaffRole: () => 'agent', canPerformAction: () => true, canManageTicket: mockCanManageTicket, addInternalNoteCommand: jest.fn() }));
 jest.mock('../src/webhooks', () => ({ webhooks: { ticketReplied: mockTicketReplied, ticketClosed: jest.fn() } }));
 jest.mock('../src/analytics', () => ({ sendCSATSurvey: mockSendCSATSurvey }));
 jest.mock('../src/ticket-ui', () => ({ refreshStaffCard: mockRefreshStaffCard }));
@@ -40,7 +40,7 @@ import { chat } from '../src/staff';
 import { fileHandler } from '../src/files';
 
 const manual = () => ({ ticketId: 9, userid: 'MANUAL:3f1c', messenger: 'manual', status: 'open', name: 'ООО Ромашка',
-  assigned_to: 'agent1', first_response_at: null, category: null, pending_reply_prompt_id: 700, pending_reply_staff_id: 'agent1',
+  assigned_to: 'agent1', common_visible: true, first_response_at: null, category: null, pending_reply_prompt_id: 700, pending_reply_staff_id: 'agent1',
   pending_reply_kind: 'reply', pending_reply_expires_at: new Date(Date.now() + 60_000) });
 function ctx(text = 'Перезвонил, проблема решена'): any {
   return { update_id: 4242, session: { admin: true }, from: { id: 'agent1' }, chat: { id: 'staff123' },

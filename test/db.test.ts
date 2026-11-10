@@ -378,7 +378,7 @@ describe('Database Module', () => {
       mockSupporteeFindOneAndUpdate.mockResolvedValueOnce(null);
       await expect(db.setTicketCommonVisibility(7, true, '42')).resolves.toBeNull();
       expect(mockSupporteeFindOneAndUpdate).toHaveBeenCalledWith(
-        { ticketId: 7, assigned_to: '42', common_visible: { $ne: true } }, { $set: { common_visible: true } }, { new: true });
+        { ticketId: 7, assigned_to: '42', common_visible: { $ne: true } }, { $set: { pending_reply_staff_id: null, pending_reply_prompt_id: null, pending_reply_expires_at: null, pending_reply_kind: null, pending_reply_chat_id: null, pending_reply_thread_id: null, pending_reply_origin_message_id: null, pending_reply_claim: null, pending_reply_claimed_at: null, common_visible: true, common_visible_since: expect.any(Date) }, $inc: { pending_reply_version: 1 } }, { new: true });
     });
 
     it('appends a closure version and leaves the intent claimable until the ticket really closes', async () => {

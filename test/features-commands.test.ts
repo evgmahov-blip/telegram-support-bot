@@ -22,8 +22,8 @@ jest.mock('../src/middleware', () => ({
 jest.mock('../src/db', () => ({
   open: mockOpen,
   getByTicketId: mockGetByTicketId,
-  getTicketById: jest.fn().mockResolvedValue(null),
   getTicketByUserId: mockGetTicketByUserId,
+  getTicketById: jest.fn(() => mockGetTicketByUserId()),
   getAllUsers: mockGetAllUsers,
   transitionTicketStatus: mockTransitionTicketStatus,
   recordAnalyticsEvent: mockRecordAnalyticsEvent,
@@ -328,6 +328,7 @@ describe('user /close (#112)', () => {
 
   it('records a close request instead of closing without the engineer explanation', async () => {
     cache.config.allow_user_close = true;
+    jest.requireMock('../src/db').getTicketById.mockImplementation(() => mockGetTicketByUserId());
     const ticket = { ticketId: 7, userid: 'user123', status: 'open', category: null, messenger: 'telegram', assigned_to: null };
     mockGetTicketByUserId.mockResolvedValue(ticket);
 
@@ -338,12 +339,13 @@ describe('user /close (#112)', () => {
       .toHaveBeenCalledWith('ticket.close_requested', 7, 'user123', { closed_by: 'user' });
     expect(mockReply).toHaveBeenCalledWith(expect.anything(), expect.stringContaining('просьба закрыть обращение передана'));
     // An unassigned (common) ticket notifies the shared staff chat.
-    expect(mockSendMessage).toHaveBeenCalledWith('-100123', 'telegram', expect.stringContaining('Клиент просит закрыть заявку № 7'), {});
+    expect(mockSendMessage).toHaveBeenCalledWith('-100123', 'telegram', expect.stringContaining('Клиент просит закрыть заявку № 7'), { disable_notification: true });
     expect(mockSendCSATSurvey).not.toHaveBeenCalled();
   });
 
   it('routes a close request on a personal ticket only to its owner DM', async () => {
     cache.config.allow_user_close = true;
+    jest.requireMock('../src/db').getTicketById.mockImplementation(() => mockGetTicketByUserId());
     const ticket = { ticketId: 8, userid: 'user123', status: 'waiting_user', category: null, messenger: 'telegram', assigned_to: '999' };
     mockGetTicketByUserId.mockResolvedValue(ticket);
     mockSendMessage.mockResolvedValueOnce('77');
@@ -357,6 +359,7 @@ describe('user /close (#112)', () => {
 
   it('tells the user when there is no active ticket', async () => {
     cache.config.allow_user_close = true;
+    jest.requireMock('../src/db').getTicketById.mockImplementation(() => mockGetTicketByUserId());
     mockGetTicketByUserId.mockResolvedValue({ ticketId: 7, status: 'closed' });
     await commands.closeCommand(makeCtx(false));
     expect(mockCloseTicketLifecycle).not.toHaveBeenCalled();
@@ -365,6 +368,7 @@ describe('user /close (#112)', () => {
 
   it('ignores group chats', async () => {
     cache.config.allow_user_close = true;
+    jest.requireMock('../src/db').getTicketById.mockImplementation(() => mockGetTicketByUserId());
     const ctx = makeCtx(false);
     ctx.chat.type = 'supergroup';
     await commands.closeCommand(ctx);

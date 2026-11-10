@@ -17,6 +17,7 @@ jest.mock('../src/middleware', () => ({
 }));
 
 jest.mock('../src/db', () => ({
+  getTicketById: jest.fn(async () => ticket),
   addTicketMessage: mockAddTicketMessage,
   recordAnalyticsEvent: mockRecordAnalyticsEvent,
 }));
@@ -63,7 +64,7 @@ describe('AI draft-only assistance', () => {
       'staff-group',
       'telegram',
       expect.stringContaining('AI DRAFT #T000041'),
-      {},
+      { disable_notification: true },
     );
     expect(mockAddTicketMessage).toHaveBeenCalledWith(
       41,

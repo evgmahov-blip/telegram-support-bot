@@ -32,7 +32,7 @@ describe('staff-only AI engineer task flow', () => {
       options: [binding], selected: null, owner: '1', epoch: 0, fingerprint: ai.policyFingerprint(mockPolicy),
       base_request: null, task_id: '00000000-0000-4000-8000-000000000001',
       request_id: '00000000-0000-4000-8000-000000000002', operation_id: '00000000-0000-4000-8000-000000000003' };
-    ticket = { ticketId: 42, status: 'open', assigned_to: '1', ai_epoch: 0, ai_engineer: null, ai_engineer_draft: draft,
+    ticket = { ticketId: 42, status: 'open', common_visible: true, assigned_to: '1', ai_epoch: 0, ai_engineer: null, ai_engineer_draft: draft,
       pending_reply_staff_id: '1', pending_reply_kind: 'note', pending_reply_chat_id: '-100', pending_reply_thread_id: 5,
       pending_reply_version: 3, pending_reply_prompt_id: 7, pending_reply_expires_at: new Date(Date.now() + 60000),
       staff_card_chat_id: '-100', staff_card_thread_id: 5, staff_card_message_id: 8 };

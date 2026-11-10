@@ -14,6 +14,7 @@ jest.mock('../src/middleware', () => ({
 
 jest.mock('../src/db', () => ({
   getTicketByUserId: mockGetTicketByUserId,
+  getTicketById: jest.fn(() => mockGetTicketByUserId()),
   addTicketMessage: mockAddTicketMessage,
   persistTicketMessage: jest.fn().mockResolvedValue(undefined),
   recordAnalyticsEvent: mockRecordAnalyticsEvent,
@@ -118,6 +119,7 @@ describe('users AI draft-only flow', () => {
       'staff-group',
       'telegram',
       expect.stringContaining('#T000051'),
+      expect.objectContaining({ disable_notification: true }),
     );
     expect(mockCreateAIDraft).toHaveBeenCalledWith(
       expect.objectContaining({ ticketId: 51 }),

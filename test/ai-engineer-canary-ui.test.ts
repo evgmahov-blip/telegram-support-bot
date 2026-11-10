@@ -41,7 +41,7 @@ describe('canary through the existing staff start/confirm path', () => {
   };
   beforeEach(() => {
     jest.clearAllMocks(); admit();
-    ticket = { ticketId: 4242, status: 'open', assigned_to: '2', ai_epoch: 3, ai_engineer: null, ai_engineer_draft: null,
+    ticket = { ticketId: 4242, status: 'open', common_visible: true, assigned_to: '2', ai_epoch: 3, ai_engineer: null, ai_engineer_draft: null,
       staff_card_chat_id: '-100', staff_card_thread_id: 5, staff_card_message_id: 8 };
     ctx = { session: { admin: true }, from: { id: 2 }, chat: { id: -100 }, messenger: 'telegram',
       callbackQuery: { message: { chat: { id: -100 }, message_id: 8, message_thread_id: 5 } }, answerCbQuery: jest.fn() };

@@ -27,7 +27,7 @@ import { closeCommand, clearCommand } from '../src/commands';
 import cache from '../src/cache';
 import { Context, Messenger } from '../src/interfaces';
 
-const ticket = { ticketId: 7, userid: 'client', messenger: Messenger.TELEGRAM, status: 'open', assigned_to: '42', category: null };
+const ticket = { ticketId: 7, userid: 'client', messenger: Messenger.TELEGRAM, status: 'open', assigned_to: '42', common_visible: true, category: null };
 function context(replyMessage = true, actor = 42, chatId = -100700): Context {
   const update: any = { update_id: 500, message: { message_id: 10, text: '/close', from: { id: actor }, chat: {
     id: chatId, type: chatId > 0 ? 'private' : 'supergroup',

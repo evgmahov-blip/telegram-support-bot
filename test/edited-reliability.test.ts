@@ -24,6 +24,7 @@ jest.mock('../src/cache', () => ({
 
 jest.mock('../src/db', () => ({
   getTicketByUserId: mockGetTicketByUserId,
+  getTicketById: jest.fn(() => mockGetTicketByUserId()),
   persistTicketMessage: mockPersistTicketMessage,
   recordAnalyticsEventBestEffort: mockRecordEventBestEffort,
 }));
@@ -138,8 +139,8 @@ describe('edited message reliability', () => {
 
     await expect(handleEditedMessage(createContext('group456'))).resolves.toBe(true);
 
-    expect(mockSendMessage).toHaveBeenNthCalledWith(1, 'staff123', 'telegram', expect.any(String));
-    expect(mockSendMessage).toHaveBeenNthCalledWith(2, 'group456', 'telegram', expect.any(String));
+    expect(mockSendMessage).toHaveBeenNthCalledWith(1, 'staff123', 'telegram', expect.any(String), expect.objectContaining({ disable_notification: true }));
+    expect(mockSendMessage).toHaveBeenNthCalledWith(2, 'group456', 'telegram', expect.any(String), expect.objectContaining({ disable_notification: true }));
     expect(mockLogError).toHaveBeenCalled();
     expect(mockRecordEventBestEffort).toHaveBeenCalledWith(
       'ticket.message.user',

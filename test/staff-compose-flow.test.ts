@@ -62,10 +62,10 @@ describe('durable ordinary-text ticket compose', () => {
     expect(reply).toHaveBeenCalledWith(expect.anything(), expect.stringContaining('отправлен клиенту'), expect.objectContaining({ message_thread_id: 7 }));
   });
 
-  it('releases the claim and retains the draft when client delivery fails', async () => {
+  it('retains the claim on an unknown client delivery outcome', async () => {
     sendMessage.mockRejectedValueOnce(new Error('offline'));
     await expect(chat(context())).rejects.toThrow('offline');
-    expect(releaseCompose).toHaveBeenCalledWith(42, '11', 3, 'telegram:9001:ticket:42');
+    expect(releaseCompose).not.toHaveBeenCalled();
     expect(completeCompose).not.toHaveBeenCalled();
   });
 
@@ -83,6 +83,7 @@ describe('durable ordinary-text ticket compose', () => {
   it('keeps an ordinary note internal and completes only after it is stored', async () => {
     const note = { ...base, pending_reply_kind: 'note' };
     findCompose.mockResolvedValue(note); claimCompose.mockResolvedValue(note);
+    jest.requireMock('../src/db').getTicketById.mockResolvedValue(note);
     await chat(context('секретная заметка'));
     expect(addNote).toHaveBeenCalledWith(expect.anything(), 42, 'секретная заметка', 'telegram:9001:ticket:42');
     expect(sendMessage).not.toHaveBeenCalledWith('user42', expect.anything(), expect.anything());

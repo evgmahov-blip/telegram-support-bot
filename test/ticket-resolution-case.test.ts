@@ -117,6 +117,7 @@ describe('required closure explanation (close mode)', () => {
 
   it('starts a common ticket closure in place with the explicit «unknown cause» choice', async () => {
     const common = { ...open, assigned_to: null };
+    db.getTicketById.mockResolvedValue(common);
     db.startResolutionIntent.mockResolvedValue({ ...closeIntent, expected_owner: null });
     await flow.startClose(ctx('tc:closeask:7'), common);
     expect(db.startResolutionIntent).toHaveBeenCalledWith(expect.any(String), '42', '-100', 9, 7, expect.any(Date), 'close', null, undefined);

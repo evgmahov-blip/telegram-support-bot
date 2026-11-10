@@ -182,6 +182,21 @@ describe('Files Module', () => {
       expect(mockAddNewTicket).not.toHaveBeenCalled();
     });
 
+    it.each(['document', 'photo', 'video', 'sticker'])('delivers personal %s only to the assigned engineer', async type => {
+      const ctx = createMockContext();
+      ctx.session.group = 'category-group';
+      mockGetTicketByUserId.mockResolvedValue(activeTicket);
+      mockGetTicketById.mockResolvedValue(activeTicket);
+      mockSendMessage.mockResolvedValue('901');
+      const sendMedia = jest.fn().mockResolvedValue('900');
+      const bot: any = { sendDocument: sendMedia, sendPhoto: sendMedia, sendVideo: sendMedia, sendSticker: sendMedia };
+      await files.fileHandler(type, bot, ctx);
+      expect(sendMedia).toHaveBeenCalledTimes(1);
+      expect(sendMedia).toHaveBeenCalledWith('agent1', 'file-1', expect.objectContaining({ disable_notification: true }));
+      expect(mockAddIdAndName).not.toHaveBeenCalled();
+      expect(mockSendMessage.mock.calls.every(call => call[0] === 'agent1')).toBe(true);
+    });
+
     it('resumes WAITING_USER with the guarded transition', async () => {
       const ctx = createMockContext();
       const waiting = { ...activeTicket, status: 'waiting_user' };

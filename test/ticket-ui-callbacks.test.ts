@@ -294,6 +294,7 @@ describe('raw ticket card callbacks', () => {
 
     expect(db.clearStaffCardBinding).toHaveBeenCalledWith(7, '-100', 55);
     expect(send).toHaveBeenCalledTimes(1);
+    expect(send.mock.calls[0][3].disable_notification).toBe(true);
     expect(db.bindStaffCard).toHaveBeenCalledWith(7, expect.any(String), '-100', 88, 7);
   });
 });
@@ -499,11 +500,14 @@ describe('private dashboard callback regression', () => {
     expect(db.listStaffTickets).toHaveBeenLastCalledWith('mine', '42', 0, 7, 6, 'visible');
   });
   it.each([42, 43])('scopes nonempty mine to actor %s', async actor => {
-    db.listStaffTickets.mockResolvedValue([{...ticket, assigned_to: String(actor)}]);
+    const owned = {...ticket, assigned_to: String(actor)};
+    db.listStaffTickets.mockResolvedValue([owned]);
+    getTicket.mockResolvedValue(owned);
     db.countStaffTickets.mockResolvedValue(1);
     await route(ctx('tm:mine:0', actor, 0, 900, actor));
     expect(db.listStaffTickets.mock.calls.at(-1)[1]).toBe(String(actor));
-    expect(edit.mock.calls.at(-1)[2]).toContain('Заявки');
+    expect(edit.mock.calls.at(-1)[2]).toContain('Мои в работе');
+    expect(JSON.stringify(edit.mock.calls.at(-1)[3])).toContain('tc:open:7');
   });
   it('routes a historical mine callback from the allowed group only to DM', async () => {
     await route(ctx('tm:mine:0'));

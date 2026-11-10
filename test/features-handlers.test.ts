@@ -30,7 +30,7 @@ jest.mock('../src/db', () => ({
   persistTicketMessage: mockPersistTicketMessage,
   addIdAndName: mockAddIdAndName,
   getTicketByInternalId: jest.fn().mockResolvedValue(null),
-  getTicketById: jest.fn().mockResolvedValue(null),
+  getTicketById: jest.fn(() => mockGetTicketByUserId()),
   checkBan: mockCheckBan,
   transitionTicketStatus: mockTransitionTicketStatus,
   recordAnalyticsEvent: mockRecordAnalyticsEvent,
@@ -207,6 +207,7 @@ describe('edited messages (#147)', () => {
       '-100123',
       'telegram',
       'Ticket #T000012 from [Alice](tg://user?id=42) edited their message:\n\ncorrected text',
+      { disable_notification: true, parse_mode: 'MarkdownV2' },
     );
     expect(mockPersistTicketMessage).toHaveBeenCalledWith(12, 'user', '42', '[edited their message] corrected text');
     expect(mockRecordAnalyticsEventBestEffort).toHaveBeenCalledWith('ticket.message.user', 12, '42');
@@ -339,6 +340,7 @@ describe('forward_replies_to_parent (#79)', () => {
   it('mirrors the reply only when enabled', async () => {
     const ctx = makeCtx({ chat: { id: '-100BUGS', type: 'supergroup' }, message: { from: { first_name: 'Bob' } } });
     const ticket = { ticketId: 5, category: 'Bugs' } as never;
+    mockGetTicketByUserId.mockResolvedValue(ticket);
 
     await staff.forwardReplyToParent(ctx, ticket, 'Fixed in v5');
     expect(mockSendMessage).not.toHaveBeenCalled();
@@ -363,8 +365,8 @@ describe('stickers (#107)', () => {
 
     await files.fileHandler('sticker', bot, makeCtx());
 
-    expect(bot.sendSticker).toHaveBeenCalledWith('-100123', 'file-1');
-    expect(mockSendMessage).toHaveBeenCalledWith('-100123', 'telegram', expect.stringContaining('Ticket #T000003 from Alice'));
+    expect(bot.sendSticker).toHaveBeenCalledWith('-100123', 'file-1', { disable_notification: true });
+    expect(mockSendMessage).toHaveBeenCalledWith('-100123', 'telegram', expect.stringContaining('Ticket #T000003 from Alice'), { disable_notification: true });
     expect(mockAddIdAndName).toHaveBeenCalledWith(3, '501', 'Alice');
   });
 

@@ -268,7 +268,7 @@ describe('authority updates', () => {
   it('puts the change comparison, authority write and epoch in one Mongo update', () => {
     cache.config.ai_engineer_enabled = true;
     expect(authorityUpdate({ assigned_to: 'new' })).toEqual([{ $set: {
-      assigned_to: { $literal: 'new' }, ai_epoch: { $add: [{ $ifNull: ['$ai_epoch', 0] },
+      pending_reply_staff_id: null, pending_reply_prompt_id: null, pending_reply_expires_at: null, pending_reply_kind: null, pending_reply_chat_id: null, pending_reply_thread_id: null, pending_reply_origin_message_id: null, pending_reply_claim: null, pending_reply_claimed_at: null, pending_reply_version: { $add: [{ $ifNull: ['$pending_reply_version', 0] }, 1] }, assigned_to: { $literal: 'new' }, ai_epoch: { $add: [{ $ifNull: ['$ai_epoch', 0] },
         { $cond: [{ $or: [{ $ne: [{ $ifNull: ['$assigned_to', null] }, { $literal: 'new' }] }] }, 1, 0] }] },
     } }]);
   });

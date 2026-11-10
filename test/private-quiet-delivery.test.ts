@@ -45,3 +45,7 @@ it('allows sound for the explicit important event', async () => {
   await notifyTicketStaff(ticket, 'reply after waiting', { disable_notification: false });
   expect(send).toHaveBeenCalledWith('42', 'telegram', 'reply after waiting', { disable_notification: false });
 });
+
+it('does not retain visibility for a previous offer recipient after acceptance by another engineer', () => {
+  expect(canViewTicket('43', { ...ticket, routing: { state: 'accepted', offered_to: '43', version: 5 } })).toBe(false);
+});

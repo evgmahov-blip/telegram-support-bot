@@ -46,7 +46,7 @@ jest.mock('../src/middleware', () => ({
 
 jest.mock('../src/db', () => ({
   getTicketByInternalId: mockGetTicketByInternalId,
-  getTicketById: jest.fn(),
+  getTicketById: jest.fn(() => mockGetTicketByUserId()),
   getTicketByUserId: mockGetTicketByUserId,
   checkBan: mockCheckBan,
   addNewTicket: jest.fn(),
@@ -61,6 +61,7 @@ jest.mock('../src/ticket-state', () => ({
 }));
 
 jest.mock('../src/team', () => ({
+  getStaffRole: (id: string) => id === 'agent1' ? 'agent' : null,
   canPerformAction: mockCanPerformAction,
   canManageTicket: mockCanManageTicket,
 }));
@@ -300,6 +301,7 @@ describe('file delivery reliability', () => {
       userid: 'WEBsocket-123',
       messenger: 'web',
     });
+    jest.requireMock('../src/db').getTicketById.mockImplementation(() => mockGetTicketByInternalId());
     const ctx = staffContext();
     const bot = {
       sendDocument: jest.fn().mockResolvedValue(null),
@@ -328,7 +330,7 @@ describe('file delivery reliability', () => {
     expect(bot.sendDocument).toHaveBeenCalledWith(
       'user1',
       'file-2',
-      { caption: 'diagnostic.zip' },
+      { caption: 'diagnostic.zip', disable_notification: true },
     );
     expect(mockSetFirstResponseAt).toHaveBeenCalledWith(42);
     expect(mockRecordEventBestEffort).toHaveBeenCalledWith(

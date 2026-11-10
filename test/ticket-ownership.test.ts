@@ -31,7 +31,7 @@ describe('ticket ownership', () => {
         assigned_to: null,
         'routing.state': { $ne: 'offered' },
       },
-      { $set: { assigned_to: 'agent-1' } },
+      { $set: { pending_reply_staff_id: null, pending_reply_prompt_id: null, pending_reply_expires_at: null, pending_reply_kind: null, pending_reply_chat_id: null, pending_reply_thread_id: null, pending_reply_origin_message_id: null, pending_reply_claim: null, pending_reply_claimed_at: null, assigned_to: 'agent-1', common_visible: false }, $inc: { pending_reply_version: 1 } },
       { new: true },
     );
   });
@@ -50,7 +50,7 @@ describe('ticket ownership', () => {
         status: { $in: ['open', 'waiting_user'] },
         assigned_to: 'agent-1',
       },
-      { $set: { assigned_to: 'agent-2' } },
+      { $set: { pending_reply_staff_id: null, pending_reply_prompt_id: null, pending_reply_expires_at: null, pending_reply_kind: null, pending_reply_chat_id: null, pending_reply_thread_id: null, pending_reply_origin_message_id: null, pending_reply_claim: null, pending_reply_claimed_at: null, assigned_to: 'agent-2' }, $inc: { pending_reply_version: 1 } },
       { new: true },
     );
   });
@@ -72,7 +72,7 @@ describe('ticket ownership', () => {
         status: { $in: ['open', 'waiting_user'] },
         assigned_to: 'agent-1',
       },
-      { $set: { assigned_to: 'agent-2' } },
+      { $set: { pending_reply_staff_id: null, pending_reply_prompt_id: null, pending_reply_expires_at: null, pending_reply_kind: null, pending_reply_chat_id: null, pending_reply_thread_id: null, pending_reply_origin_message_id: null, pending_reply_claim: null, pending_reply_claimed_at: null, assigned_to: 'agent-2' }, $inc: { pending_reply_version: 1 } },
       { new: true },
     );
   });
@@ -90,7 +90,7 @@ describe('ticket ownership', () => {
         status: { $in: ['open', 'waiting_user'] },
         assigned_to: null,
       },
-      { $set: { assigned_to: 'agent-2' } },
+      { $set: { pending_reply_staff_id: null, pending_reply_prompt_id: null, pending_reply_expires_at: null, pending_reply_kind: null, pending_reply_chat_id: null, pending_reply_thread_id: null, pending_reply_origin_message_id: null, pending_reply_claim: null, pending_reply_claimed_at: null, assigned_to: 'agent-2' }, $inc: { pending_reply_version: 1 } },
       { new: true },
     );
   });
