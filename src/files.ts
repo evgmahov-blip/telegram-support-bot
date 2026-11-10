@@ -136,7 +136,7 @@ async function fileHandler(type: string, bot: Addon, ctx: Context) {
 
   const fileResult = await ctx.getFile();
   const fileId = (fileResult as { file_id: string }).file_id;
-  const quiet = staffInput || ticket.routing?.state === 'offered' || !(ctx as any).staffImportantEvent;
+  const quiet = !staffInput && (ticket.routing?.state === 'offered' || !(ctx as any).staffImportantEvent);
   const commonOptions = { caption: captionText, disable_notification: quiet };
 
   // Persist immutable conversation history before the primary external
@@ -159,7 +159,10 @@ async function fileHandler(type: string, bot: Addon, ctx: Context) {
 
   try {
     const live = await visibility.freshTicket(ticket);
-    if (!live || (staffInput && !team.canManageTicket(String(ctx.from.id), live.assigned_to))) return;
+    if (!live || (staffInput && !team.canManageTicket(String(ctx.from.id), live.assigned_to))) {
+      await reply(ctx, 'Заявка изменилась. Файл не отправлен, повторите отправку.');
+      return;
+    }
     if (privateStaff) {
       mediaClaim = `telegram:${ctx.update_id || message.message_id}:ticket:${ticket.ticketId}:media`;
       const claimed = await db.claimReplyCompose(ticket.ticketId, actor, String(ctx.chat.id), null,
@@ -209,6 +212,9 @@ async function fileHandler(type: string, bot: Addon, ctx: Context) {
   if (messageId && mediaClaim) await db.completeReplyCompose(ticket.ticketId, actor, ticket.pending_reply_version, mediaClaim);
   if (!messageId && personalRoute) {
     log.error('Personal media delivery unavailable or UNKNOWN; no shared fallback');
+    await refreshStaffCard(ticket.ticketId);
+    await reply(ctx, 'Не удалось подтвердить доставку файла сотруднику. Сообщите об этом текстом в заявке.');
+    return;
   } else if (!messageId) {
     throw new Error(
       `Primary ${type} delivery failed for #T${ticket.ticketId} to ${receiverId}`,

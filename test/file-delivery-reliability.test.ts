@@ -141,6 +141,7 @@ function staffContext(): any {
 describe('file delivery reliability', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    jest.requireMock('../src/db').getTicketById.mockImplementation(() => mockGetTicketByUserId());
     cache.ticketSent = { user1: 0 };
     mockCheckBan.mockResolvedValue(false);
     mockSendMessage.mockResolvedValue(undefined);
@@ -320,6 +321,47 @@ describe('file delivery reliability', () => {
     expect(mockRecordEventBestEffort).not.toHaveBeenCalled();
   });
 
+  it.each(['document', 'photo', 'video', 'sticker'])('keeps assigned client %s delivery private and quiet', async type => {
+    mockGetTicketByUserId.mockResolvedValue({ ...ticket(), assigned_to: 'agent1' });
+    const ctx = userContext();
+    ctx.session.group = 'secondary-staff';
+    const send = jest.fn().mockResolvedValue('901');
+    const bot = { sendDocument: send, sendPhoto: send, sendVideo: send, sendSticker: send } as any;
+    await fileHandler(type, bot, ctx);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledWith('agent1', 'file-1', expect.objectContaining({ disable_notification: true }));
+    expect(mockPersistCorrelation).not.toHaveBeenCalled();
+  });
+
+  it.each(['blocked', 'null'])('reports unconfirmed personal media without a success confirmation or shared fallback: %s', async failure => {
+    mockGetTicketByUserId.mockResolvedValue({ ...ticket(), assigned_to: 'agent1' });
+    const ctx = userContext();
+    ctx.session.group = 'secondary-staff';
+    cache.config.autoreply_confirmation = true;
+    const send = failure === 'blocked' ? jest.fn().mockRejectedValue(new Error('blocked')) : jest.fn().mockResolvedValue(null);
+    try {
+      await fileHandler('document', { sendDocument: send } as any, ctx);
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(send.mock.calls[0][0]).toBe('agent1');
+      expect(mockReply).toHaveBeenCalledWith(ctx, expect.stringContaining('Не удалось подтвердить доставку'));
+      expect(mockSendMessage).not.toHaveBeenCalled();
+      expect(mockRecordEventBestEffort).not.toHaveBeenCalled();
+      expect(mockPersistCorrelation).not.toHaveBeenCalled();
+    } finally { cache.config.autoreply_confirmation = false; }
+  });
+
+  it('reports a routing change after history persistence without delivering to the stale destination', async () => {
+    mockPersistTicketMessage.mockImplementationOnce(async () => {
+      mockGetTicketByUserId.mockResolvedValue({ ...ticket(), assigned_to: 'agent1' });
+    });
+    const ctx = userContext();
+    const send = jest.fn().mockResolvedValue('901');
+    await fileHandler('document', { sendDocument: send } as any, ctx);
+    expect(send).not.toHaveBeenCalled();
+    expect(mockReply).toHaveBeenCalledWith(ctx, expect.stringContaining('Файл не отправлен'));
+    expect(mockRecordEventBestEffort).not.toHaveBeenCalled();
+  });
+
   it('keeps all staff post-delivery analytics best-effort', async () => {
     const bot = {
       sendDocument: jest.fn().mockResolvedValue('900'),
@@ -330,7 +372,7 @@ describe('file delivery reliability', () => {
     expect(bot.sendDocument).toHaveBeenCalledWith(
       'user1',
       'file-2',
-      { caption: 'diagnostic.zip', disable_notification: true },
+      { caption: 'diagnostic.zip', disable_notification: false },
     );
     expect(mockSetFirstResponseAt).toHaveBeenCalledWith(42);
     expect(mockRecordEventBestEffort).toHaveBeenCalledWith(

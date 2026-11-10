@@ -268,7 +268,7 @@ describe('Files Module', () => {
 
       expect(mockGetTicketByInternalId).toHaveBeenCalledWith(777);
       expect(mockGetTicketByUserId).not.toHaveBeenCalled();
-      expect(bot.sendDocument).toHaveBeenCalledWith('user123', 'file-1', { caption: '', disable_notification: true });
+      expect(bot.sendDocument).toHaveBeenCalledWith('user123', 'file-1', { caption: '', disable_notification: false });
       expect(mockAddIdAndName).not.toHaveBeenCalled();
       expect(mockPersistTicketMessage).toHaveBeenCalledWith(
         41,

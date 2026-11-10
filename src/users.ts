@@ -72,12 +72,14 @@ async function autoReply(ctx: Context): Promise<boolean> {
  * Staff copy of a client message. Common tickets go to the shared staff chat
  * (with reply correlation); a personal ticket goes only to its owner's bot DM,
  * and a failed DM is logged without any shared fallback.
- * Returns true when the copy was posted to shared staff surfaces.
+ * Returns the routing snapshot used for delivery and whether it was shared.
  */
-async function forwardToStaff(ticket: ISupportee, ctx: Context, autoReplyInfo?: string): Promise<boolean> {
+async function forwardToStaff(ticket: ISupportee, ctx: Context, autoReplyInfo?: string): Promise<{ ticket: ISupportee; shared: boolean } | null> {
   if (ticket.routing?.state === 'offered') {
     await routing.deliverOffer(ticket);
-    ticket = await db.getTicketById(ticket.ticketId, null) || ticket;
+    const current = await db.getTicketById(ticket.ticketId, null);
+    if (!current) return null;
+    ticket = current;
   }
   const { config } = cache;
   const text = formatMessageAsTicket(ticket.ticketId, ctx, autoReplyInfo);
@@ -87,7 +89,7 @@ async function forwardToStaff(ticket: ISupportee, ctx: Context, autoReplyInfo?: 
   if (result.route === 'shared' && result.messageId) {
     await persistStaffMessageCorrelation(ticket.ticketId, result.messageId, ctx.message.from.first_name);
   }
-  return result.route === 'shared';
+  return { ticket, shared: result.route === 'shared' };
 }
 
 async function processTicket(
@@ -128,7 +130,10 @@ async function processTicket(
     sendMessage(chatId, ticket.messenger, confirmationMsg).catch(log.error);
   }
 
-  const shared = await forwardToStaff(ticket, ctx, autoReplyInfo);
+  const forwarded = await forwardToStaff(ticket, ctx, autoReplyInfo);
+  if (!forwarded) return;
+  ticket = forwarded.ticket;
+  const { shared } = forwarded;
   await refreshStaffCard(ticket.ticketId);
 
   db.recordAnalyticsEventBestEffort('ticket.message.user', ticket.ticketId, ctx.from.id.toString());
@@ -194,12 +199,15 @@ async function chat(ctx: Context, chat: { id: string }) {
     cache.ticketSent[cache.userId] = 0;
   } else if (sentCount < config.spam_cant_msg) {
     cache.ticketSent[cache.userId] = sentCount + 1;
-    const ticket = await db.getTicketByUserId(cache.userId, ctx.session.groupCategory);
+    let ticket = await db.getTicketByUserId(cache.userId, ctx.session.groupCategory);
     if (!ticket) return;
 
     await db.persistTicketMessage(ticket.ticketId, 'user', ctx.from.id.toString(), ctx.message.text);
 
-    const shared = await forwardToStaff(ticket, ctx, autoReplyInfo);
+    const forwarded = await forwardToStaff(ticket, ctx, autoReplyInfo);
+    if (!forwarded) return;
+    ticket = forwarded.ticket;
+    const { shared } = forwarded;
     await refreshStaffCard(ticket.ticketId);
 
     db.recordAnalyticsEventBestEffort('ticket.message.user', ticket.ticketId, ctx.from.id.toString());
