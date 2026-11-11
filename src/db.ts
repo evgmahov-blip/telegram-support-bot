@@ -66,6 +66,8 @@ export interface ISupportee extends mongoose.Document {
   pending_action_actor_id: string | null;
   pending_new_request: boolean;
   // Manual external tickets (phone/email/in-person): staff-only intake data, no client transport.
+  linked_client_id?: string | null;
+  client_link_audit?: Array<Record<string, unknown>>;
   manual_source: ManualSource | null;
   external_client: string | null;
   external_contact: string | null;
@@ -127,6 +129,8 @@ export const SupporteeSchema = new mongoose.Schema<ISupportee>({
   pending_action_expires_at: { type: Date, default: null },
   pending_action_actor_id: { type: String, default: null },
   pending_new_request: { type: Boolean, default: false },
+  linked_client_id: { type: String, default: null },
+  client_link_audit: { type: [mongoose.Schema.Types.Mixed], default: [] },
   manual_source: { type: String, enum: MANUAL_SOURCES, default: null },
   external_client: { type: String, default: null },
   external_contact: { type: String, default: null },
@@ -341,11 +345,13 @@ export interface IManualIntakeDraft extends mongoose.Document {
   source: ManualSource | null;
   prompt_message_id: number | null;
   confirm_nonce: string | null;
+  linked_client_id?: string | null;
   client: string | null;
   contact: string | null;
   description: string | null;
   ticketId: number | null;
   last_consumed_message_id: number | null;
+  client_after_contact?: boolean;
   edit_return: boolean;
   expires_at: Date;
   purge_at: Date;
@@ -362,11 +368,13 @@ const ManualIntakeDraftSchema = new mongoose.Schema<IManualIntakeDraft>({
   source: { type: String, enum: MANUAL_SOURCES, default: null },
   prompt_message_id: { type: Number, default: null },
   confirm_nonce: { type: String, default: null },
+  linked_client_id: { type: String, default: null },
   client: { type: String, default: null },
   contact: { type: String, default: null },
   description: { type: String, default: null },
   ticketId: { type: Number, default: null },
   last_consumed_message_id: { type: Number, default: null },
+  client_after_contact: { type: Boolean, default: false },
   edit_return: { type: Boolean, default: false },
   expires_at: { type: Date, required: true },
   purge_at: { type: Date, required: true },
@@ -998,7 +1006,7 @@ const OPEN_DRAFT_STATES: ManualDraftStatus[] = ['source', 'input', 'form', 'prev
 export async function startManualDraft(token: string, actorId: string, chatId: string, threadId: number | null, expiresAt: Date) {
   await ManualIntakeDraft.updateMany({ actor_id: actorId, status: { $in: OPEN_DRAFT_STATES } }, { $set: { status: 'cancelled' } });
   return await ManualIntakeDraft.create({ token, actor_id: actorId, chat_id: chatId, thread_id: threadId,
-    status: 'source', step: null, version: 0, expires_at: expiresAt, purge_at: new Date(Date.now() + DRAFT_PURGE_MS) });
+    status: 'source', step: null, version: 0, client_after_contact: true, expires_at: expiresAt, purge_at: new Date(Date.now() + DRAFT_PURGE_MS) });
 }
 
 export async function findActiveManualDraft(actorId: string, chatId: string, threadId: number | null) {
@@ -1042,7 +1050,7 @@ export async function consumeManualDraftInput(token: string, actorId: string, ch
         { last_consumed_message_id: { $exists: false } }, { last_consumed_message_id: null },
         { last_consumed_message_id: { $lt: messageId } },
       ] },
-    { $set: { [field]: value, step: nextStep, status: nextStep ? 'input' : 'preview',
+    { $set: { [field]: value, ...(step === 'client' ? { linked_client_id: null } : {}), step: nextStep, status: nextStep ? 'input' : 'preview',
       last_consumed_message_id: messageId, confirm_nonce: nextStep ? null : String(version + 1), edit_return: false, expires_at: expiresAt }, $inc: { version: 1 } },
     { new: true },
   ) as IManualIntakeDraft | null;
@@ -1109,7 +1117,7 @@ export async function cancelManualDraft(token: string, actorId: string, version?
  * namespace, so no transport can ever address it.
  */
 export async function createManualTicket(requestKey: string, input: {
-  source: ManualSource; client: string; contact: string | null; description: string; createdBy: string;
+  source: ManualSource; client: string; contact: string | null; description: string; createdBy: string; linkedClientId?: string | null;
 }): Promise<{ ticket: ISupportee; created: boolean }> {
   let ticket = await Supportee.findOne({ manual_request_key: requestKey }) as ISupportee | null;
   let created = false;
@@ -1119,6 +1127,8 @@ export async function createManualTicket(requestKey: string, input: {
     try {
       ticket = await Supportee.create({
         ticketId, userid: `${MANUAL_USER_PREFIX}${randomUUID()}`, messenger: Messenger.MANUAL, status: 'open',
+        linked_client_id: input.linkedClientId ?? null,
+        client_link_audit: input.linkedClientId ? [{ actor: input.createdBy, at: new Date(), from: null, to: input.linkedClientId }] : [],
         category: null, name: input.client, manual_source: input.source, external_client: input.client,
         external_contact: input.contact, created_by: input.createdBy, manual_request_key: requestKey,
       }) as unknown as ISupportee;
@@ -1466,6 +1476,11 @@ export async function getTicketTimelinePage(ticketId: number, page: number, page
       { $project: { at: '$timestamp', kind: { $literal: 'event' }, actor: '$agent_id', text: '$type', metadata: 1 } },
     ] } },
   ];
+  if (includeNotes) pipeline.push({ $unionWith: { coll: Supportee.collection.name, pipeline: [
+    { $match: { ticketId } }, { $unwind: '$client_link_audit' },
+    { $project: { at: '$client_link_audit.at', kind: { $literal: 'event' }, actor: '$client_link_audit.actor',
+      text: { $literal: 'ticket.client_linked' }, metadata: { client_id: '$client_link_audit.to' } } },
+  ] } });
   if (includeNotes) pipeline.push({ $unionWith: { coll: InternalNote.collection.name, pipeline: [
     { $match: { ticketId } },
     { $project: { at: '$timestamp', kind: { $literal: 'note' }, actor: '$author_id', text: 1, metadata: { $literal: {} } } },
