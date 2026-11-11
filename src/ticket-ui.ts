@@ -259,6 +259,64 @@ export async function refreshStaffCard(ticketId: number): Promise<void> {
   }
 }
 
+const NOTICE_ATTEMPTS = 5;
+const NOTICE_CLAIM_MS = 60_000;
+/** Telegram answered with an error, so the message definitely was not posted; network failures stay ambiguous. */
+const rejectedByTelegram = (err: unknown) => Number.isInteger((err as { error_code?: number })?.error_code);
+
+/**
+ * Refreshes the canonical card and publishes the pending «returned to common» record.
+ * A newly created common card is itself the record; an edited old card is not, so a
+ * separate number-only notice goes to the configured staff chat/topic. Success needs a
+ * Telegram message id; Telegram rejections retry, ambiguous results never auto-repeat.
+ */
+export async function publishCommonReturn(ticketId: number): Promise<void> {
+  let claimed: ISupportee | null = null;
+  try {
+    const ticket = typeof db.claimCommonReturnNotice === 'function' ? await db.getTicketById(ticketId, null) : null;
+    const notice = ticket?.common_return_notice;
+    if (notice?.state === 'pending') {
+      const prior = notice.prior_card !== undefined ? notice.prior_card : ticket.staff_card_message_id ?? null;
+      claimed = await db.claimCommonReturnNotice(ticketId, notice.key, prior);
+    }
+  } catch (err) { log.error(`Не удалось занять запись о возврате #T${ticketId}:`, err); }
+  await refreshStaffCard(ticketId);
+  if (!claimed) return;
+  const { key, attempts = 0, prior_card: prior = null } = claimed.common_return_notice!;
+  try {
+    const current = await db.getTicketById(ticketId, null);
+    if (current?.common_return_notice?.key !== key) return; // A newer transition owns the record now.
+    if (!visibility.isCommonTicket(current) || current.status === 'closed') {
+      await db.settleCommonReturnNotice(ticketId, key, 'superseded'); return;
+    }
+    if (current.staff_card_message_id && current.staff_card_message_id !== prior) {
+      await db.settleCommonReturnNotice(ticketId, key, 'sent', { message_id: current.staff_card_message_id, via: 'card' }); return;
+    }
+    let messageId: string | null = null, definite = true;
+    try {
+      // Number and action only: pre-return conversation, files and contacts stay private.
+      messageId = await middleware.sendMessage(cache.config.staffchat_id, cache.config.staffchat_type,
+        `♻️ <b>Заявка возвращена в общие</b>\nЗаявка № ${ticketId}`, { parse_mode: 'HTML', disable_notification: false,
+          reply_markup: kb([[{ text: 'Открыть заявку', callback_data: `tc:open:${ticketId}:n` }]]) });
+    } catch (err) {
+      definite = rejectedByTelegram(err);
+      log.error(`Запись о возврате #T${ticketId} не доставлена${definite ? '' : ' (результат неизвестен)'}:`, err);
+    }
+    if (messageId) await db.settleCommonReturnNotice(ticketId, key, 'sent', { message_id: Number(messageId), via: 'notice' });
+    else if (!definite) await db.settleCommonReturnNotice(ticketId, key, 'unknown');
+    else await db.settleCommonReturnNotice(ticketId, key, attempts + 1 >= NOTICE_ATTEMPTS ? 'failed' : 'pending', { attempts: attempts + 1 });
+  } catch (err) {
+    log.error(`Не удалось опубликовать возврат #T${ticketId}:`, err);
+  }
+}
+
+/** Periodic recovery through the workflow loop; the per-key claim prevents duplicate posts. */
+export async function recoverCommonReturns(): Promise<void> {
+  if (typeof db.listPendingCommonReturnNotices !== 'function') return;
+  await db.expireCommonReturnNoticeClaims(new Date(Date.now() - NOTICE_CLAIM_MS));
+  for (const id of await db.listPendingCommonReturnNotices(50)) await publishCommonReturn(id);
+}
+
 function staffSurface(ctx: Context): boolean {
   const q = ctx.callbackQuery.message;
   if (!ctx.session.admin || !team.getStaffRole(ctx.from.id.toString()) || !q) return false;
@@ -300,7 +358,8 @@ export async function answerForTicket(ctx: Context, ticket: ISupportee, text: st
   return answerPrivately(ctx, text, rows);
 }
 
-export async function answer(ctx: Context, text: string, rows: Button[][], visibleFlow = false) {
+/** keepClicked: the clicked message is a feed record that must stay visible, like the canonical card. */
+export async function answer(ctx: Context, text: string, rows: Button[][], visibleFlow = false, keepClicked = false) {
   ({ text, rows } = renderClassic({ bodyHtml: text, buttons: rows }));
   const q = ctx.callbackQuery?.message;
   if (q) {
@@ -309,7 +368,7 @@ export async function answer(ctx: Context, text: string, rows: Button[][], visib
       const canonical = correlated?.staff_card_message_id === q.message_id
         && String(correlated.staff_card_chat_id) === String(q.chat.id)
         && (correlated.staff_card_thread_id || null) === (q.message_thread_id || null);
-      if (!canonical) {
+      if (!canonical && !keepClicked) {
         await editRendered(q.chat.id, q.message_id, text, rows);
         boundedSet(navigationPanels, panelKey(ctx), q.message_id);
         return;
@@ -648,7 +707,9 @@ export async function handleCallback(ctx: Context): Promise<boolean> {
       [{ text: '🔄 Обновить', callback_data: `tc:open:${id}` }, { text: '📜 История', callback_data: `tc:h:${id}:0` }],
       [{ text: '⬅️ Назад', callback_data: closed ? 'tm:closed:0' : 'tm:common:0' }, STAFF_HOME]];
     if (!await visibility.freshTicket(current)) { await acknowledge(ctx, 'Заявка изменилась.', true); return true; }
-    if (privateStaff || visibility.isCommonTicket(current)) await answer(ctx, text, rows);
+    // «Открыть заявку» on a return record opens a fresh panel; the record stays in the feed for others.
+    const fromNotice = p[3] === 'n' && !privateStaff;
+    if (privateStaff || visibility.isCommonTicket(current)) await answer(ctx, text, rows, fromNotice, fromNotice);
     else await answerForTicket(ctx, current, text, rows);
     return true;
   }
@@ -786,7 +847,7 @@ export async function handleCallback(ctx: Context): Promise<boolean> {
     if (ticket.pending_reply_version != null && !cleared) { await ctx.answerCbQuery('Эта кнопка отмены устарела.', true); return true; }
   }
   else { await ctx.answerCbQuery('Действие недоступно или нет прав.', true); return true; }
-  await refreshStaffCard(id);
+  if (action === 'share') await publishCommonReturn(id); else await refreshStaffCard(id);
   // close/xfer/cancel arrive from transient panels: replace their now-spent buttons with navigation.
   if (!canonicalBinding && (privateStaff || visibility.isCommonTicket(ticket))) await answer(ctx, `${doneText[action] || 'Готово.'} № ${id}`, [[{ text: '⬅️ К заявке', callback_data: `tc:open:${id}` }, STAFF_HOME]]);
   if (action === 'take') {

@@ -5,7 +5,7 @@ import { Context } from './interfaces';
 import * as log from './logger'
 import { isBusinessTime } from './routing-policy';
 import { maintainRouting } from './ticket-routing';
-import { refreshStaffCard } from './ticket-ui';
+import { refreshStaffCard, recoverCommonReturns } from './ticket-ui';
 import { flushRoutingSettingsAudit } from './routing-settings';
 import { flushOrganizationBindingAudit } from './client-organization-binding';
 
@@ -137,6 +137,7 @@ export async function handleCannedResponse(ctx: Context, key: string): Promise<s
  */
 export async function runWorkflowChecks(): Promise<void> {
     if (db.Supportee) await maintainRouting(new Date(), undefined, ticket => refreshStaffCard(ticket.ticketId));
+    if (db.Supportee) await recoverCommonReturns().catch(err => log.error('Common return recovery failed:', err));
     await flushRoutingSettingsAudit();
     if (db.ClientProfile) await flushOrganizationBindingAudit();
     await checkAutoClose();

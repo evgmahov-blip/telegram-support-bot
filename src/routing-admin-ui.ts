@@ -7,7 +7,7 @@ import * as routing from './ticket-routing';
 import { readRoutingSettings, saveRoutingSetting } from './routing-settings';
 import type { SettingField } from './routing-settings';
 import { validateSchedule } from './routing-policy';
-import { refreshStaffCard, refreshPrivateRoutingPanel, answer } from './ticket-ui';
+import { refreshStaffCard, refreshPrivateRoutingPanel, answer, publishCommonReturn } from './ticket-ui';
 import { Messenger, Context } from './interfaces';
 
 const esc = (v: unknown) => String(v ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
@@ -43,7 +43,7 @@ export async function handleRoutingCallback(ctx: Context): Promise<boolean> {
   if (!changed) { await ctx.answerCbQuery('Состояние, срок или полномочия изменились.',true); return true; }
   await routing.flushRoutingAudit(changed);
   if (changed.routing?.state === 'offered') await routing.deliverOffer(changed);
-  await refreshStaffCard(id);
+  if (action === 'common') await publishCommonReturn(id); else await refreshStaffCard(id);
   await refreshPrivateRoutingPanel(ctx, id);
   await ctx.answerCbQuery(changed.routing?.state === 'accepted' ? 'Заявка взята в работу.' : changed.routing?.state === 'common' ? 'Заявка в общей очереди.' : 'Предложение передано.');
   return true;
