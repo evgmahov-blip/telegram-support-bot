@@ -40,8 +40,13 @@ const fakeDb: any = {
 };
 
 jest.mock('../src/db', () => fakeDb);
+jest.mock('../src/ticket-visibility', () => ({ sendToStaffPrivate: jest.fn().mockResolvedValue('88') }));
+jest.mock('../src/ticket-client-binding', () => ({
+  accessibleClient: jest.fn(async (_actor, id) => id === '0123456789abcdef01234567' ? { messenger: 'telegram', userid: '99', organization: 'Клиент' } : null),
+  showClients: jest.fn(),
+}));
 jest.mock('../src/middleware', () => ({ reply }));
-jest.mock('../src/ticket-ui', () => ({ answer, refreshStaffCard: refresh, STAFF_HOME: { text: '🏠 Главная', callback_data: 'tm:home:0' }, e: (x: any) => String(x).replace(/&/g, '&amp;').replace(/</g, '&lt;') }));
+jest.mock('../src/ticket-ui', () => ({ isStaffPrivate: (ctx: any) => ctx.chat.type === 'private' && ctx.chat.id === ctx.from.id, answer, refreshStaffCard: refresh, STAFF_HOME: { text: '🏠 Главная', callback_data: 'tm:home:0' }, e: (x: any) => String(x).replace(/&/g, '&amp;').replace(/</g, '&lt;') }));
 jest.mock('../src/cache', () => ({ __esModule: true, default: { config: { staffchat_id: '-100', staffchat_thread_id: 7 } } }));
 jest.mock('../src/staff-names', () => ({ staffDisplayName: () => 'Инженер' }));
 jest.mock('../src/team', () => ({ getStaffRole: (id: string) => ['42','43'].includes(id) ? 'agent' : null, canPerformAction: (id: string) => ['42','43'].includes(id) }));
@@ -246,4 +251,48 @@ it('returns field validation errors to the same actual topic', async () => {
   await handleTextInput(c);
   expect(reply).toHaveBeenLastCalledWith(c, expect.stringContaining('200'),
     expect.objectContaining({ message_thread_id: 7 }));
+});
+
+const privateCb = (): any => ({ ...cb('', 42, 42, null), messenger: 'telegram', chat: { id: 42, type: 'private' } });
+const privateMsg = (text: string, id: number): any => ({ ...msg(text, id, 42, 42, null), messenger: 'telegram', chat: { id: 42, type: 'private' } });
+it('creates from the private engineer menu with an explicitly confirmed existing client', async () => {
+  await startDraft(privateCb());
+  const t = fakeDb.startManualDraft.mock.calls.at(-1)[0];
+  expect(current(t).chat_id).toBe('42');
+  current(t).client_after_contact = true;
+  await handleDraftCallback(privateCb(), ['mi','s',t,'0','phone']);
+  await handleTextInput(privateMsg('Ошибка по звонку', 100));
+  await handleDraftCallback(privateCb(), ['mi','skip',t,String(current(t).version)]);
+  const v = String(current(t).version);
+  await handleDraftCallback(privateCb(), ['mi','pick',t,v,'0123456789abcdef01234567']);
+  expect(current(t).linked_client_id).toBeUndefined();
+  await handleDraftCallback(privateCb(), ['mi','selected',t,v,'0123456789abcdef01234567']);
+  expect(current(t).linked_client_id).toBe('0123456789abcdef01234567');
+  await handleDraftCallback(privateCb(), ['mi','ok',t,String(current(t).version)]);
+  expect(fakeDb.createManualTicket.mock.calls[0][1]).toMatchObject({
+    source: 'phone', linkedClientId: '0123456789abcdef01234567', createdBy: '42',
+  });
+});
+it('creates email intake without a client or contact and rejects a stale no-client button', async () => {
+  await startDraft(privateCb());
+  const t = fakeDb.startManualDraft.mock.calls.at(-1)[0];
+  current(t).client_after_contact = true;
+  await handleDraftCallback(privateCb(), ['mi','s',t,'0','email']);
+  await handleTextInput(privateMsg('Письмо об ошибке', 100));
+  await handleDraftCallback(privateCb(), ['mi','skip',t,String(current(t).version)]);
+  await handleDraftCallback(privateCb(), ['mi','none',t,'3']);
+  await handleDraftCallback(privateCb(), ['mi','none',t,'3']);
+  expect(current(t)).toMatchObject({ client: 'Без клиента', linked_client_id: null, step: null, status: 'preview', version: 4 });
+  await handleDraftCallback(privateCb(), ['mi','ok',t,String(current(t).version)]);
+  expect(fakeDb.createManualTicket.mock.calls[0][1]).toMatchObject({ source: 'email', linkedClientId: null, contact: null });
+});
+
+it('moves group client selection into the same engineer private draft and invalidates group buttons', async () => {
+  const t = await start();
+  await handleDraftCallback(cb(), ['mi','clients',t,'1','0']);
+  expect(current(t)).toMatchObject({ chat_id: '42', thread_id: null, version: 2, step: 'client' });
+  await handleDraftCallback(cb(), ['mi','none',t,'2']);
+  expect(current(t).step).toBe('client');
+  await handleDraftCallback(privateCb(), ['mi','none',t,'2']);
+  expect(current(t).step).toBe('description');
 });

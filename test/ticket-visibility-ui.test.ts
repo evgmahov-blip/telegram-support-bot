@@ -73,6 +73,14 @@ describe('visibility rules', () => {
 describe('staff read paths enforce visibility', () => {
   beforeEach(() => { jest.clearAllMocks(); resetRenderStateForTests(); getTicket.mockResolvedValue(personalA); send.mockResolvedValue('88'); });
 
+  it('keeps manual creation visible on the private engineer home', async () => {
+    await handleCallback(dm('tm:home:0'));
+    const rendered = JSON.stringify([...edit.mock.calls, ...reply.mock.calls]);
+    expect(rendered).toContain('Создать заявку');
+    expect(rendered).toContain('tm:manual:0');
+    expect(sharedSends()).toHaveLength(0);
+  });
+
   it.each([['tc:open:7'], ['tc:h:7:0']])('denies engineer B %s on A\'s personal ticket before any render', async (data) => {
     await handleCallback(group(data, 43, 900));
     expect(answer).toHaveBeenCalledWith(expect.stringContaining('недоступна'), true);
