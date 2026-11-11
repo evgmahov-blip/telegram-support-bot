@@ -77,6 +77,8 @@ export interface ISupportee extends mongoose.Document {
   // Explicit common visibility for an owned ticket; unassigned tickets are always common.
   common_visible: boolean;
   common_visible_since?: Date | null;
+  // Durable feed record for the latest explicit return to the common queue.
+  common_return_notice?: CommonReturnNotice | null;
   // Resolution version written for the closure that produced the current closed state.
   closure_resolution_version: number | null;
   routing?: import('./routing-contract').TicketRouting | null;
@@ -84,6 +86,18 @@ export interface ISupportee extends mongoose.Document {
   organization_owner_version?: number | null;
   organization_binding_version?: number | null;
 }
+
+/**
+ * pending → sending → sent | pending (Telegram rejected, retried) | unknown (no auto-repeat) | failed | superseded.
+ * prior_card is the canonical card known at the first claim: a different card proves a new visible record.
+ */
+export type CommonReturnNotice = {
+  key: string; state: 'pending' | 'sending' | 'sent' | 'unknown' | 'failed' | 'superseded';
+  at: Date; attempts: number; prior_card?: number | null; claimed_at?: Date | null;
+  message_id?: number | null; via?: 'card' | 'notice' | null;
+};
+export const commonReturnNotice = (key: string, at: Date): CommonReturnNotice =>
+  ({ key, state: 'pending', at, attempts: 0 });
 
 export type ManualSource = 'phone' | 'email' | 'in_person' | 'other';
 export const MANUAL_SOURCES: ManualSource[] = ['phone', 'email', 'in_person', 'other'];
@@ -135,6 +149,7 @@ export const SupporteeSchema = new mongoose.Schema<ISupportee>({
   declared_organization: { type: String, default: null },
   common_visible: { type: Boolean, default: false },
   common_visible_since: { type: Date, default: null },
+  common_return_notice: { type: mongoose.Schema.Types.Mixed, default: null },
   closure_resolution_version: { type: Number, default: null },
   routing: { type: mongoose.Schema.Types.Mixed, default: null },
   organization_ref: { type: mongoose.Schema.Types.Mixed, default: null },
@@ -766,7 +781,44 @@ export async function countStaffTickets(view: StaffListView, actorId: string, sc
 /** Owner-guarded explicit common visibility change; null when owner or value changed. */
 export async function setTicketCommonVisibility(ticketId: number, common: boolean, expectedOwner: string) {
   const filter: Record<string, unknown> = { ticketId, assigned_to: expectedOwner, common_visible: common ? { $ne: true } : true };
-  return await Supportee.findOneAndUpdate(filter, authorityUpdate({ common_visible: common, common_visible_since: common ? new Date() : null }), { new: true }) as ISupportee | null;
+  const now = new Date();
+  // The feed record is committed with the transition itself, so a crash cannot lose it.
+  return await Supportee.findOneAndUpdate(filter, authorityUpdate({ common_visible: common, common_visible_since: common ? now : null,
+    ...(common ? { common_return_notice: commonReturnNotice('s' + now.getTime(), now) } : {}) }), { new: true }) as ISupportee | null;
+}
+
+/** Exclusive publication claim for one notice key; the first claim pins prior_card. */
+export async function claimCommonReturnNotice(ticketId: number, key: string, priorCard: number | null) {
+  return await Supportee.findOneAndUpdate(
+    { ticketId, 'common_return_notice.key': key, 'common_return_notice.state': 'pending' },
+    { $set: { 'common_return_notice.state': 'sending', 'common_return_notice.claimed_at': new Date(),
+      'common_return_notice.prior_card': priorCard } },
+    { new: true },
+  ) as ISupportee | null;
+}
+
+/** Settles only the exact claimed key; a newer transition's notice is never touched. */
+export async function settleCommonReturnNotice(ticketId: number, key: string, state: CommonReturnNotice['state'],
+  fields: { attempts?: number; message_id?: number | null; via?: CommonReturnNotice['via'] } = {}) {
+  const set: Record<string, unknown> = { 'common_return_notice.state': state, 'common_return_notice.claimed_at': null };
+  for (const [name, value] of Object.entries(fields)) set[`common_return_notice.${name}`] = value;
+  return await Supportee.findOneAndUpdate(
+    { ticketId, 'common_return_notice.key': key, 'common_return_notice.state': 'sending' }, { $set: set }, { new: true },
+  ) as ISupportee | null;
+}
+
+/** A claim abandoned by a crash may already have been delivered: settle it as unknown, never resend. */
+export async function expireCommonReturnNoticeClaims(olderThan: Date): Promise<void> {
+  await Supportee.updateMany(
+    { 'common_return_notice.state': 'sending', 'common_return_notice.claimed_at': { $lt: olderThan } },
+    { $set: { 'common_return_notice.state': 'unknown', 'common_return_notice.claimed_at': null } },
+  );
+}
+
+export async function listPendingCommonReturnNotices(limit: number): Promise<number[]> {
+  const rows = await Supportee.find({ 'common_return_notice.state': 'pending' }, { ticketId: 1 })
+    .sort({ ticketId: 1 }).limit(limit).lean();
+  return rows.map(row => row.ticketId);
 }
 
 export async function claimStaffCard(ticketId: number, claim: string) {

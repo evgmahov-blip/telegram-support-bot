@@ -3,7 +3,7 @@ const ticket=jest.fn();
 jest.mock('../src/routing-settings',()=>({readRoutingSettings:(...a:any[])=>read(...a),saveRoutingSetting:(...a:any[])=>save(...a)}));
 jest.mock('../src/team',()=>({getStaffRole:(id:string)=>id==='admin'?'admin':['a','b'].includes(id)?'agent':null,
   canPerformAction:(id:string,a:string)=>id==='admin'&&a==='manage_team'}));
-jest.mock('../src/ticket-ui',()=>({refreshStaffCard:jest.fn(),refreshPrivateRoutingPanel:jest.fn(),answer:(c:any,t:any,r:any)=>reply(c,t,{parse_mode:'HTML',reply_markup:{inline_keyboard:r}})}));
+jest.mock('../src/ticket-ui',()=>({refreshStaffCard:jest.fn(),publishCommonReturn:jest.fn(),refreshPrivateRoutingPanel:jest.fn(),answer:(c:any,t:any,r:any)=>reply(c,t,{parse_mode:'HTML',reply_markup:{inline_keyboard:r}})}));
 jest.mock('../src/middleware',()=>({reply:(...a:any[])=>reply(...a),sendMessage:jest.fn()}));
 jest.mock('../src/ticket-visibility',()=>({sendToStaffPrivate:(...a:any[])=>dm(...a),
   canViewTicket:(id:string,t:any)=>id==='admin'||t.routing?.offered_to===id||t.assigned_to===id}));

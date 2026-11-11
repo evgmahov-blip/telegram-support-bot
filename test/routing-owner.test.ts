@@ -163,6 +163,24 @@ describe('CAS routing ownership and scope',()=>{
     const moved=await routing.routingCommand(1,'a',1,'transfer','b',now);
     expect(moved!.routing!.state).toBe('common');
     expect(moved!.routing!.audit.at(-1)!.reason).toBe('transfer_limit');
+    expect(moved!.common_return_notice).toBeUndefined();
+  });
+  it('commits a pending feed record with each explicit return, keyed by the new routing version',async()=>{
+    rows.set(1,{ticketId:1,status:'open',assigned_to:null,routing:routing.commonRouting('fixture',now)});
+    const taken=await routing.routingCommand(1,'a',1,'take',undefined,now);
+    expect(taken!.common_return_notice).toBeUndefined();
+    const back=await routing.routingCommand(1,'a',2,'common',undefined,now);
+    expect(back).toMatchObject({assigned_to:null,common_visible:false,routing:{state:'common',version:3},
+      common_return_notice:{key:'r3',state:'pending',attempts:0}});
+    expect(await routing.routingCommand(1,'a',2,'common',undefined,now)).toBeNull();
+    await routing.routingCommand(1,'b',3,'take',undefined,now);
+    expect((await routing.routingCommand(1,'b',4,'common',undefined,now))!.common_return_notice!.key).toBe('r5');
+  });
+  it('a system fallback to common does not claim an explicit return record',async()=>{
+    rows.set(1,offer());
+    await routing.maintainRouting(new Date(+now+600000),jest.fn());
+    expect(rows.get(1).routing.state).toBe('common');
+    expect(rows.get(1).common_return_notice).toBeUndefined();
   });
   it('disabled engineer falls back with audit; accepted work remains assigned',async()=>{
     rows.set(1,offer());cache.staffMembers.get('a')!.active=false;
