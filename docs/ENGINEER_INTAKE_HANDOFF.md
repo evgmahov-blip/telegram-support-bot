@@ -1,0 +1,124 @@
+# Передача в AOR: ручной ввод инженером и связь с клиентом
+
+Task: ainok-support-bot-engineer-intake-20261111, revision 0.
+Доверенный checkpoint: dbe033e93c4db8a28a874ab55c0d462b78b08ae1.
+Статус: локальная реализация; production не активирован. Commit создаёт AOR.
+
+## Восстановленный дефект
+
+После приватной маршрутизации личная главная вызывала staffList('mine') без
+входа в мастер. tm:manual отклонял личный чат; mi допускал только рабочую тему.
+startDraft записывал staffchat_id вместо фактического чата, handleTextInput
+отклонял личный ввод. Исправлены меню, callback-маршрут, область ввода и чат черновика.
+
+Сверка актуального релиза, живой конфигурации, открытых задач и кандидатов
+НЕ выполнена: в редакторской сессии нет интерфейса AOR, gh не установлен.
+Публичное чтение GitHub не дало актуальной ветки; кэшированная страница PR
+не является доказательством текущего состояния. История PR #18–22/#43
+принимается только как контекст пользователя, не как проверенная remote history.
+Не созданы новая задача, PR или release. До дальнейшего продвижения AOR должен
+сверить эквивалентные активные работы и использовать существующего кандидата.
+
+## Реализация
+
+- Существующие мастер, Mongo-черновик, CAS версии, предпросмотр и идемпотентный
+  createManualTicket сохранены. Новые черновики: источник → описание →
+  необязательный контакт → клиент → предпросмотр. Старые открытые черновики
+  сохраняют прежний порядок шагов. Личная главная содержит «Создать заявку».
+- Выбор клиента — постраничный выбор профиля ClientProfile по стабильному _id
+  с отдельным подтверждением. Доступны только профили, имеющие заявки,
+  видимые текущему активному сотруднику по действующим правилам own/common/
+  offered и supervisor/admin. Это не глобальный каталог клиентов.
+- Текст «Кто обратился» и контакт остаются справочными, ничего не связывают.
+  «Без клиента» позволяет пропустить имя. Телефон/Почта/Лично/Другое сохранены.
+- Групповой мастер действует в прежней настроенной теме. Выбор профиля
+  переносит тот же версионированный черновик в личный чат сотрудника.
+  Старые групповые кнопки после переноса отклоняются. Если DM недоступен,
+  открыть бот через /start и начать новый мастер; клиентские данные в группу
+  в качестве fallback не отправляются.
+- В карточках активных и закрытых заявок есть прямой вход в привязку.
+  Групповой вход продолжает работу через личный чат. Изменять связь может
+  владелец/руководитель/администратор; автор непринятой ручной заявки также
+  может привязать её. Чтение карточки само по себе права изменения не даёт.
+- linked_client_id отделён от userid/messenger и organization_ref.
+  client_link_audit хранится атомарно с изменением связи и включён только
+  в staff timeline. CAS учитывает updated_at, владельца и видимость.
+  Повторная запись не добавляет второй аудит и не меняет номер заявки.
+- Проверка организации — отдельный вход в существующий cfg:bindings.
+  Для agent показано объяснение необходимости администратора.
+  client-organization-binding.ts, owner и manage_team не расширены.
+  Неподключённый owner по-прежнему не позволяет подтверждать организацию.
+- Создание/привязка не вызывают клиентскую доставку. Manual messenger и
+  синтетический MANUAL: userid сохраняются даже при известном профиле.
+  Обычная Telegram-доставка не перенаправляется на linked_client_id.
+
+## Проверки
+
+Итоговый локальный прогон на Node v24.22.2: TypeScript build прошёл,
+68 suites / 827 tests прошли. Команды:
+`npm exec --yes --package=node@24 -- node node_modules/typescript/bin/tsc`;
+`NODE_ENV=test npm exec --yes --package=node@24 -- node node_modules/jest/bin/jest.js --detectOpenHandles --forceExit --runInBand`.
+Зависимости установлены через `npm ci --ignore-scripts --no-audit --no-fund`;
+нативные runtime-зависимости этим не проверены. Контрольные суммы исходников,
+тестов и передачи: ENGINEER_INTAKE_CANDIDATE.sha256. Это file manifest,
+не release SHA и не аттестация CI.
+Профильные тесты покрывают личный ввод с подтверждённым клиентом, почту без
+клиента/контакта, перенос группового черновика, старые кнопки, повторное создание,
+потерю роли/владельца/scope, стабильный ID, атомарный аудит и сохранение транспорта.
+Тесты используют моки; это НЕ Telegram-приёмка и НЕ подтверждение живой MongoDB.
+
+## Следующий разрешённый переход AOR
+
+1. Сверить фактический release/config в разрешённом read-only контуре AOR и
+   открытые задачи/кандидатов; присоединить эту реализацию к эквивалентной работе.
+2. Материализовать точный Git-кандидат штатно, провести независимое ревью
+   и обязательный MOST Core CI (.github/workflows/most-core-ci.yml, Node 24).
+   Ни локальная сборка, ни эта записка не заменяют approve или required CI.
+3. В изолированной Telegram/MongoDB-инсталляции на синтетических данных:
+   - инженер: /start → «Создать заявку» → Телефон → описание → контакт/пропуск
+     → выбрать доступный профиль → подтвердить → предпросмотр → создать;
+   - Почта → описание → пропуск → Без клиента → создать; взять заявку при
+     необходимости → карточка → Привязать клиента → выбрать → подтвердить;
+   - из рабочей темы повторить вход, затем приватный выбор; проверить неверную
+     тему, постороннего, другого инженера без scope, отзыв роли/владения между
+     выбором и подтверждением, старые кнопки и повтор подтверждения;
+   - обновить карточку и перезапустить изолированный бот: номер, источник,
+     автор, связь и staff history должны сохраниться;
+   - обычная клиентская Telegram-заявка: ответ приходит прежнему адресату;
+     создание и привязка ручных заявок не посылают ничего клиенту;
+   - проверить cfg:bindings: agent не подтверждает организацию, admin использует
+     существующий owner-процесс с явной проверкой; отсутствие owner не обходится.
+4. Приложить реальные Telegram/MongoDB, review и exact-SHA CI evidence к AOR.
+   Текущее состояние AOR редактор НЕ изменял.
+
+## Обратимая активация после отдельного решения владельца
+
+Production запрещён в редакторском scope. После выполнения предыдущих пунктов
+владелец отдельно принимает штатное решение о релизе и активации exact SHA.
+Штатный deploy должен записать предыдущий release SHA, проверить materialized
+tree кандидата и использовать существующий механизм активации AOR.
+
+Изменения схемы добавочные: миграция и переписывание живых данных не требуются.
+Откат — штатное возвращение предыдущего release; новые поля/аудит не удалять,
+старые версии их игнорируют. Существующие номера, userid/messenger, история
+и organization bindings при откате не переписываются.
+
+Проверка фактического production-меню/сценария и любые сообщения в живые чаты
+выполняются только в отдельно разрешённом владельцем объёме. Для сценарных
+проверок предпочтителен изолированный бот. До такого решения никакая активация,
+изменение живых данных или отправка в живой чат редактором не производится.
+
+## Combined candidate repair (2026-11-11)
+
+This handoff now describes the combined working-tree candidate. Sources retained:
+- PR #45, branch `agent/ainok-support-bot-engineer-intake-20261111`, SHA `8ffe0a9906556718d3da625254c678b661696318`, original editor Codex.
+- PR #44, branch `agent/ainok-support-bot-return-to-common-20261111`, SHA `f4169be8036a4ab537d49c3a6489953e16e39906`, original editor Claude.
+- Trusted clean base: `dbe033e93c4db8a28a874ab55c0d462b78b08ae1`.
+
+All 19 supplied source hashes matched before copying. Unique files were copied unchanged first; `src/db.ts` and `src/ticket-ui.ts` were merged with diff3 against the clean base. The UI conflict preserves both the exported staff surface helper and common-return publishing.
+
+Repairs: client-link CAS matches legacy missing/false visibility with `$ne: true`, true visibility with equality, and null/missing assignment with Mongo null equality. Existing ticket ACL and accessible-client checks remain. Common-return publishing checks the ticket for null before accessing its card binding and captures the notice in a local const.
+
+Regression coverage added for visibility predicates, null/missing assignment, visibility/assignment races after ACL reads, and a missing ticket during common-return publishing. Existing common-return delivery tests cover staff chat/topic addressing, permissions, duplicates and retries without production tickets. No real MongoDB harness was found in the local test sources; persistence tests use mocked Mongoose. The raw stored legacy-document scenario still requires real MongoDB verification by CI/review.
+
+Local execution: `npm run build`, targeted intake/binding/visibility/routing/common-return tests, and `npm test` were attempted. They could not run because local dependencies are absent (`tsc: not found`, `jest: not found`). No network installation attempted. The existing MOST Core GitHub CI must run build and full Jest suite on the final candidate SHA. Independent review, publication, release gates and activation belong to AOR; no commit, push, live changes or production test ticket were made by the editor.
