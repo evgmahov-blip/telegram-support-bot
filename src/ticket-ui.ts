@@ -10,6 +10,7 @@ import { Context, Messenger } from './interfaces';
 import { ISupportee } from './db';
 import * as ticketAudit from './ticket-audit';
 import * as manualIntake from './manual-intake';
+import * as ticketClient from './ticket-client-binding';
 import * as staffNameEditor from './staff-name-editor';
 import * as resolutionCase from './ticket-resolution-case';
 import { staffDisplayName } from './staff-names';
@@ -33,6 +34,7 @@ const USER_HOME: Button = { text: '🏠 Главная', callback_data: 'um:home
 const statusName: Record<string, string> = { open: 'Открыт', waiting_user: 'Ждём клиента', closed: 'Закрыт' };
 const priorityName: Record<string, string> = { low: 'Низкий', normal: 'Обычный', high: 'Высокий', urgent: 'Срочный' };
 const eventName: Record<string, string> = {
+  'ticket.client_linked': 'Установлена связь заявки с профилем клиента',
   'ticket.closed': 'Заявка закрыта', 'ticket.reopened': 'Заявка открыта снова',
   'ticket.taken': 'Заявка взята в работу', 'ticket.assigned': 'Назначен инженер',
   'ticket.transferred': 'Заявка передана', 'ticket.waiting': 'Ожидание клиента',
@@ -49,6 +51,7 @@ const LIST_VIEWS = new Set(['new', 'mine', 'offered', 'common', 'active', 'close
 
 /** Event label for history rows; bounded numbers only, no free text from metadata. */
 function eventLabel(type: string, metadata?: Record<string, any>): string {
+  if (type === 'ticket.client_linked') return 'Связь с профилем клиента: ' + String(metadata?.client_id || '—');
   const version = Number(metadata?.resolution_version ?? metadata?.version);
   const suffix = Number.isSafeInteger(version) && version > 0 ? ` (решение, версия ${version})` : '';
   if (type === 'ticket.closed') return `Заявка закрыта${suffix}`;
@@ -115,6 +118,8 @@ async function staffButtons(t: ISupportee) {
   if (t.status === 'closed') {
     const saved = typeof db.getTicketResolution === 'function' && await db.getTicketResolution(id);
     return kb([
+    ...(!t.linked_client_id ? [[{ text: 'Привязать клиента', callback_data: `cl:list:${id}:0` }]] : []),
+    [{ text: 'Проверка организации профиля', callback_data: `cl:org:${id}` }],
     [{ text: '📜 История', callback_data: `tc:h:${id}:0` }, { text: '🔓 Вернуть в работу', callback_data: `tc:reopen:${id}` }],
     [{ text: saved ? '📘 Решение' : '💾 Сохранить решение', callback_data: `rs:${saved ? 'view' : 'start'}:${id}` }],
     ...(t.ai_engineer ? [[{ text: 'Заключение ИИ', callback_data: `ae:view:${id}` }]] : []),
@@ -126,6 +131,8 @@ async function staffButtons(t: ISupportee) {
     [...(!t.assigned_to ? [{ text: '🙋 Взять', callback_data: `tc:take:${id}` }] : []), { text: isManualTicket(t) ? '📝 Записать ответ' : '✉️ Написать клиенту', callback_data: `tc:reply:${id}` }],
     [{ text: t.status === 'waiting_user' ? '▶️ Продолжить работу' : '⏳ Ждём клиента', callback_data: `tc:${t.status === 'waiting_user' ? 'resume' : 'wait'}:${id}` }, { text: '👤 Передать', callback_data: `tc:transfer:${id}` }],
     [{ text: '📜 История', callback_data: `tc:h:${id}:0` }, { text: '📝 Заметка', callback_data: `tc:note:${id}` }],
+    ...(!t.linked_client_id ? [[{ text: 'Привязать клиента', callback_data: `cl:list:${id}:0` }]] : []),
+    [{ text: 'Проверка организации профиля', callback_data: `cl:org:${id}` }],
     [{ text: '🔒 Закрыть', callback_data: `tc:closeask:${id}` }],
     ...(t.assigned_to ? [[t.common_visible
       ? { text: '🔒 Сделать личной', callback_data: `tc:unshare:${id}` }
@@ -175,6 +182,7 @@ export async function cardText(ticket: ISupportee, viewerId?: string, publicCard
     viewerId && ticket.assigned_to === viewerId ? '🔵 Моя' : visibility.isCommonTicket(ticket) ? '🟢 Общая' : '',
     manual && ticket.manual_source ? `Источник: ${e(MANUAL_SOURCE_LABELS[ticket.manual_source] || 'Другое')}` : '',
     `Клиент: ${e(client)}`,
+    `Связь с профилем: ${e(ticket.linked_client_id || 'без клиента')} (не адрес доставки)`,
     ticket.declared_organization ? `Организация (со слов клиента): ${e(ticket.declared_organization)}` : '',
     ticket.organization_ref && ticket.organization_binding_version ? 'Привязка организации: подтверждена человеком' : 'Привязка организации: не подтверждена',
     manual && ticket.external_contact ? `Контакт: ${e(ticket.external_contact)}` : '',
@@ -259,7 +267,67 @@ export async function refreshStaffCard(ticketId: number): Promise<void> {
   }
 }
 
-function staffSurface(ctx: Context): boolean {
+const NOTICE_ATTEMPTS = 5;
+const NOTICE_CLAIM_MS = 60_000;
+/** Telegram answered with an error, so the message definitely was not posted; network failures stay ambiguous. */
+const rejectedByTelegram = (err: unknown) => Number.isInteger((err as { error_code?: number })?.error_code);
+
+/**
+ * Refreshes the canonical card and publishes the pending «returned to common» record.
+ * A newly created common card is itself the record; an edited old card is not, so a
+ * separate number-only notice goes to the configured staff chat/topic. Success needs a
+ * Telegram message id; Telegram rejections retry, ambiguous results never auto-repeat.
+ */
+export async function publishCommonReturn(ticketId: number): Promise<void> {
+  let claimed: ISupportee | null = null;
+  try {
+    const ticket = typeof db.claimCommonReturnNotice === 'function' ? await db.getTicketById(ticketId, null) : null;
+    if (ticket) {
+      const notice = ticket.common_return_notice;
+      if (notice?.state === 'pending') {
+        const prior = notice.prior_card !== undefined ? notice.prior_card : ticket.staff_card_message_id ?? null;
+        claimed = await db.claimCommonReturnNotice(ticketId, notice.key, prior);
+      }
+    }
+  } catch (err) { log.error(`Не удалось занять запись о возврате #T${ticketId}:`, err); }
+  await refreshStaffCard(ticketId);
+  if (!claimed) return;
+  const { key, attempts = 0, prior_card: prior = null } = claimed.common_return_notice!;
+  try {
+    const current = await db.getTicketById(ticketId, null);
+    if (current?.common_return_notice?.key !== key) return; // A newer transition owns the record now.
+    if (!visibility.isCommonTicket(current) || current.status === 'closed') {
+      await db.settleCommonReturnNotice(ticketId, key, 'superseded'); return;
+    }
+    if (current.staff_card_message_id && current.staff_card_message_id !== prior) {
+      await db.settleCommonReturnNotice(ticketId, key, 'sent', { message_id: current.staff_card_message_id, via: 'card' }); return;
+    }
+    let messageId: string | null = null, definite = true;
+    try {
+      // Number and action only: pre-return conversation, files and contacts stay private.
+      messageId = await middleware.sendMessage(cache.config.staffchat_id, cache.config.staffchat_type,
+        `♻️ <b>Заявка возвращена в общие</b>\nЗаявка № ${ticketId}`, { parse_mode: 'HTML', disable_notification: false,
+          reply_markup: kb([[{ text: 'Открыть заявку', callback_data: `tc:open:${ticketId}:n` }]]) });
+    } catch (err) {
+      definite = rejectedByTelegram(err);
+      log.error(`Запись о возврате #T${ticketId} не доставлена${definite ? '' : ' (результат неизвестен)'}:`, err);
+    }
+    if (messageId) await db.settleCommonReturnNotice(ticketId, key, 'sent', { message_id: Number(messageId), via: 'notice' });
+    else if (!definite) await db.settleCommonReturnNotice(ticketId, key, 'unknown');
+    else await db.settleCommonReturnNotice(ticketId, key, attempts + 1 >= NOTICE_ATTEMPTS ? 'failed' : 'pending', { attempts: attempts + 1 });
+  } catch (err) {
+    log.error(`Не удалось опубликовать возврат #T${ticketId}:`, err);
+  }
+}
+
+/** Periodic recovery through the workflow loop; the per-key claim prevents duplicate posts. */
+export async function recoverCommonReturns(): Promise<void> {
+  if (typeof db.listPendingCommonReturnNotices !== 'function') return;
+  await db.expireCommonReturnNoticeClaims(new Date(Date.now() - NOTICE_CLAIM_MS));
+  for (const id of await db.listPendingCommonReturnNotices(50)) await publishCommonReturn(id);
+}
+
+export function staffSurface(ctx: Context): boolean {
   const q = ctx.callbackQuery.message;
   if (!ctx.session.admin || !team.getStaffRole(ctx.from.id.toString()) || !q) return false;
   if (String(q.chat.id) !== String(cache.config.staffchat_id)) return false;
@@ -300,7 +368,8 @@ export async function answerForTicket(ctx: Context, ticket: ISupportee, text: st
   return answerPrivately(ctx, text, rows);
 }
 
-export async function answer(ctx: Context, text: string, rows: Button[][], visibleFlow = false) {
+/** keepClicked: the clicked message is a feed record that must stay visible, like the canonical card. */
+export async function answer(ctx: Context, text: string, rows: Button[][], visibleFlow = false, keepClicked = false) {
   ({ text, rows } = renderClassic({ bodyHtml: text, buttons: rows }));
   const q = ctx.callbackQuery?.message;
   if (q) {
@@ -309,7 +378,7 @@ export async function answer(ctx: Context, text: string, rows: Button[][], visib
       const canonical = correlated?.staff_card_message_id === q.message_id
         && String(correlated.staff_card_chat_id) === String(q.chat.id)
         && (correlated.staff_card_thread_id || null) === (q.message_thread_id || null);
-      if (!canonical) {
+      if (!canonical && !keepClicked) {
         await editRendered(q.chat.id, q.message_id, text, rows);
         boundedSet(navigationPanels, panelKey(ctx), q.message_id);
         return;
@@ -402,7 +471,7 @@ async function staffList(ctx: Context, view: db.StaffListView, page: number) {
   const list = checked.filter((t): t is ISupportee => Boolean(t && visibility.canViewTicket(actor, t)
     && (privateSurface || toPrivate || visibility.isCommonTicket(t))));
   const rows: Button[][] = list.map(t => [{ text: (privateSurface || toPrivate ? (t.routing?.state === 'offered' ? 'Ожидает принятия · ' : t.assigned_to === actor ? '🔵 Моя · ' : visibility.isCommonTicket(t) ? '🟢 Общая · ' : '') : '') + `#${t.ticketId} · ${statusName[t.status]} · ${boundedText(t.category || 'Общая', 18)}${isManualTicket(t) ? ' · вручную' : ''}`, callback_data: `tc:open:${t.ticketId}` }]);
-  if (privateSurface || toPrivate) rows.unshift(...await dashboardTabs(actor, scope, view));
+  if (privateSurface || toPrivate) rows.unshift([{ text: '📝 Создать заявку', callback_data: 'tm:manual:0' }], ...await dashboardTabs(actor, scope, view));
   const nav: Button[] = [];
   if (page > 0) nav.push({ text: '◀️', callback_data: `tm:${view}:${page-1}` });
   if (more) nav.push({ text: '▶️', callback_data: `tm:${view}:${page+1}` });
@@ -560,7 +629,6 @@ export async function handleCallback(ctx: Context): Promise<boolean> {
     }
     if (!privateStaff && !staffSurface(ctx)) { await ctx.answerCbQuery('Недоступно вне рабочей группы/темы.', true); return true; }
     if (p[1] === 'manual') {
-      if (privateStaff) { await ctx.answerCbQuery('Ручная заявка создаётся в рабочей группе.', true); return true; }
       return await manualIntake.startDraft(ctx);
     }
     const view = (LIST_VIEWS.has(p[1]) ? p[1] : 'common') as db.StaffListView;
@@ -594,9 +662,10 @@ export async function handleCallback(ctx: Context): Promise<boolean> {
     return resolutionCase.handleCallback(ctx, p);
   }
   if (p[0] === 'mi') {
-    if (!staffSurface(ctx)) { await ctx.answerCbQuery('Недоступно вне рабочей группы/темы.', true); return true; }
+    if (!staffSurface(ctx) && !isStaffPrivate(ctx)) { await ctx.answerCbQuery('Недоступно вне рабочей группы/темы.', true); return true; }
     return await manualIntake.handleDraftCallback(ctx, p);
   }
+  if (p[0] === 'cl') return ticketClient.handleCallback(ctx, p);
   if (p[0] !== 'tc') return false;
   const privateStaff = isStaffPrivate(ctx);
   if (!privateStaff && !staffSurface(ctx)) { await ctx.answerCbQuery('Недоступно вне рабочей группы/темы.', true); return true; }
@@ -648,7 +717,9 @@ export async function handleCallback(ctx: Context): Promise<boolean> {
       [{ text: '🔄 Обновить', callback_data: `tc:open:${id}` }, { text: '📜 История', callback_data: `tc:h:${id}:0` }],
       [{ text: '⬅️ Назад', callback_data: closed ? 'tm:closed:0' : 'tm:common:0' }, STAFF_HOME]];
     if (!await visibility.freshTicket(current)) { await acknowledge(ctx, 'Заявка изменилась.', true); return true; }
-    if (privateStaff || visibility.isCommonTicket(current)) await answer(ctx, text, rows);
+    // «Открыть заявку» on a return record opens a fresh panel; the record stays in the feed for others.
+    const fromNotice = p[3] === 'n' && !privateStaff;
+    if (privateStaff || visibility.isCommonTicket(current)) await answer(ctx, text, rows, fromNotice, fromNotice);
     else await answerForTicket(ctx, current, text, rows);
     return true;
   }
@@ -786,7 +857,7 @@ export async function handleCallback(ctx: Context): Promise<boolean> {
     if (ticket.pending_reply_version != null && !cleared) { await ctx.answerCbQuery('Эта кнопка отмены устарела.', true); return true; }
   }
   else { await ctx.answerCbQuery('Действие недоступно или нет прав.', true); return true; }
-  await refreshStaffCard(id);
+  if (action === 'share') await publishCommonReturn(id); else await refreshStaffCard(id);
   // close/xfer/cancel arrive from transient panels: replace their now-spent buttons with navigation.
   if (!canonicalBinding && (privateStaff || visibility.isCommonTicket(ticket))) await answer(ctx, `${doneText[action] || 'Готово.'} № ${id}`, [[{ text: '⬅️ К заявке', callback_data: `tc:open:${id}` }, STAFF_HOME]]);
   if (action === 'take') {

@@ -53,11 +53,12 @@ Promise<import('./routing-contract').RoutingPlan> {
   } catch { return common('organization_or_schedule_unavailable'); }
 }
 /** Version, owner and active-state CAS. Audit outbox and transition commit in the same owner row. */
-async function cas(ticket: ISupportee, next: TicketRouting, assigned: string | null): Promise<ISupportee | null> {
+async function cas(ticket: ISupportee, next: TicketRouting, assigned: string | null,
+  extra: Record<string, unknown> = {}): Promise<ISupportee | null> {
   if ((assigned && !activeEngineer(assigned)) || (next.state === 'offered' && (!next.offered_to || !activeEngineer(next.offered_to)))) return null;
   return await db.Supportee.findOneAndUpdate({ ticketId: ticket.ticketId, status: active,
     assigned_to: ticket.assigned_to ?? null, 'routing.version': ticket.routing!.version },
-  authorityUpdate({ routing: next, assigned_to: assigned, common_visible: false }), { new: true }) as ISupportee | null;
+  authorityUpdate({ routing: next, assigned_to: assigned, common_visible: false, ...extra }), { new: true }) as ISupportee | null;
 }
 export async function routingCommand(ticketId: number, actor: string, expectedVersion: number,
   action: 'take' | 'common' | 'transfer', target?: string, now = new Date()): Promise<ISupportee | null> {
@@ -74,9 +75,11 @@ export async function routingCommand(ticketId: number, actor: string, expectedVe
   }
   if (!manager && recipient !== actor) return null;
   if (action === 'common' || (action === 'transfer' && r.transfers >= MAX_OFFER_TRANSFERS)) {
+    // An explicit return commits its shared-feed record in the same CAS as the transition.
     return cas(t, audit({ ...r, state: 'common', version: r.version + 1, offered_to: null,
       deadline_at: null, reminder_at: null, reminder: 'disabled' }, 'ticket.routing_common', actor,
-    action === 'common' ? 'explicit_common' : 'transfer_limit', recipient, null, now), null);
+    action === 'common' ? 'explicit_common' : 'transfer_limit', recipient, null, now), null,
+    action === 'common' ? { common_return_notice: { key: 'r' + (r.version + 1), state: 'pending', at: now, attempts: 0 } satisfies db.CommonReturnNotice } : {});
   }
   if (!target || target === recipient || !activeEngineer(target)) return null;
   let policy = r.policy, deadline = r.deadline_at, first = r.first_offered_at, reminderAt = r.reminder_at;

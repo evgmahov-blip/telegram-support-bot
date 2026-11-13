@@ -66,6 +66,8 @@ export interface ISupportee extends mongoose.Document {
   pending_action_actor_id: string | null;
   pending_new_request: boolean;
   // Manual external tickets (phone/email/in-person): staff-only intake data, no client transport.
+  linked_client_id?: string | null;
+  client_link_audit?: Array<Record<string, unknown>>;
   manual_source: ManualSource | null;
   external_client: string | null;
   external_contact: string | null;
@@ -77,6 +79,8 @@ export interface ISupportee extends mongoose.Document {
   // Explicit common visibility for an owned ticket; unassigned tickets are always common.
   common_visible: boolean;
   common_visible_since?: Date | null;
+  // Durable feed record for the latest explicit return to the common queue.
+  common_return_notice?: CommonReturnNotice | null;
   // Resolution version written for the closure that produced the current closed state.
   closure_resolution_version: number | null;
   routing?: import('./routing-contract').TicketRouting | null;
@@ -84,6 +88,18 @@ export interface ISupportee extends mongoose.Document {
   organization_owner_version?: number | null;
   organization_binding_version?: number | null;
 }
+
+/**
+ * pending → sending → sent | pending (Telegram rejected, retried) | unknown (no auto-repeat) | failed | superseded.
+ * prior_card is the canonical card known at the first claim: a different card proves a new visible record.
+ */
+export type CommonReturnNotice = {
+  key: string; state: 'pending' | 'sending' | 'sent' | 'unknown' | 'failed' | 'superseded';
+  at: Date; attempts: number; prior_card?: number | null; claimed_at?: Date | null;
+  message_id?: number | null; via?: 'card' | 'notice' | null;
+};
+export const commonReturnNotice = (key: string, at: Date): CommonReturnNotice =>
+  ({ key, state: 'pending', at, attempts: 0 });
 
 export type ManualSource = 'phone' | 'email' | 'in_person' | 'other';
 export const MANUAL_SOURCES: ManualSource[] = ['phone', 'email', 'in_person', 'other'];
@@ -127,6 +143,8 @@ export const SupporteeSchema = new mongoose.Schema<ISupportee>({
   pending_action_expires_at: { type: Date, default: null },
   pending_action_actor_id: { type: String, default: null },
   pending_new_request: { type: Boolean, default: false },
+  linked_client_id: { type: String, default: null },
+  client_link_audit: { type: [mongoose.Schema.Types.Mixed], default: [] },
   manual_source: { type: String, enum: MANUAL_SOURCES, default: null },
   external_client: { type: String, default: null },
   external_contact: { type: String, default: null },
@@ -135,6 +153,7 @@ export const SupporteeSchema = new mongoose.Schema<ISupportee>({
   declared_organization: { type: String, default: null },
   common_visible: { type: Boolean, default: false },
   common_visible_since: { type: Date, default: null },
+  common_return_notice: { type: mongoose.Schema.Types.Mixed, default: null },
   closure_resolution_version: { type: Number, default: null },
   routing: { type: mongoose.Schema.Types.Mixed, default: null },
   organization_ref: { type: mongoose.Schema.Types.Mixed, default: null },
@@ -341,11 +360,13 @@ export interface IManualIntakeDraft extends mongoose.Document {
   source: ManualSource | null;
   prompt_message_id: number | null;
   confirm_nonce: string | null;
+  linked_client_id?: string | null;
   client: string | null;
   contact: string | null;
   description: string | null;
   ticketId: number | null;
   last_consumed_message_id: number | null;
+  client_after_contact?: boolean;
   edit_return: boolean;
   expires_at: Date;
   purge_at: Date;
@@ -362,11 +383,13 @@ const ManualIntakeDraftSchema = new mongoose.Schema<IManualIntakeDraft>({
   source: { type: String, enum: MANUAL_SOURCES, default: null },
   prompt_message_id: { type: Number, default: null },
   confirm_nonce: { type: String, default: null },
+  linked_client_id: { type: String, default: null },
   client: { type: String, default: null },
   contact: { type: String, default: null },
   description: { type: String, default: null },
   ticketId: { type: Number, default: null },
   last_consumed_message_id: { type: Number, default: null },
+  client_after_contact: { type: Boolean, default: false },
   edit_return: { type: Boolean, default: false },
   expires_at: { type: Date, required: true },
   purge_at: { type: Date, required: true },
@@ -766,7 +789,44 @@ export async function countStaffTickets(view: StaffListView, actorId: string, sc
 /** Owner-guarded explicit common visibility change; null when owner or value changed. */
 export async function setTicketCommonVisibility(ticketId: number, common: boolean, expectedOwner: string) {
   const filter: Record<string, unknown> = { ticketId, assigned_to: expectedOwner, common_visible: common ? { $ne: true } : true };
-  return await Supportee.findOneAndUpdate(filter, authorityUpdate({ common_visible: common, common_visible_since: common ? new Date() : null }), { new: true }) as ISupportee | null;
+  const now = new Date();
+  // The feed record is committed with the transition itself, so a crash cannot lose it.
+  return await Supportee.findOneAndUpdate(filter, authorityUpdate({ common_visible: common, common_visible_since: common ? now : null,
+    ...(common ? { common_return_notice: commonReturnNotice('s' + now.getTime(), now) } : {}) }), { new: true }) as ISupportee | null;
+}
+
+/** Exclusive publication claim for one notice key; the first claim pins prior_card. */
+export async function claimCommonReturnNotice(ticketId: number, key: string, priorCard: number | null) {
+  return await Supportee.findOneAndUpdate(
+    { ticketId, 'common_return_notice.key': key, 'common_return_notice.state': 'pending' },
+    { $set: { 'common_return_notice.state': 'sending', 'common_return_notice.claimed_at': new Date(),
+      'common_return_notice.prior_card': priorCard } },
+    { new: true },
+  ) as ISupportee | null;
+}
+
+/** Settles only the exact claimed key; a newer transition's notice is never touched. */
+export async function settleCommonReturnNotice(ticketId: number, key: string, state: CommonReturnNotice['state'],
+  fields: { attempts?: number; message_id?: number | null; via?: CommonReturnNotice['via'] } = {}) {
+  const set: Record<string, unknown> = { 'common_return_notice.state': state, 'common_return_notice.claimed_at': null };
+  for (const [name, value] of Object.entries(fields)) set[`common_return_notice.${name}`] = value;
+  return await Supportee.findOneAndUpdate(
+    { ticketId, 'common_return_notice.key': key, 'common_return_notice.state': 'sending' }, { $set: set }, { new: true },
+  ) as ISupportee | null;
+}
+
+/** A claim abandoned by a crash may already have been delivered: settle it as unknown, never resend. */
+export async function expireCommonReturnNoticeClaims(olderThan: Date): Promise<void> {
+  await Supportee.updateMany(
+    { 'common_return_notice.state': 'sending', 'common_return_notice.claimed_at': { $lt: olderThan } },
+    { $set: { 'common_return_notice.state': 'unknown', 'common_return_notice.claimed_at': null } },
+  );
+}
+
+export async function listPendingCommonReturnNotices(limit: number): Promise<number[]> {
+  const rows = await Supportee.find({ 'common_return_notice.state': 'pending' }, { ticketId: 1 })
+    .sort({ ticketId: 1 }).limit(limit).lean();
+  return rows.map(row => row.ticketId);
 }
 
 export async function claimStaffCard(ticketId: number, claim: string) {
@@ -998,7 +1058,7 @@ const OPEN_DRAFT_STATES: ManualDraftStatus[] = ['source', 'input', 'form', 'prev
 export async function startManualDraft(token: string, actorId: string, chatId: string, threadId: number | null, expiresAt: Date) {
   await ManualIntakeDraft.updateMany({ actor_id: actorId, status: { $in: OPEN_DRAFT_STATES } }, { $set: { status: 'cancelled' } });
   return await ManualIntakeDraft.create({ token, actor_id: actorId, chat_id: chatId, thread_id: threadId,
-    status: 'source', step: null, version: 0, expires_at: expiresAt, purge_at: new Date(Date.now() + DRAFT_PURGE_MS) });
+    status: 'source', step: null, version: 0, client_after_contact: true, expires_at: expiresAt, purge_at: new Date(Date.now() + DRAFT_PURGE_MS) });
 }
 
 export async function findActiveManualDraft(actorId: string, chatId: string, threadId: number | null) {
@@ -1042,7 +1102,7 @@ export async function consumeManualDraftInput(token: string, actorId: string, ch
         { last_consumed_message_id: { $exists: false } }, { last_consumed_message_id: null },
         { last_consumed_message_id: { $lt: messageId } },
       ] },
-    { $set: { [field]: value, step: nextStep, status: nextStep ? 'input' : 'preview',
+    { $set: { [field]: value, ...(step === 'client' ? { linked_client_id: null } : {}), step: nextStep, status: nextStep ? 'input' : 'preview',
       last_consumed_message_id: messageId, confirm_nonce: nextStep ? null : String(version + 1), edit_return: false, expires_at: expiresAt }, $inc: { version: 1 } },
     { new: true },
   ) as IManualIntakeDraft | null;
@@ -1109,7 +1169,7 @@ export async function cancelManualDraft(token: string, actorId: string, version?
  * namespace, so no transport can ever address it.
  */
 export async function createManualTicket(requestKey: string, input: {
-  source: ManualSource; client: string; contact: string | null; description: string; createdBy: string;
+  source: ManualSource; client: string; contact: string | null; description: string; createdBy: string; linkedClientId?: string | null;
 }): Promise<{ ticket: ISupportee; created: boolean }> {
   let ticket = await Supportee.findOne({ manual_request_key: requestKey }) as ISupportee | null;
   let created = false;
@@ -1119,6 +1179,8 @@ export async function createManualTicket(requestKey: string, input: {
     try {
       ticket = await Supportee.create({
         ticketId, userid: `${MANUAL_USER_PREFIX}${randomUUID()}`, messenger: Messenger.MANUAL, status: 'open',
+        linked_client_id: input.linkedClientId ?? null,
+        client_link_audit: input.linkedClientId ? [{ actor: input.createdBy, at: new Date(), from: null, to: input.linkedClientId }] : [],
         category: null, name: input.client, manual_source: input.source, external_client: input.client,
         external_contact: input.contact, created_by: input.createdBy, manual_request_key: requestKey,
       }) as unknown as ISupportee;
@@ -1466,6 +1528,11 @@ export async function getTicketTimelinePage(ticketId: number, page: number, page
       { $project: { at: '$timestamp', kind: { $literal: 'event' }, actor: '$agent_id', text: '$type', metadata: 1 } },
     ] } },
   ];
+  if (includeNotes) pipeline.push({ $unionWith: { coll: Supportee.collection.name, pipeline: [
+    { $match: { ticketId } }, { $unwind: '$client_link_audit' },
+    { $project: { at: '$client_link_audit.at', kind: { $literal: 'event' }, actor: '$client_link_audit.actor',
+      text: { $literal: 'ticket.client_linked' }, metadata: { client_id: '$client_link_audit.to' } } },
+  ] } });
   if (includeNotes) pipeline.push({ $unionWith: { coll: InternalNote.collection.name, pipeline: [
     { $match: { ticketId } },
     { $project: { at: '$timestamp', kind: { $literal: 'note' }, actor: '$author_id', text: 1, metadata: { $literal: {} } } },

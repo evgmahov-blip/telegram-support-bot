@@ -61,6 +61,17 @@ describe('manual ticket persistence', () => {
     expect(JSON.stringify(mockEvents)).not.toContain('Ромашка');
   });
 
+  it('persists an explicit client link separately from the manual transport and retains the creation author', async () => {
+    const { ticket } = await db.createManualTicket('linked', { ...input, linkedClientId: '0123456789abcdef01234567' });
+    expect(ticket.linked_client_id).toBe('0123456789abcdef01234567');
+    expect(ticket.messenger).toBe('manual');
+    expect(ticket.userid).toMatch(/^MANUAL:/);
+    expect(ticket.client_link_audit).toEqual([{ actor: '42', at: expect.any(Date), from: null, to: '0123456789abcdef01234567' }]);
+    const again = await db.createManualTicket('linked', { ...input, linkedClientId: 'fedcba987654321001234567' });
+    expect(again.ticket.linked_client_id).toBe('0123456789abcdef01234567');
+    expect(again.ticket.ticketId).toBe(ticket.ticketId);
+  });
+
   it('gives every request its own synthetic client id', async () => {
     const a = await db.createManualTicket('tokA', input);
     const b = await db.createManualTicket('tokB', input);
@@ -130,7 +141,7 @@ describe('manual ticket persistence', () => {
     await db.startManualDraft('tok2', '42', '-100', 7, new Date(Date.now() + 1000));
     expect(mockDrafts.updateMany).toHaveBeenCalledWith({ actor_id: '42', status: { $in: ['source', 'input', 'form', 'preview'] } },
       { $set: { status: 'cancelled' } });
-    expect(mockDrafts.create).toHaveBeenCalledWith(expect.objectContaining({ token: 'tok2', actor_id: '42', status: 'source', thread_id: 7 }));
+    expect(mockDrafts.create).toHaveBeenCalledWith(expect.objectContaining({ token: 'tok2', actor_id: '42', status: 'source', thread_id: 7, client_after_contact: true }));
   });
 
   it('advances a wizard step only for the exact version and state', async () => {
