@@ -86,6 +86,19 @@ describe('canary through the existing staff start/confirm path', () => {
       { task_id: draft.task_id, request_id: REQUEST }, expect.objectContaining({ owner: '2', epoch: 3, base_request: null }));
     expect(mockSend).not.toHaveBeenCalled();
   });
+  it('shows failed canary work without offering an unavailable retry', async () => {
+    const job = ai.createTask(ticket, mockPolicy, '2', binding, ai.snapshotInput('Synthetic'), Date.now(),
+      { task_id: '50000000-0000-4000-8000-000000000005', request_id: REQUEST });
+    job.state = 'failed'; job.failure_code = 'model_unavailable'; job.projection_pending = null;
+    ticket.ai_engineer = job;
+    await handleEngineerCallback(ctx, ['ae', 'view', '4242']);
+    const text = String(mockReply.mock.calls[0][1]);
+    const markup = JSON.stringify(mockReply.mock.calls[0][2].reply_markup);
+    expect(text).toContain('Заключение пока недоступно. Можно продолжить вручную.');
+    expect(text).not.toContain('повторить диагностику');
+    expect(markup).not.toContain('ae:rework:');
+    expect(mockSend).not.toHaveBeenCalled();
+  });
   it('offers the start entry only on the admitted ticket and hides rework', async () => {
     expect(engineerOffered({ ticketId: 4242 } as any)).toBe(true);
     expect(engineerOffered({ ticketId: 43 } as any)).toBe(false);
