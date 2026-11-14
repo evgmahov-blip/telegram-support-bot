@@ -53,14 +53,19 @@ export async function sendToStaffPrivate(staffId: string | null | undefined, tex
   }
 }
 
+// Mongoose applies defaults only to undefined fields on hydration. Staff lists
+// are lean, so compare both representations with the same schema defaults.
+// Keep explicit nulls (and every non-default value) distinct for the fence.
+const withDefault = <T>(value: T | undefined, fallback: T): T => value === undefined ? fallback : value;
+
 /** Fresh routing fence: never reuse a stale destination or broaden visibility. */
 export async function freshTicket(ticket: ISupportee): Promise<ISupportee | null> {
   const current = await db.getTicketById(ticket.ticketId, null);
-  if (!current || current.assigned_to !== ticket.assigned_to
+  if (!current || withDefault(current.assigned_to, null) !== withDefault(ticket.assigned_to, null)
     || current.status !== ticket.status
-    || current.pending_reply_version !== ticket.pending_reply_version
+    || withDefault(current.pending_reply_version, 0) !== withDefault(ticket.pending_reply_version, 0)
     || +new Date(current.common_visible_since ?? 0) !== +new Date(ticket.common_visible_since ?? 0)
-    || current.common_visible !== ticket.common_visible
+    || withDefault(current.common_visible, false) !== withDefault(ticket.common_visible, false)
     || current.routing?.version !== ticket.routing?.version
     || current.routing?.state !== ticket.routing?.state) return null;
   return current;
