@@ -2,6 +2,7 @@ import { Context, Config } from './interfaces';
 import * as db from './db';
 import * as team from './team';
 import cache from './cache';
+import { withStaffAccess } from './staff-access-gate';
 import * as log from './logger'
 
 /**
@@ -25,6 +26,7 @@ async function checkRights(
   config: { categories: Array<{ group_id: number | string; name?: string; subgroups?: Array<{ group_id: number | string; name: string }> }>; staffchat_id: string | number },
 ): Promise<boolean> {
   const { categories, staffchat_id } = config;
+  ctx.session.groupAdmin = undefined;
 
   if (categories) {
     for (const category of categories) {
@@ -66,15 +68,19 @@ async function checkRights(
  * the update regardless of the shape of the returned compatibility record.
  */
 async function checkPermissions(ctx: Context, next: () => any, config: Config) {
+  const changingTeam = /^sn:(apply|undoapply|join):/.test(ctx.callbackQuery?.data || '');
+  return withStaffAccess(changingTeam ? 'write' : 'read', () => checkPermissionsLocked(ctx, next, config));
+}
+async function checkPermissionsLocked(ctx: Context, next: () => any, config: Config) {
   ctx.session.admin = false;
+  ctx.session.staffRole = undefined;
   try {
     const access = await checkRights(ctx, config);
-    if (access) {
-      ctx.session.admin = true;
-      const role = team.getStaffRole(ctx.from.id.toString());
-      if (role) {
-        ctx.session.staffRole = role;
-      }
+    const role = team.getStaffRole(String(ctx.from.id));
+    const privateStaff = ctx.chat.type === 'private' && String(ctx.chat.id) === String(ctx.from.id);
+    if (role && (access || privateStaff)) {
+      ctx.session.admin = true; // Staff surface marker; action-specific guards still apply.
+      ctx.session.staffRole = role;
     }
   } catch (error) {
     log.error('Error checking rights:', error);
