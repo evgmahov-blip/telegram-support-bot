@@ -479,7 +479,7 @@ async function staffList(ctx: Context, view: db.StaffListView, page: number) {
   if (privateSurface || toPrivate) {
     rows.push([{ text: '👁 Пример Rich HTML', callback_data: 'tm:richdemo:0' }]);
     rows.push([{ text: '📂 Все активные', callback_data: 'tm:active:0' }, { text: '✅ Закрытые', callback_data: 'tm:closed:0' }]);
-    if (team.canPerformAction(actor, 'manage_team')) rows.push([{ text: '⚙️ Настройки', callback_data: 'cfg:home' }]);
+    if (team.canPerformAction(actor, 'manage_team')) rows.push([{ text: '👥 Инженеры', callback_data: 'sn:list:0' }], [{ text: '⚙️ Настройки', callback_data: 'cfg:home' }]);
   }
   rows.push([{ text: '🔄 Обновить', callback_data: `tm:${view}:${page}` }, { text: '🏠 Главная', callback_data: 'tm:home:0' }]);
   const pageText = page > 0 || more ? `\nСтраница ${page + 1}` : '';
