@@ -1,6 +1,9 @@
 node_modules/
 test/
 config/config.yaml
+deploy/vm3902/persistent-config/
+deploy/vm3902/config.yaml
+deploy/vm3902/config-backups/
 *.db
 *.log
 .git

@@ -4,7 +4,7 @@ This directory is a reviewed-candidate input for the owner-authorized replacemen
 
 ## Fixed boundaries
 
-- Copy tracked `config-sample.yaml` to ignored `config.yaml`, set mode `0600`, and insert a newly supplied token through the approved secret path. No token is included here and no old bot token may be reused.
+- For a fresh install only, prepare a private source YAML from `config-sample.yaml` and supply a token through the approved secret path. Use `prepare-config.cjs` as described in `PERSISTENCE.md`; existing installations must migrate the current YAML byte-for-byte instead of using the sample. No token is included here and no old bot token may be reused.
 - The deployment IDs are owner `79813552`, staff supergroup `-1003918239593`, and expected bot ID `8932572525`. The owner is the sole configured admin. Any change requires owner verification and a new review.
 - AI, autoreplies, webhooks, optional messengers and both HTTP features are off. Privacy, role checks, lifecycle CAS and append-only history remain in force. There is no ticket-to-AOR integration.
 - Open PR #10 is a separate pending ingress-history dependency; this candidate neither includes nor reproduces it.
@@ -13,17 +13,15 @@ This directory is a reviewed-candidate input for the owner-authorized replacemen
 - Containers have no autonomous Docker restart policy. The foreground Compose process is supervised by systemd only after firewall/DNS prerequisites, preventing Docker daemon startup from bypassing the reboot gate.
 - The Mongo healthcheck uses exec-form `mongosh` with a literal JavaScript expression. That expression reads the bootstrap credentials from `process.env` inside `mongosh`, authenticates against `admin`, and reports healthy only after a successful ping; credentials are never placed in the probe's command-line arguments.
 
-`log_level: ERROR` is compatible with the read-only root filesystem and read-only config mount: errors are redacted and emitted to container stderr; the optional `config/debug.log` append fails harmlessly and never crashes the process.
+The root filesystem remains read-only. Only the private configuration directory is writable by UID/GID 1000:1000; it contains YAML, sibling locks/temporary files, and the existing optional redacted debug log. See `PERSISTENCE.md` for migration and acceptance gates.
 
 ## Candidate validation (no services started)
 
 From the repository root:
 
 ```bash
-cp deploy/vm3902/config-sample.yaml deploy/vm3902/config.yaml
-chmod 0600 deploy/vm3902/config.yaml
-# Replace YOUR_BOT_TOKEN only through the approved secret path.
-docker compose --project-name most-support-bot --file deploy/vm3902/compose.yaml config --quiet
+# Prepare the private directory using PERSISTENCE.md first; never reseed it at startup.
+node deploy/vm3902/check-runtime.cjs deploy/vm3902/persistent-config --project-name most-support-bot --file deploy/vm3902/compose.yaml
 npm ci
 npm test
 npm run build

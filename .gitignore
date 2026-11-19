@@ -69,3 +69,7 @@ test/testing.js
 test/support.test.js
 config/support.db.old
 config/config.yaml
+
+# Private deployment configuration and migration backups
+deploy/vm3902/persistent-config/
+deploy/vm3902/config-backups/

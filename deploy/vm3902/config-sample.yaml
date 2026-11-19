@@ -1,5 +1,5 @@
 # Tracked, non-secret VM3902 runtime template. Copy this file to the ignored
-# config.yaml next to it, set mode 0600, and replace only YOUR_BOT_TOKEN via
+# private source YAML for prepare-config.cjs (see PERSISTENCE.md), mode 0600; supply YOUR_BOT_TOKEN via
 # the approved secret path. Never reuse a token from another bot.
 # Expected read-only getMe id before activation: 8932572525.
 bot_token: 'YOUR_BOT_TOKEN'

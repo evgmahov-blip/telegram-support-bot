@@ -1,0 +1,60 @@
+{
+  "status": "independent-package-local-checks-only",
+  "base_sha": "e72be3e2b8d0fd74f941cd3f2a2b257d04f2b58e",
+  "required_pr51_sha": "e48f6e5a520d9d04af4a4a36f4684e1794274ca1",
+  "pr51_sha_origin": "user handoff, not source-attested in this checkout",
+  "pr51_source_present_in_base": false,
+  "packaging_candidate_git_sha": null,
+  "packaging_sha_assignment": "pending AOR checkpoint; editor did not run Git or commit",
+  "reported_pr51_ci": "44501709927 SUCCESS (handoff only; not package CI)",
+  "new_candidate_ci": null,
+  "independent_dispatcher_review": null,
+  "platform": {
+    "kernel": "Linux 6.1.0-54-cloud-amd64 x86_64 GNU/Linux",
+    "node": "v22.23.2",
+    "npm": "10.9.8",
+    "required_node": ">=24",
+    "container_node_pin": "24.15.0-alpine3.22",
+    "docker": "unavailable: docker: command not found",
+    "compose": "unavailable: Docker executable absent"
+  },
+  "checks": {
+    "dependency_install": "npm ci --ignore-scripts --no-audit --no-fund: exit 0; Node engine mismatch warning",
+    "build": "npm run build: exit 0",
+    "suite": "npm test: exit 0; 72 suites, 904 tests passed",
+    "filesystem_scope": "real temporary host FS; synthetic YAML; no mocked FS; no Telegram or container assertions",
+    "docker_acceptance": "NOT RUN",
+    "production_actions": "NONE",
+    "final_focused_suite": "npm test -- test/config-persistence-packaging.test.ts test/vm3902-packaging.test.ts: exit 0; 2 suites, 7 tests passed after final permission/guard edits"
+  },
+  "required_acceptance": {
+    "old_readonly_save_rejected_unchanged_history": "NOT RUN",
+    "application_callback_one_role_one_audit": "NOT RUN",
+    "compose_restart_reloaded_role_and_history": "NOT RUN",
+    "stale_forbidden_replay_no_extra_audit": "NOT RUN",
+    "synthetic_backup_and_old_package_restore": "NOT RUN"
+  },
+  "missing": [
+    "AOR-attested isolated export of exact PR #51 SHA",
+    "Docker-capable isolated runner and platform versions",
+    "real application callback driver with synthetic Telegram transport against that source",
+    "external runtime overrides and installation automation, if any",
+    "AOR-assigned package SHA, fresh CI, independent autodispatch review"
+  ],
+  "edited_file_sha256": {
+    ".dockerignore": "5f14a17e461b43377d94b3ea7daf2bbe42735808218e5b0b5e358c663c12a3ca",
+    ".gitignore": "32c9a78ee1c1becd3d13200920dbf808a5bb90858eaf4ed5f64a027937872bca",
+    "docker-compose.yml": "6ceeba35d26c4d015e253285c969ad27a77b0d7ae0c16711e6176f0af2eebe4d",
+    "deploy/vm3902/compose.yaml": "90dbef15147590c83e10309dbbae49d551049102d7ce16d3f87aae8d76527dc0",
+    "deploy/vm3902/config-sample.yaml": "7b393fdc7404ee6a462e9a6f2030357da6c7c1cd90a9c7585fa0be9fef3290c1",
+    "deploy/vm3902/most-support-bot.service": "f06f6a0119f8d204c448314d80e40f4c70a3bd1934bc8f83de7c984989731618",
+    "deploy/vm3902/README.md": "f5b4a10b7692c6cfa5186a5c32d464b8f909b3043846b7b900dcbe67683a1230",
+    "deploy/vm3902/PERSISTENCE.md": "c4163d24b128b6f411fed2c6817b80d957c1faa7c17742da73831b9cf4da1e76",
+    "deploy/vm3902/prepare-config.cjs": "cfb75dce9ad752c032ea5ea04c68939e91b2f5a1274f70f7691b5dea24454d0b",
+    "deploy/vm3902/check-runtime.cjs": "daf228e5e25665bec9db10c4aef935ae6f4e56b1ff2630a04dc1feff5dd81b48",
+    "test/vm3902-packaging.test.ts": "73eaa327bf698f13540b56fd9279c1fd1cae13ffa7332406c861eea6d0f64c27",
+    "test/config-persistence-packaging.test.ts": "2a8be130abc5fa65ad31b44f9a774c2152fe35ab9f041fe6bd14ce7df5f3a71c",
+    "README.md": "e5da76329d790586e919bc4aded244c45535868abc39c66b8397e89a313addfe"
+  },
+  "hash_note": "File SHA-256 values identify local edited bytes only, not a Git candidate SHA or source integration."
+}
