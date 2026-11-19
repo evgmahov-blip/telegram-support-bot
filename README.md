@@ -109,7 +109,8 @@ All texts are configurable in the `language:` section of `config.yaml`. See the 
 See the [wiki](https://github.com/bostrot/telegram-support-bot/wiki/Getting-started) for detailed instructions.
 
 ```bash
-cp config/config-sample.yaml config/config.yaml   # set bot_token, staffchat_id, owner_id
+# First prepare the private persistent configuration directory (UID/GID 1000:1000).
+# Follow deploy/vm3902/PERSISTENCE.md; never reseed existing runtime settings.
 docker compose up -d
 ```
 

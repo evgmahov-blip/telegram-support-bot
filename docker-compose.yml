@@ -1,9 +1,24 @@
 services:
   supportbot:
     build: .
+    read_only: true
+    user: "1000:1000"
+    command: ["sh", "-c", "umask 077; exec node ./build/index.js"]
+    cap_drop:
+      - ALL
+    scale: 1
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
     volumes:
-      - ./config:/bot/config:ro
+      - type: bind
+        source: ./deploy/vm3902/persistent-config
+        target: /bot/config
+        read_only: false
+        bind:
+          create_host_path: false
     ports:
       - "127.0.0.1:8080:8080"
       - "127.0.0.1:8081:8081"
