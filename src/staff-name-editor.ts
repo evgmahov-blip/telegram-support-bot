@@ -41,7 +41,8 @@ export async function showList(ctx: Context, page = 0): Promise<boolean> {
   await ticketUi.answer(ctx, `<b>Инженеры</b>\nВыберите сотрудника:${pageText}`, [
     ...visible.map((member) => [{ text: names.get(member.telegram_id)!, callback_data: `sn:pick:${member.telegram_id}:${page}` }]),
     ...(nav.length ? [nav] : []), [{ text: '➕ Подключить инженера', callback_data: 'sn:connect' }],
-    [{ text: '↩️ Откат последнего изменения прав', callback_data: 'sn:undo' }], [ticketUi.STAFF_HOME],
+    [{ text: '↩️ Откат последнего изменения прав', callback_data: 'sn:undo' }],
+    [{ text: '⬅️ Настройки', callback_data: 'cfg:home' }, ticketUi.STAFF_HOME],
   ]);
   return true;
 }
@@ -72,6 +73,7 @@ export async function handleCallback(ctx: Context, p: string[]): Promise<boolean
         team_forbidden: 'Полномочия изменились. Откройте раздел заново.',
         team_stale: 'Кнопка устарела. Откройте карточку заново.',
         team_busy: 'Другое изменение ещё сохраняется. Повторите позже.',
+        team_readonly: 'Конфигурация недоступна для записи. Права не сохранены. Обратитесь к оператору стенда.',
         team_owner_protected: 'Нельзя отключить или понизить владельца.',
         team_self_change_denied: 'Изменять собственные полномочия запрещено.',
         team_last_admin: 'Нельзя отключить последнего администратора.',

@@ -28,8 +28,12 @@ async function saveTeamMemberLocked(actor: string, etag: string, next: StaffMemb
   if (!/^[0-9a-f]{24}$/.test(etag) || !/^[1-9]\d{0,15}$/.test(next.telegram_id)
     || !['admin','supervisor','agent'].includes(next.role) || typeof next.active !== 'boolean'
     || typeof next.name !== 'string' || !next.name.trim() || next.name.length > 80 || /[\u0000-\u001f\u007f]/.test(next.name)) throw new Error('team_invalid');
-  const lock = await fs.open(file + '.routing-lock', 'wx', 0o600).catch(() => { throw new Error('team_busy'); });
+  const lock = await fs.open(file + '.routing-lock', 'wx', 0o600).catch((err: NodeJS.ErrnoException) => {
+    if (['EROFS', 'EACCES', 'EPERM'].includes(err.code ?? '')) throw new Error('team_readonly');
+    throw err.code === 'EEXIST' ? new Error('team_busy') : err;
+  });
   let temp: string | null = null;
+  let persisted = false;
   try {
     const current = await readTeamSettings(actor, file);
     if (current.etag !== etag) throw new Error('team_stale');
@@ -57,12 +61,17 @@ async function saveTeamMemberLocked(actor: string, etag: string, next: StaffMemb
     try { await out.writeFile(String(doc)); await out.sync(); } finally { await out.close(); }
     requireAdmin(actor);
     if (hash(await fs.readFile(file, 'utf8')) !== etag) throw new Error('team_stale');
-    await fs.rename(temp, file); temp = null;
+    await fs.rename(temp, file); temp = null; persisted = true;
     // Reflect a successful rename even if a subsequent directory fsync fails.
     cache.config.staff_roles = members;
     cache.staffMembers = new Map(members.map(m => [m.telegram_id, m]));
     const dir = await fs.open(path.dirname(file), 'r');
     try { await dir.sync(); } finally { await dir.close(); }
+  } catch (err) {
+    if (!persisted && ['EROFS', 'EACCES', 'EPERM', 'EBUSY'].includes((err as NodeJS.ErrnoException).code ?? '')) {
+      throw new Error('team_readonly');
+    }
+    throw err;
   } finally {
     if (temp) await fs.unlink(temp).catch(() => undefined);
     await lock.close(); await fs.unlink(file + '.routing-lock');

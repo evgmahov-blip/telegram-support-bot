@@ -32,6 +32,9 @@ it('shows current values and no generated callback exceeds Telegram 64-byte limi
     expect(Buffer.byteLength(b.callback_data)).toBeLessThanOrEqual(64);
   expect(reply.mock.calls[0][1]).toContain('10 рабочих минут');
   expect(reply.mock.calls[0][1]).toContain('не задано');
+  expect(reply.mock.calls[0][2].reply_markup.inline_keyboard).toContainEqual([
+    {text:'👥 Инженеры',callback_data:'sn:list:0'},
+  ]);
 });
 it('rejects stale preview without writing and cancel just reads the current menu',async()=>{
   await handleAdminCallback(ctx('cfg:preview:acceptance_minutes:15:'+'b'.repeat(24)));

@@ -115,6 +115,14 @@ describe('engineer access controls', () => {
   it('opens the existing section in the admin own DM without group session authority', async () => {
     await showList(dm()); expect(answer).toHaveBeenCalledWith(expect.anything(),expect.stringContaining('Инженеры'),expect.anything());
     expect(JSON.stringify(answer.mock.calls.at(-1)[2])).toContain('sn:connect');
+    expect(JSON.stringify(answer.mock.calls.at(-1)[2])).toContain('cfg:home');
+  });
+  it('explains read-only persistence failure without confirming success', async () => {
+    saveMember.mockRejectedValueOnce(new Error('team_readonly'));
+    const ctx = dm();
+    await handleCallback(ctx, ['sn','apply','2','supervisor','a'.repeat(24)]);
+    expect(ctx.answerCbQuery).toHaveBeenCalledWith(expect.stringContaining('Права не сохранены'),true);
+    expect(ctx.answerCbQuery).not.toHaveBeenCalledWith('Сохранено.');
   });
   it.each(['agent','supervisor'])('rejects %s even with a forged management callback', async role => {
     const previous=cache.staffMembers.get('2');

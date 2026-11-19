@@ -136,6 +136,7 @@ export async function handleAdminCallback(ctx: Context): Promise<boolean> {
       + '\nМеняются только новые предложения. Причина и выполненные работы при закрытии обязательны.',
     [[{text:'Время принятия',callback_data:'cfg:timeout'},{text:'Напоминание',callback_data:'cfg:reminder'}],
       [{text:'Рабочее расписание',callback_data:'cfg:schedule'}],
+      [{text:'👥 Инженеры',callback_data:'sn:list:0'}],
       [{text:'Организации → ответственные / привязки',callback_data:'cfg:bindings'}],
       ...(s.history.length && (s.history.at(-1)!.before!==null || s.history.at(-1)!.field==='reminder_before_minutes')
         ? [[{text:'Вернуть предыдущее значение',callback_data:'cfg:restore:'+s.history.at(-1)!.id+':'+s.etag}]] : []),back]); return true;

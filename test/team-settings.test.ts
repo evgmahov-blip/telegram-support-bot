@@ -104,3 +104,24 @@ it('keeps an existing writer lock and makes no change while it is held', async (
   expect(await fs.readFile(file + '.routing-lock', 'utf8')).toBe('another writer');
   expect((await readTeamSettings('1', file)).etag).toBe(s.etag);
 });
+
+it.each(['EROFS', 'EACCES', 'EPERM'])('reports unwritable config directory (%s) without granting a role', async code => {
+  const s = await readTeamSettings('1', file);
+  const open = jest.spyOn(require('fs/promises'), 'open').mockRejectedValueOnce(Object.assign(new Error(code), {code}));
+  try {
+    await expect(saveTeamMember('1', s.etag, {...agent, role:StaffRole.SUPERVISOR}, false, file)).rejects.toThrow('team_readonly');
+  } finally { open.mockRestore(); }
+  expect(cache.staffMembers.get('3')?.role).toBe('agent');
+  expect((await readTeamSettings('1', file)).etag).toBe(s.etag);
+});
+
+it.each(['EROFS', 'EBUSY'])('does not project a role when the config mount rejects rename (%s)', async code => {
+  const s = await readTeamSettings('1', file);
+  const rename = jest.spyOn(require('fs/promises'), 'rename').mockRejectedValueOnce(Object.assign(new Error(code), {code}));
+  try {
+    await expect(saveTeamMember('1', s.etag, {...agent, role:StaffRole.SUPERVISOR}, false, file)).rejects.toThrow('team_readonly');
+  } finally { rename.mockRestore(); }
+  expect(cache.staffMembers.get('3')?.role).toBe('agent');
+  expect((await readTeamSettings('1', file)).etag).toBe(s.etag);
+  expect(await fs.readdir(dir)).toEqual(['config.yaml']);
+});
