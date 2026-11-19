@@ -168,8 +168,8 @@ export function registerCommonHandlers(addon: Addon, keys?: string[][]) {
     let callbackAnswered = false;
     ctx.answerCbQuery = async (text?: string, showAlert?: boolean) => {
       if (callbackAnswered) return;
-      await answerCallback(text, showAlert);
       callbackAnswered = true;
+      await answerCallback(text, showAlert);
     };
     try {
       // Handle CSAT rating callbacks
@@ -185,9 +185,7 @@ export function registerCommonHandlers(addon: Addon, keys?: string[][]) {
     } catch (err) {
       log.error('Callback query failed:', err);
       try {
-        if (callbackAnswered) {
-          await middleware.reply(ctx, 'Не удалось выполнить действие. Обновите карточку и повторите.');
-        } else {
+        if (!callbackAnswered) {
           await ctx.answerCbQuery('Не удалось выполнить действие. Обновите карточку и повторите.', true);
         }
       } catch (answerErr) {

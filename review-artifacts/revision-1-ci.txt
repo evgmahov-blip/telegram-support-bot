@@ -1,0 +1,18 @@
+
+> telegram-support-bot@5.0.0 build
+> npm run tsc
+
+
+> telegram-support-bot@5.0.0 tsc
+> tsc
+
+
+> telegram-support-bot@5.0.0 test
+> NODE_ENV=test jest --detectOpenHandles --forceExit --runInBand
+
+
+Test Suites: 75 passed, 75 total
+Tests:       942 passed, 942 total
+Snapshots:   0 total
+Time:        14.928 s, estimated 24 s
+Ran all test suites.

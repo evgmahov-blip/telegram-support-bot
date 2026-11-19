@@ -243,6 +243,54 @@ describe('TelegramAddon', () => {
     await addon.stop();
   });
 
+  it('ACKs during a blocked database claim and never publishes late private denials', async () => {
+    jest.useFakeTimers();
+    addon.start();
+    const guard = mockBotUse.mock.calls[0][0];
+    const compatibility = mockBotUse.mock.calls[2][0];
+    let release!: (value: string | null) => void;
+    mockClaimTelegramUpdate.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+    const answerCallbackQuery = jest.fn().mockResolvedValue(true);
+    const ctx: any = { update: { update_id: 700 }, callbackQuery: { data: 'cfg:save', message: { message_thread_id: 7 } }, answerCallbackQuery };
+    const next = jest.fn(async () => compatibility(ctx, async () => {
+      await ctx.answerCbQuery('Нет прав.', true);
+      await ctx.answerCbQuery('Второй ответ.');
+    }));
+    const pending = guard(ctx, next);
+    await jest.advanceTimersByTimeAsync(1500);
+    expect(answerCallbackQuery).toHaveBeenCalledWith({});
+    expect(next).not.toHaveBeenCalled();
+    release('claim-700'); await pending;
+    const { reply } = require('../src/middleware');
+    expect(reply).not.toHaveBeenCalled();
+    expect(answerCallbackQuery).toHaveBeenCalledTimes(2);
+    expect(answerCallbackQuery).toHaveBeenLastCalledWith({ text: 'Нет прав.', show_alert: true });
+    mockClaimTelegramUpdate.mockResolvedValueOnce(null);
+    const duplicateAnswer = jest.fn().mockResolvedValue(true);
+    const duplicate = { ...ctx, answerCallbackQuery: duplicateAnswer };
+    await guard(duplicate, next);
+    expect(duplicateAnswer).toHaveBeenCalledTimes(1);
+    jest.useRealTimers();
+    expect(next).toHaveBeenCalledTimes(1);
+    await addon.stop();
+  });
+
+  it('continues after an expired ACK and isolates session keys by user, chat and topic', async () => {
+    addon.start();
+    const guard = mockBotUse.mock.calls[0][0];
+    const next = jest.fn().mockResolvedValue(undefined);
+    await guard({ update: { update_id: 701 }, callbackQuery: {}, answerCallbackQuery: jest.fn().mockRejectedValue(new Error('expired')) }, next);
+    expect(next).toHaveBeenCalledTimes(1);
+    const { session } = require('grammy');
+    const key = session.mock.calls.at(-1)[0].getSessionKey;
+    const ctx = { from: { id: 1 }, chat: { id: -100 }, callbackQuery: { message: { message_thread_id: 7 } } };
+    expect(key(ctx)).toBe('1:-100:7');
+    expect(key({ ...ctx, from: { id: 2 } })).not.toBe(key(ctx));
+    expect(key({ ...ctx, chat: { id: -101 } })).not.toBe(key(ctx));
+    expect(key({ ...ctx, callbackQuery: { message: { message_thread_id: 8 } } })).not.toBe(key(ctx));
+    await addon.stop();
+  });
+
   it('unwraps grammY BotError into the registered error and context', () => {
     const handler = jest.fn();
     addon.catch(handler);
