@@ -340,9 +340,7 @@ describe.each([false, true])('Telegram registered update routes, rich=%s', rich 
     await click('tm:manual:0', 777);
     await click('tc:open:7', 43);
     await click('tm:common:0', 42, -100, 8);
-    expect(renders()).toHaveLength(3);
-    expect(renders().every(c => !c.payload.reply_markup && !c.payload.rich_message)).toBe(true);
-    expect(renders().map(c => [c.payload.chat_id, c.payload.message_thread_id])).toEqual([['777', undefined], ['43', undefined], ['-100', 8]]);
+    expect(renders()).toHaveLength(0);
     expect(calls.filter(c => c.method === 'answerCallbackQuery')).toHaveLength(3);
     expect(rendered()).not.toContain('tc:open:');
     expect(drafts.size).toBe(0);

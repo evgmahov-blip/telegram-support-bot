@@ -12,7 +12,7 @@ import { getStaffRole } from '../../team';
 import { registerCommonHandlers } from '../../handlers';
 import * as log from '../../logger'
 import { assertDeliverableRecipient } from '../../manual-ticket-guard';
-import { acknowledgeCallbackIngress, hasEarlyCallbackAck } from '../../callback-ack';
+import { acknowledgeCallbackIngress } from '../../callback-ack';
 
 type BotContext = GrammyContext & SessionFlavor<SessionData>;
 
@@ -20,16 +20,6 @@ export function bindTelegramCompatibility(ctx: BotContext): Context {
   const typedCtx = ctx as unknown as Context;
   typedCtx.messenger = Messenger.TELEGRAM;
   typedCtx.answerCbQuery = async (text?: string, showAlert = false) => {
-    if (hasEarlyCallbackAck(ctx)) {
-      if (text) {
-        try { await middleware.reply(typedCtx, text, {
-          parse_mode: undefined,
-          message_thread_id: ctx.callbackQuery?.message?.message_thread_id,
-        }); }
-        catch (err) { log.error('Callback result delivery failed:', err); }
-      }
-      return;
-    }
     const started = Date.now();
     try { await ctx.answerCallbackQuery({ text, show_alert: showAlert }); }
     finally {
@@ -276,32 +266,34 @@ class TelegramAddon implements Addon {
     // Claim update_id before any session or business middleware mutates state.
     // The claim is completed only after the entire downstream chain resolves.
     this.bot.use(async (ctx: BotContext, next) => {
-      await acknowledgeCallbackIngress(ctx, err => log.error('Early callback ACK failed:', err));
-      const updateId = ctx.update.update_id;
-      const claimId = await updateDedup.claimTelegramUpdate(updateId);
-      if (!claimId) {
-        log.info(`Skipping duplicate Telegram update ${updateId}.`);
-        return;
-      }
-
-      let downstreamCompleted = false;
+      const finishAck = acknowledgeCallbackIngress(ctx, err => log.error('Fallback callback ACK failed:', err));
       try {
-        await next();
-        downstreamCompleted = true;
-        await updateDedup.completeTelegramUpdate(updateId, claimId);
-      } catch (err) {
-        // Handler failures release only the lease owned by this worker. If the
-        // handler succeeded but completion persistence failed, keep the claim
-        // leased rather than immediately risking duplicate side effects.
-        if (!downstreamCompleted) {
-          try {
-            await updateDedup.releaseTelegramUpdate(updateId, claimId);
-          } catch (releaseErr) {
-            log.error(`Failed to release Telegram update ${updateId}:`, releaseErr);
-          }
+        const updateId = ctx.update.update_id;
+        const claimId = await updateDedup.claimTelegramUpdate(updateId);
+        if (!claimId) {
+          log.info(`Skipping duplicate Telegram update ${updateId}.`);
+          return;
         }
-        throw err;
-      }
+
+        let downstreamCompleted = false;
+        try {
+          await next();
+          downstreamCompleted = true;
+          await updateDedup.completeTelegramUpdate(updateId, claimId);
+        } catch (err) {
+          // Handler failures release only the lease owned by this worker. If the
+          // handler succeeded but completion persistence failed, keep the claim
+          // leased rather than immediately risking duplicate side effects.
+          if (!downstreamCompleted) {
+            try {
+              await updateDedup.releaseTelegramUpdate(updateId, claimId);
+            } catch (releaseErr) {
+              log.error(`Failed to release Telegram update ${updateId}:`, releaseErr);
+            }
+          }
+          throw err;
+        }
+      } finally { await finishAck(); }
     });
 
     this.bot.use(this.initSession());

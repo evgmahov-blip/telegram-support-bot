@@ -790,7 +790,7 @@ export async function handleCallback(ctx: Context): Promise<boolean> {
       : await ownership.transferTicket(id, p[3], expected);
     if (moved?.routing) await presentAfterWrite(ctx, async () => {
       await routing.flushRoutingAudit(moved); await routing.deliverOffer(moved);
-    }, 'Передача сохранена. Обновите карточку для актуального состояния.');
+    }, 'Передача сохранена. Доставка предложения и аудита ожидает повтора. Обновите карточку для актуального состояния.');
     if (!moved) { await ctx.answerCbQuery('Владелец или состояние изменились.', true); return true; }
     db.recordAnalyticsEventBestEffort('ticket.transferred', id, actor, { owner: p[3] });
   }

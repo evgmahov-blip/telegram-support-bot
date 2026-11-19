@@ -7,7 +7,7 @@ export async function presentAfterWrite(ctx: Context, present: () => Promise<voi
   try { await present(); }
   catch (err) {
     log.error('Write succeeded but follow-up failed:', err);
-    try { await middleware.reply(ctx, savedMessage, {
+    try { await middleware.reply(ctx, ctx.from?.id ? `Для пользователя ${ctx.from.id}: ${savedMessage}` : savedMessage, {
       parse_mode: undefined,
       message_thread_id: ctx.callbackQuery?.message?.message_thread_id ?? ctx.message?.message_thread_id,
     }); }

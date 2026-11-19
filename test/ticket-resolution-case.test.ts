@@ -63,6 +63,14 @@ describe('human-recorded ticket resolution flow', () => {
     expect(cb).toHaveBeenCalledWith('Кнопка устарела или принадлежит другому сотруднику.', true);
   });
 
+  it('rejects confirmation after authority is revoked following preview', async () => {
+    db.getResolutionIntent.mockResolvedValue({ ...intent, status: 'preview', cause: 'Причина', actions: 'Действия' });
+    team.canPerformAction.mockReturnValue(false);
+    await flow.handleCallback(ctx('rs:save:tok:3'), ['rs','save','tok','3']);
+    expect(db.claimResolutionSave).not.toHaveBeenCalled();
+    expect(db.saveClaimedResolution).not.toHaveBeenCalled();
+  });
+
   it('cancels without saving when the ticket was reopened mid-flow', async () => {
     db.getResolutionIntent.mockResolvedValue({ ...intent, status: 'preview' }); db.getTicketById.mockResolvedValue({ ...ticket, status: 'open' });
     await flow.handleCallback(ctx('rs:save:tok:3'), ['rs','save','tok','3']);
@@ -88,7 +96,7 @@ describe('human-recorded ticket resolution flow', () => {
     (failure === 'refresh' ? refresh : answer).mockRejectedValueOnce(new Error('Telegram unavailable'));
     await expect(flow.handleCallback(ctx('rs:save:tok:3'), ['rs','save','tok','3'])).resolves.toBe(true);
     expect(db.saveClaimedResolution).toHaveBeenCalledTimes(1);
-    expect(reply).toHaveBeenCalledWith(expect.anything(), 'Решение сохранено. Обновите карточку для актуального состояния.', { parse_mode: undefined, message_thread_id: 9 });
+    expect(reply).toHaveBeenCalledWith(expect.anything(), 'Для пользователя 42: Решение сохранено. Обновите карточку для актуального состояния.', { parse_mode: undefined, message_thread_id: 9 });
     expect(db.abandonClaimedResolution).not.toHaveBeenCalled();
   });
 

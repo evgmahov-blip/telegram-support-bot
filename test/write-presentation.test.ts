@@ -26,3 +26,9 @@ it('keeps failure feedback in the source topic', async () => {
   await presentAfterWrite(ctx, async () => { throw new Error('screen'); }, 'Сохранено.');
   expect(reply).toHaveBeenCalledWith(ctx, 'Сохранено.', { parse_mode: undefined, message_thread_id: 11 });
 });
+
+it('addresses a save confirmation to its clicker in the original topic', async () => {
+  const ctx = { from: { id: 42 }, callbackQuery: { message: { message_thread_id: 11 } } } as any;
+  await presentAfterWrite(ctx, async () => { throw new Error('screen'); }, 'Сохранено.');
+  expect(reply).toHaveBeenCalledWith(ctx, 'Для пользователя 42: Сохранено.', { parse_mode: undefined, message_thread_id: 11 });
+});

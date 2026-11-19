@@ -243,7 +243,8 @@ describe('TelegramAddon', () => {
     await addon.stop();
   });
 
-  it('ACKs before a blocked database claim, including redelivery, and routes results to the topic', async () => {
+  it('ACKs during a blocked database claim and never publishes late private denials', async () => {
+    jest.useFakeTimers();
     addon.start();
     const guard = mockBotUse.mock.calls[0][0];
     const compatibility = mockBotUse.mock.calls[2][0];
@@ -252,20 +253,24 @@ describe('TelegramAddon', () => {
     const answerCallbackQuery = jest.fn().mockResolvedValue(true);
     const ctx: any = { update: { update_id: 700 }, callbackQuery: { data: 'cfg:save', message: { message_thread_id: 7 } }, answerCallbackQuery };
     const next = jest.fn(async () => compatibility(ctx, async () => {
-      await ctx.answerCbQuery();
-      await ctx.answerCbQuery('Сохранено.');
+      await ctx.answerCbQuery('Нет прав.', true);
+      await ctx.answerCbQuery('Второй ответ.');
     }));
     const pending = guard(ctx, next);
-    await new Promise(resolve => setImmediate(resolve));
-    expect(answerCallbackQuery).toHaveBeenCalledTimes(1);
+    await jest.advanceTimersByTimeAsync(1500);
+    expect(answerCallbackQuery).toHaveBeenCalledWith({});
     expect(next).not.toHaveBeenCalled();
     release('claim-700'); await pending;
     const { reply } = require('../src/middleware');
-    expect(reply).toHaveBeenCalledWith(ctx, 'Сохранено.', { parse_mode: undefined, message_thread_id: 7 });
+    expect(reply).not.toHaveBeenCalled();
+    expect(answerCallbackQuery).toHaveBeenCalledTimes(2);
+    expect(answerCallbackQuery).toHaveBeenLastCalledWith({ text: 'Нет прав.', show_alert: true });
     mockClaimTelegramUpdate.mockResolvedValueOnce(null);
-    const duplicate = { ...ctx, answerCallbackQuery: jest.fn().mockResolvedValue(true) };
+    const duplicateAnswer = jest.fn().mockResolvedValue(true);
+    const duplicate = { ...ctx, answerCallbackQuery: duplicateAnswer };
     await guard(duplicate, next);
-    expect(duplicate.answerCallbackQuery).toHaveBeenCalledTimes(1);
+    expect(duplicateAnswer).toHaveBeenCalledTimes(1);
+    jest.useRealTimers();
     expect(next).toHaveBeenCalledTimes(1);
     await addon.stop();
   });
