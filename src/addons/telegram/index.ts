@@ -12,6 +12,7 @@ import { getStaffRole } from '../../team';
 import { registerCommonHandlers } from '../../handlers';
 import * as log from '../../logger'
 import { assertDeliverableRecipient } from '../../manual-ticket-guard';
+import { acknowledgeCallbackIngress, hasEarlyCallbackAck } from '../../callback-ack';
 
 type BotContext = GrammyContext & SessionFlavor<SessionData>;
 
@@ -19,6 +20,16 @@ export function bindTelegramCompatibility(ctx: BotContext): Context {
   const typedCtx = ctx as unknown as Context;
   typedCtx.messenger = Messenger.TELEGRAM;
   typedCtx.answerCbQuery = async (text?: string, showAlert = false) => {
+    if (hasEarlyCallbackAck(ctx)) {
+      if (text) {
+        try { await middleware.reply(typedCtx, text, {
+          parse_mode: undefined,
+          message_thread_id: ctx.callbackQuery?.message?.message_thread_id,
+        }); }
+        catch (err) { log.error('Callback result delivery failed:', err); }
+      }
+      return;
+    }
     const started = Date.now();
     try { await ctx.answerCallbackQuery({ text, show_alert: showAlert }); }
     finally {
@@ -91,7 +102,8 @@ class TelegramAddon implements Addon {
       initial,
       getSessionKey: (ctx) => {
         if (!ctx.from) return undefined;
-        return `${ctx.from.id}:${ctx.chat?.id ?? ctx.from.id}`;
+        const thread = ctx.message?.message_thread_id ?? ctx.callbackQuery?.message?.message_thread_id ?? 0;
+        return `${ctx.from.id}:${ctx.chat?.id ?? ctx.from.id}:${thread}`;
       },
     });
   }
@@ -264,6 +276,7 @@ class TelegramAddon implements Addon {
     // Claim update_id before any session or business middleware mutates state.
     // The claim is completed only after the entire downstream chain resolves.
     this.bot.use(async (ctx: BotContext, next) => {
+      await acknowledgeCallbackIngress(ctx, err => log.error('Early callback ACK failed:', err));
       const updateId = ctx.update.update_id;
       const claimId = await updateDedup.claimTelegramUpdate(updateId);
       if (!claimId) {

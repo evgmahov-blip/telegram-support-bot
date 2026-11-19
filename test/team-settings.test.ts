@@ -83,3 +83,24 @@ it('cannot remove the sole active administrator even when a stale cache claims a
   await expect(saveTeamMember('1',s.etag,{...other,role:StaffRole.AGENT},false,file)).rejects.toThrow('team_forbidden');
   expect((await readTeamSettings('2',file)).members.find(m=>m.telegram_id==='2')?.active).toBe(true);
 });
+
+it('rechecks revoked authority after waiting for the assignment database check', async () => {
+  const s = await readTeamSettings('2', file);
+  let release!: (value: boolean) => void;
+  assignments.mockImplementationOnce(() => new Promise<boolean>(resolve => { release = resolve; }));
+  const pending = saveTeamMember('2', s.etag, {...agent, active:false}, false, file);
+  // Wait for the actual database gate, not a wall-clock timeout.
+  while (!release) await new Promise(resolve => setImmediate(resolve));
+  cache.staffMembers.set('2', {...other, active:false});
+  release(false);
+  await expect(pending).rejects.toThrow('team_forbidden');
+  expect((await readTeamSettings('1', file)).etag).toBe(s.etag);
+});
+
+it('keeps an existing writer lock and makes no change while it is held', async () => {
+  const s = await readTeamSettings('1', file);
+  await fs.writeFile(file + '.routing-lock', 'another writer');
+  await expect(saveTeamMember('1', s.etag, {...agent, active:false}, false, file)).rejects.toThrow('team_busy');
+  expect(await fs.readFile(file + '.routing-lock', 'utf8')).toBe('another writer');
+  expect((await readTeamSettings('1', file)).etag).toBe(s.etag);
+});

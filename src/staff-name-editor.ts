@@ -206,11 +206,14 @@ async function handleAccess(ctx: Context, p: string[]): Promise<boolean> {
     if (s.members.some(m => m.telegram_id === pending.member!.telegram_id)) throw new Error('team_already_connected');
     await saveTeamMember(actor, pending.etag, pending.member, true);
     connections.delete(connectionKey(ctx));
-    await showMember(ctx, pending.member.telegram_id, 0);
+    await showMember(ctx, pending.member.telegram_id, 0).catch(err => log.error('Team saved, screen refresh failed:', err));
+    await ctx.answerCbQuery('Сохранено.');
   } else if (action === 'undo' || action === 'undoapply') {
     if (action === 'undoapply') {
       await undoTeamChange(actor, p[2]);
-      await ticketUi.answer(ctx, 'Откат сохранён в истории.', [[ticketUi.STAFF_HOME]]);
+      await ticketUi.answer(ctx, 'Откат сохранён в истории.', [[ticketUi.STAFF_HOME]])
+        .catch(err => log.error('Team rollback saved, screen refresh failed:', err));
+      await ctx.answerCbQuery('Откат сохранён.');
     } else {
       const last = s.history.at(-1); if (!last) throw new Error('team_no_history');
       await ticketUi.answer(ctx, `Вернуть предыдущее состояние сотрудника ${ticketUi.e(last.after.name)}? Откат проходит те же проверки прав и назначений.`, [
@@ -229,7 +232,8 @@ async function handleAccess(ctx: Context, p: string[]): Promise<boolean> {
       const next = { ...m, ...(['on','off'].includes(p[3]) ? { active: p[3] === 'on' } : { role: p[3] as any, active: m.active !== false }) };
       if (action === 'apply') {
         await saveTeamMember(actor, s.etag, next);
-        await showMember(ctx, m.telegram_id, 0);
+        await showMember(ctx, m.telegram_id, 0).catch(err => log.error('Team saved, screen refresh failed:', err));
+        await ctx.answerCbQuery('Сохранено.');
       } else {
         await ticketUi.answer(ctx, `Подтвердите: ${ticketUi.e(staffDisplayName(m.telegram_id))} → ${ticketUi.e(roleLabel[next.role])}, ${next.active ? 'включён' : 'отключён'}.\nПеред отключением передайте все активные назначения и предложения.`, [
           [{ text: 'Сохранить', callback_data: `sn:apply:${m.telegram_id}:${p[3]}:${s.etag}` }], [ticketUi.STAFF_HOME],

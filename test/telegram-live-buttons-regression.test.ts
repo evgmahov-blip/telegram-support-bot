@@ -189,7 +189,7 @@ async function text(value: string) {
 const renders = () => calls.filter(c => ['sendMessage', 'sendRichMessage', 'editMessageText'].includes(c.method));
 const rendered = () => JSON.stringify(renders());
 function button(prefix: string): string {
-  const payload: any = renders().at(-1)?.payload;
+  const payload: any = renders().filter(c => c.payload?.reply_markup || c.payload?.rich_message).at(-1)?.payload;
   const classic = payload?.reply_markup?.inline_keyboard.flat().find((b: any) => b.callback_data?.startsWith(prefix));
   if (classic) return classic.callback_data;
   const html = payload?.rich_message?.html || '';
@@ -210,7 +210,7 @@ describe.each([false, true])('Telegram registered update routes, rich=%s', rich 
       await click(`tm:${view}:0`, actor);
       const scope = actor >= 50 ? 'all' : 'visible';
       const expected = await db.countStaffTickets(view as any, String(actor), scope);
-      const payload: any = renders().at(-1)?.payload;
+      const payload: any = renders().filter(c => c.payload?.reply_markup || c.payload?.rich_message).at(-1)?.payload;
       const body = JSON.stringify(payload);
       const ids = rich ? [...(payload?.rich_message?.html || '').matchAll(/data="tc:open:(\d+)"/g)]
         : payload?.reply_markup?.inline_keyboard.flat().filter((b: any) => b.callback_data?.startsWith('tc:open:'));
@@ -234,7 +234,7 @@ describe.each([false, true])('Telegram registered update routes, rich=%s', rich 
         for (const view of ['mine', 'common', 'active', 'closed'] as const) {
           calls.length = 0;
           await click(`tm:${view}:0`, actor);
-          const payload: any = renders().at(-1)?.payload;
+          const payload: any = renders().filter(c => c.payload?.reply_markup || c.payload?.rich_message).at(-1)?.payload;
           const body = JSON.stringify(payload);
           expect(body.includes('tc:open:7')).toBe(await db.countStaffTickets(view, String(actor), scope) === 1);
           expect(body).toContain(`Мои в работе (${await db.countStaffTickets('mine', String(actor), scope)})`);
@@ -340,8 +340,11 @@ describe.each([false, true])('Telegram registered update routes, rich=%s', rich 
     await click('tm:manual:0', 777);
     await click('tc:open:7', 43);
     await click('tm:common:0', 42, -100, 8);
-    expect(renders()).toHaveLength(0);
-    expect(calls.filter(c => c.method === 'answerCallbackQuery' && c.payload.show_alert)).toHaveLength(3);
+    expect(renders()).toHaveLength(3);
+    expect(renders().every(c => !c.payload.reply_markup && !c.payload.rich_message)).toBe(true);
+    expect(renders().map(c => [c.payload.chat_id, c.payload.message_thread_id])).toEqual([['777', undefined], ['43', undefined], ['-100', 8]]);
+    expect(calls.filter(c => c.method === 'answerCallbackQuery')).toHaveLength(3);
+    expect(rendered()).not.toContain('tc:open:');
     expect(drafts.size).toBe(0);
   });
 });

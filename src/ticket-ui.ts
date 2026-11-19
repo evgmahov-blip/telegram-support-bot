@@ -1,4 +1,5 @@
 import cache from './cache';
+import { presentAfterWrite } from './write-presentation';
 import * as db from './db';
 import * as team from './team';
 import * as ownership from './ticket-ownership';
@@ -746,7 +747,8 @@ export async function handleCallback(ctx: Context): Promise<boolean> {
     if (ticket.routing && action === 'unshare') { await ctx.answerCbQuery('Общую заявку нужно взять в работу в личном чате.', true); return true; }
     const changed = ticket.routing ? await routing.routingCommand(id, actor, ticket.routing.version, 'common')
       : await db.setTicketCommonVisibility(id, action === 'share', ticket.assigned_to);
-    if (changed?.routing) await routing.flushRoutingAudit(changed);
+    if (changed?.routing) await presentAfterWrite(ctx, () => routing.flushRoutingAudit(changed),
+      'Изменение заявки сохранено. Аудит ожидает повторной доставки.');
     if (!changed) { await refreshStaffCard(id); await ctx.answerCbQuery('Владелец или видимость заявки изменились.', true); return true; }
     db.recordAnalyticsEventBestEffort('ticket.visibility_changed', id, actor, { common: action === 'share', owner: ticket.assigned_to });
   } else if (action === 'closecancel' || action === 'closehome') {
@@ -786,7 +788,9 @@ export async function handleCallback(ctx: Context): Promise<boolean> {
     const expected = team.getStaffRole(actor) === 'agent' ? actor : undefined;
     const moved = ticket.routing ? await routing.routingCommand(id, actor, ticket.routing.version, 'transfer', p[3])
       : await ownership.transferTicket(id, p[3], expected);
-    if (moved?.routing) { await routing.flushRoutingAudit(moved); await routing.deliverOffer(moved); }
+    if (moved?.routing) await presentAfterWrite(ctx, async () => {
+      await routing.flushRoutingAudit(moved); await routing.deliverOffer(moved);
+    }, 'Передача сохранена. Обновите карточку для актуального состояния.');
     if (!moved) { await ctx.answerCbQuery('Владелец или состояние изменились.', true); return true; }
     db.recordAnalyticsEventBestEffort('ticket.transferred', id, actor, { owner: p[3] });
   }
@@ -857,16 +861,18 @@ export async function handleCallback(ctx: Context): Promise<boolean> {
     if (ticket.pending_reply_version != null && !cleared) { await ctx.answerCbQuery('Эта кнопка отмены устарела.', true); return true; }
   }
   else { await ctx.answerCbQuery('Действие недоступно или нет прав.', true); return true; }
-  if (action === 'share') await publishCommonReturn(id); else await refreshStaffCard(id);
-  // close/xfer/cancel arrive from transient panels: replace their now-spent buttons with navigation.
-  if (!canonicalBinding && (privateStaff || visibility.isCommonTicket(ticket))) await answer(ctx, `${doneText[action] || 'Готово.'} № ${id}`, [[{ text: '⬅️ К заявке', callback_data: `tc:open:${id}` }, STAFF_HOME]]);
-  if (action === 'take') {
-    const current = await db.getTicketById(id, null);
-    if (current && current.assigned_to === actor) {
-      const text = await cardText(current, actor), rows = await privateButtons(current);
-      if (await visibility.freshTicket(current) && visibility.canViewTicket(actor, current)) await answerPrivately(ctx, text, rows);
+  await presentAfterWrite(ctx, async () => {
+    if (action === 'share') await publishCommonReturn(id); else await refreshStaffCard(id);
+    // close/xfer/cancel arrive from transient panels: replace their now-spent buttons with navigation.
+    if (!canonicalBinding && (privateStaff || visibility.isCommonTicket(ticket))) await answer(ctx, `${doneText[action] || 'Готово.'} № ${id}`, [[{ text: '⬅️ К заявке', callback_data: `tc:open:${id}` }, STAFF_HOME]]);
+    if (action === 'take') {
+      const current = await db.getTicketById(id, null);
+      if (current && current.assigned_to === actor) {
+        const text = await cardText(current, actor), rows = await privateButtons(current);
+        if (await visibility.freshTicket(current) && visibility.canViewTicket(actor, current)) await answerPrivately(ctx, text, rows);
+      }
     }
-  }
+  }, 'Изменение заявки сохранено. Обновите карточку для актуального состояния.');
   await ctx.answerCbQuery('Готово.'); return true;
 }
 

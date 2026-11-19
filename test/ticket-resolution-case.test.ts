@@ -81,6 +81,17 @@ describe('human-recorded ticket resolution flow', () => {
     expect(answer.mock.calls.at(-1)[1]).toContain('не стало автоматически одобренным навыком');
   });
 
+  it.each(['refresh', 'screen'])('reports the saved resolution when %s fails without saving twice', async (failure) => {
+    const preview = { ...intent, status: 'preview', cause: 'Причина', actions: 'Действия' };
+    db.getResolutionIntent.mockResolvedValue(preview); db.claimResolutionSave.mockResolvedValue(preview);
+    db.saveClaimedResolution.mockResolvedValue({ current_version: 1, versions: [preview] });
+    (failure === 'refresh' ? refresh : answer).mockRejectedValueOnce(new Error('Telegram unavailable'));
+    await expect(flow.handleCallback(ctx('rs:save:tok:3'), ['rs','save','tok','3'])).resolves.toBe(true);
+    expect(db.saveClaimedResolution).toHaveBeenCalledTimes(1);
+    expect(reply).toHaveBeenCalledWith(expect.anything(), 'Решение сохранено. Обновите карточку для актуального состояния.', { parse_mode: undefined, message_thread_id: 9 });
+    expect(db.abandonClaimedResolution).not.toHaveBeenCalled();
+  });
+
   it('abandons an atomic save claim if the ticket reopens between preview and persistence', async () => {
     const preview = { ...intent, status: 'preview', cause: 'Причина', actions: 'Действия', check: 'Проверка' };
     db.getResolutionIntent.mockResolvedValue(preview); db.claimResolutionSave.mockResolvedValue(preview);

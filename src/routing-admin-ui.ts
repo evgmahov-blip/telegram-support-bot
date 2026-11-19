@@ -1,4 +1,5 @@
 import cache from './cache';
+import { presentAfterWrite } from './write-presentation';
 import * as team from './team';
 import * as db from './db';
 import * as middleware from './middleware';
@@ -41,10 +42,12 @@ export async function handleRoutingCallback(ctx: Context): Promise<boolean> {
   if (!['take','transfer','common'].includes(action)) { await ctx.answerCbQuery('Неизвестное действие.',true);return true; }
   const changed = await routing.routingCommand(id,actor,version,action as 'take'|'transfer'|'common',p[4]);
   if (!changed) { await ctx.answerCbQuery('Состояние, срок или полномочия изменились.',true); return true; }
-  await routing.flushRoutingAudit(changed);
-  if (changed.routing?.state === 'offered') await routing.deliverOffer(changed);
-  if (action === 'common') await publishCommonReturn(id); else await refreshStaffCard(id);
-  await refreshPrivateRoutingPanel(ctx, id);
+  await presentAfterWrite(ctx, async () => {
+    await routing.flushRoutingAudit(changed);
+    if (changed.routing?.state === 'offered') await routing.deliverOffer(changed);
+    if (action === 'common') await publishCommonReturn(id); else await refreshStaffCard(id);
+    await refreshPrivateRoutingPanel(ctx, id);
+  }, 'Изменение заявки сохранено. Обновите карточку для актуального состояния.');
   await ctx.answerCbQuery(changed.routing?.state === 'accepted' ? 'Заявка взята в работу.' : changed.routing?.state === 'common' ? 'Заявка в общей очереди.' : 'Предложение передано.');
   return true;
 }

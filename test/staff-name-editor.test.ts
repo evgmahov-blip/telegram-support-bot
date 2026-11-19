@@ -145,6 +145,36 @@ describe('engineer access controls', () => {
       saveMember.mockClear(); await handleCallback(ctx,data.split(':')); expect(saveMember).not.toHaveBeenCalled();
     } finally { cache.staffMembers.delete('9876'); }
   });
+  it('reports successful access apply despite a failed screen refresh', async () => {
+    const ctx = dm();
+    saveMember.mockResolvedValueOnce(undefined);
+    answer.mockRejectedValueOnce(new Error('screen unavailable'));
+    await expect(handleCallback(ctx, ['sn','apply','2','supervisor','a'.repeat(24)])).resolves.toBe(true);
+    expect(saveMember).toHaveBeenCalledTimes(1);
+    expect(ctx.answerCbQuery).toHaveBeenCalledWith('Сохранено.');
+    expect(ctx.answerCbQuery).not.toHaveBeenCalledWith(expect.stringContaining('не подтверждено'), true);
+  });
+  it('keeps enrollment saved and prevents a duplicate join after screen failure', async () => {
+    const ctx = dm(); await handleCallback(ctx, ['sn','connect']);
+    (ctx.message as any).forward_origin = { type:'user', sender_user:{ id:9877, first_name:'Engineer' } };
+    await handleTextInput(ctx);
+    const data = answer.mock.calls.at(-1)[2][0][0].callback_data;
+    saveMember.mockImplementationOnce(async (_actor, _etag, member) => { cache.staffMembers.set(member.telegram_id, member); });
+    answer.mockRejectedValueOnce(new Error('screen unavailable'));
+    try {
+      await expect(handleCallback(ctx, data.split(':'))).resolves.toBe(true);
+      expect(saveMember).toHaveBeenCalledTimes(1);
+      expect(ctx.answerCbQuery).toHaveBeenCalledWith('Сохранено.');
+      await handleCallback(ctx, data.split(':'));
+      expect(saveMember).toHaveBeenCalledTimes(1);
+    } finally { cache.staffMembers.delete('9877'); }
+  });
+  it('rejects an outdated access confirmation without persistence', async () => {
+    const ctx = dm();
+    await handleCallback(ctx, ['sn','apply','2','supervisor','b'.repeat(24)]);
+    expect(saveMember).not.toHaveBeenCalled();
+    expect(ctx.answerCbQuery).toHaveBeenCalledWith(expect.stringContaining('устарела'), true);
+  });
   it('revocation denies stale callbacks and unfinished input immediately', async () => {
     const ctx=dm(), original=cache.staffMembers.get('1'); await handleCallback(ctx,['sn','connect']);
     try {

@@ -13,6 +13,7 @@ import * as log from './logger'
 import * as ticketUi from './ticket-ui';
 import * as clientOrganization from './client-organization';
 import * as routingAdmin from './routing-admin-ui';
+import { hasEarlyCallbackAck } from './callback-ack';
 
 /**
  * grammY sets ctx.match to a string for string triggers and to a RegExpMatchArray for
@@ -167,7 +168,7 @@ export function registerCommonHandlers(addon: Addon, keys?: string[][]) {
     const answerCallback = ctx.answerCbQuery.bind(ctx);
     let callbackAnswered = false;
     ctx.answerCbQuery = async (text?: string, showAlert?: boolean) => {
-      if (callbackAnswered) return;
+      if (callbackAnswered && !hasEarlyCallbackAck(ctx)) return;
       await answerCallback(text, showAlert);
       callbackAnswered = true;
     };
@@ -186,7 +187,9 @@ export function registerCommonHandlers(addon: Addon, keys?: string[][]) {
       log.error('Callback query failed:', err);
       try {
         if (callbackAnswered) {
-          await middleware.reply(ctx, 'Не удалось выполнить действие. Обновите карточку и повторите.');
+          await middleware.reply(ctx, 'Не удалось выполнить действие. Обновите карточку и повторите.', {
+            parse_mode: undefined, message_thread_id: ctx.callbackQuery?.message?.message_thread_id,
+          });
         } else {
           await ctx.answerCbQuery('Не удалось выполнить действие. Обновите карточку и повторите.', true);
         }

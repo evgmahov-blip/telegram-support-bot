@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto';
+import { presentAfterWrite } from './write-presentation';
 import * as db from './db';
 import * as team from './team';
 import * as middleware from './middleware';
@@ -198,16 +199,18 @@ async function saveAndClose(ctx: Context, intent: any, token: string, version: n
       ? 'Заявка уже закрыта другим действием; эта запись к закрытию не привязана.'
       : 'Владелец или состояние изменились: заявка не закрыта.', true); return true;
   }
-  await db.completeResolutionIntent(token);
-  db.recordAnalyticsEventBestEffort('ticket.resolution_saved', claimed.ticketId, actor, { version: resolutionVersion, closure: true });
-  await ui.refreshStaffCard(claimed.ticketId);
-  const notes = [
-    result.notificationFailed ? 'Уведомление клиенту не доставлено.' : '',
-    isManualTicket(ticket) ? 'Ручная заявка: клиент не уведомлялся, канала доставки нет.' : '',
-  ].filter(Boolean).map(n => `\n${n}`).join('');
-  await ui.answer(ctx, `Заявка № ${claimed.ticketId} закрыта. Решение сохранено (версия ${resolutionVersion}).${notes}`, [[
-    { text: '📘 Решение', callback_data: `rs:view:${claimed.ticketId}` }, ui.STAFF_HOME,
-  ]]);
+  await presentAfterWrite(ctx, async () => {
+    await db.completeResolutionIntent(token);
+    db.recordAnalyticsEventBestEffort('ticket.resolution_saved', claimed.ticketId, actor, { version: resolutionVersion, closure: true });
+    await ui.refreshStaffCard(claimed.ticketId);
+    const notes = [
+      result.notificationFailed ? 'Уведомление клиенту не доставлено.' : '',
+      isManualTicket(ticket) ? 'Ручная заявка: клиент не уведомлялся, канала доставки нет.' : '',
+    ].filter(Boolean).map(n => `\n${n}`).join('');
+    await ui.answer(ctx, `Заявка № ${claimed.ticketId} закрыта. Решение сохранено (версия ${resolutionVersion}).${notes}`, [[
+      { text: '📘 Решение', callback_data: `rs:view:${claimed.ticketId}` }, ui.STAFF_HOME,
+    ]]);
+  }, 'Заявка закрыта, решение сохранено. Обновите карточку для актуального состояния.');
   await ctx.answerCbQuery('Заявка закрыта.'); return true;
 }
 
@@ -243,10 +246,12 @@ export async function handleCallback(ctx: Context, p: string[]): Promise<boolean
     const saved = await db.saveClaimedResolution(claimed);
     if (!saved) { await ctx.answerCbQuery('Решение изменено в другом окне. Откройте актуальную версию.', true); return true; }
     db.recordAnalyticsEventBestEffort('ticket.resolution_saved', claimed.ticketId, actor, { version: saved.current_version });
-    await ui.refreshStaffCard(claimed.ticketId);
-    await ui.answer(ctx, `Решение по заявке № ${claimed.ticketId} сохранено как внутренний случай. Оно не стало автоматически одобренным навыком.`, [[
-      { text: '📘 Решение', callback_data: `rs:view:${claimed.ticketId}` }, ui.STAFF_HOME,
-    ]]); await ctx.answerCbQuery('Сохранено.'); return true;
+    await presentAfterWrite(ctx, async () => {
+      await ui.refreshStaffCard(claimed.ticketId);
+      await ui.answer(ctx, `Решение по заявке № ${claimed.ticketId} сохранено как внутренний случай. Оно не стало автоматически одобренным навыком.`, [[
+        { text: '📘 Решение', callback_data: `rs:view:${claimed.ticketId}` }, ui.STAFF_HOME,
+      ]]);
+    }, 'Решение сохранено. Обновите карточку для актуального состояния.'); await ctx.answerCbQuery('Сохранено.'); return true;
   }
   let saved: any = null;
   if (action === 'edit' && intent.status === 'preview') {
