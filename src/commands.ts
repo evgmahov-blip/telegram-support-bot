@@ -15,6 +15,7 @@ import { isManualTicket, MANUAL_SOURCE_LABELS } from './manual-ticket-guard';
 import { staffDisplayName } from './staff-names';
 import * as resolutionCase from './ticket-resolution-case';
 import * as visibility from './ticket-visibility';
+import * as ticketState from './ticket-state';
 
 const escapeRegex = (str: string): string => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -115,7 +116,7 @@ const findUserCommand = (command: string) => {
  * @param ctx - The bot context.
  */
 const clearCommand = async (ctx: Context): Promise<void> => {
-  if (!ctx.session.admin) return;
+  if (!ctx.session.admin || !team.getStaffRole(String(ctx.from.id))) return;
   await middleware.reply(ctx, 'Массовое закрытие отключено: каждую заявку закрывают с причиной и выполненными работами (кнопка «🔒 Закрыть» на карточке).');
 };
 
@@ -125,7 +126,7 @@ const clearCommand = async (ctx: Context): Promise<void> => {
  * @param ctx - The bot context.
  */
 const openCommand = async (ctx: Context): Promise<void> => {
-  if (!ctx.session.admin) return;
+  if (!ctx.session.admin || !team.getStaffRole(String(ctx.from.id))) return;
   const groups: string[] = [];
   const { categories, language } = cache.config;
 
@@ -241,7 +242,8 @@ const userCloseCommand = async (ctx: Context): Promise<void> => {
  * @param ctx - The bot context.
  */
 const banCommand = async (ctx: Context): Promise<void> => {
-  if (!ctx.session.admin) return;
+  if (!team.canPerformAction(String(ctx.from.id), 'assign')) return;
+  if (!ctx.session.admin || !team.getStaffRole(String(ctx.from.id))) return;
   const replyText = ctx.message.reply_to_message.text;
   if (!replyText) return;
 
@@ -251,6 +253,8 @@ const banCommand = async (ctx: Context): Promise<void> => {
     return;
   }
   const { ticket, ticketIdStr } = resolved;
+  if (!team.canManageTicket(String(ctx.from.id), ticket.assigned_to)
+    || (ctx.chat.type !== 'private' && !visibility.isCommonTicket(ticket))) return;
   if (isManualTicket(ticket)) {
     await middleware.reply(ctx, 'Ручная заявка не связана с аккаунтом клиента; блокировать некого.');
     return;
@@ -270,7 +274,7 @@ const banCommand = async (ctx: Context): Promise<void> => {
  * @param ctx - The bot context.
  */
 const reopenCommand = async (ctx: Context): Promise<void> => {
-  if (!ctx.session.admin) return;
+  if (!ctx.session.admin || !team.getStaffRole(String(ctx.from.id))) return;
   const replyText = ctx.message.reply_to_message.text;
   if (!replyText) return;
 
@@ -280,8 +284,10 @@ const reopenCommand = async (ctx: Context): Promise<void> => {
     return;
   }
   const { ticket, ticketIdStr } = resolved;
+  if (!team.canManageTicket(String(ctx.from.id), ticket.assigned_to)
+    || (ctx.chat.type !== 'private' && !visibility.isCommonTicket(ticket))) return;
 
-  const reopened = await db.transitionTicketStatus(ticket.ticketId, 'open');
+  const reopened = await ticketState.transitionTicketStateFrom(ticket.ticketId, 'closed', 'open', ticket.assigned_to ?? null, undefined, ticket.routing?.version);
   if (!reopened) {
     await middleware.reply(ctx, 'Состояние заявки изменилось; открыть её снова не удалось.');
     return;
@@ -299,7 +305,8 @@ const reopenCommand = async (ctx: Context): Promise<void> => {
  * @param ctx - The bot context.
  */
 const unbanCommand = async (ctx: Context): Promise<void> => {
-  if (!ctx.session.admin) return;
+  if (!team.canPerformAction(String(ctx.from.id), 'assign')) return;
+  if (!ctx.session.admin || !team.getStaffRole(String(ctx.from.id))) return;
   const replyText = ctx.message.reply_to_message.text;
   if (!replyText) return;
 
@@ -309,6 +316,8 @@ const unbanCommand = async (ctx: Context): Promise<void> => {
     return;
   }
   const { ticket, ticketIdStr } = resolved;
+  if (!team.canManageTicket(String(ctx.from.id), ticket.assigned_to)
+    || (ctx.chat.type !== 'private' && !visibility.isCommonTicket(ticket))) return;
 
   await db.unbanUser(ticket.userid, ticket.messenger);
   await middleware.sendMessage(
@@ -324,7 +333,7 @@ const unbanCommand = async (ctx: Context): Promise<void> => {
  * Assign a ticket to a staff member: /assign <telegram_id>
  */
 const assignCommand = async (ctx: Context): Promise<void> => {
-  if (!ctx.session.admin) return;
+  if (!ctx.session.admin || !team.getStaffRole(String(ctx.from.id))) return;
   const args = ctx.match?.trim();
   if (!args) {
     await middleware.reply(ctx, 'Использование: /assign <telegram_id_сотрудника>');
@@ -357,7 +366,7 @@ const assignCommand = async (ctx: Context): Promise<void> => {
  * Unassign a ticket: /unassign
  */
 const unassignCommand = async (ctx: Context): Promise<void> => {
-  if (!ctx.session.admin) return;
+  if (!ctx.session.admin || !team.getStaffRole(String(ctx.from.id))) return;
 
   const replyText = ctx.message.reply_to_message?.text || ctx.message.reply_to_message?.caption;
   if (!replyText) {
@@ -379,7 +388,7 @@ const unassignCommand = async (ctx: Context): Promise<void> => {
  * Add tags to a ticket: /tag <tag1,tag2,...>
  */
 const tagCommand = async (ctx: Context): Promise<void> => {
-  if (!ctx.session.admin) return;
+  if (!ctx.session.admin || !team.getStaffRole(String(ctx.from.id))) return;
   const args = ctx.match?.trim();
   if (!args) {
     await middleware.reply(ctx, 'Использование: /tag <метка1,метка2,...>');
@@ -406,7 +415,7 @@ const tagCommand = async (ctx: Context): Promise<void> => {
  * Remove a tag from a ticket: /untag <tag>
  */
 const untagCommand = async (ctx: Context): Promise<void> => {
-  if (!ctx.session.admin) return;
+  if (!ctx.session.admin || !team.getStaffRole(String(ctx.from.id))) return;
   const args = ctx.match?.trim();
   if (!args) {
     await middleware.reply(ctx, 'Использование: /untag <метка>');
@@ -432,7 +441,7 @@ const untagCommand = async (ctx: Context): Promise<void> => {
  * Set priority: /priority <low|normal|high|urgent>
  */
 const priorityCommand = async (ctx: Context): Promise<void> => {
-  if (!ctx.session.admin) return;
+  if (!ctx.session.admin || !team.getStaffRole(String(ctx.from.id))) return;
   const args = ctx.match?.trim().toLowerCase() ?? '';
   const validPriorities = ['low', 'normal', 'high', 'urgent'];
   if (!args || !validPriorities.includes(args)) {
@@ -460,7 +469,7 @@ const priorityCommand = async (ctx: Context): Promise<void> => {
  * Mute a ticket: /mute
  */
 const muteCommand = async (ctx: Context): Promise<void> => {
-  if (!ctx.session.admin) return;
+  if (!ctx.session.admin || !team.getStaffRole(String(ctx.from.id))) return;
 
   const replyText = ctx.message.reply_to_message?.text || ctx.message.reply_to_message?.caption;
   if (!replyText) {
@@ -481,7 +490,7 @@ const muteCommand = async (ctx: Context): Promise<void> => {
  * Unmute a ticket: /unmute
  */
 const unmuteCommand = async (ctx: Context): Promise<void> => {
-  if (!ctx.session.admin) return;
+  if (!ctx.session.admin || !team.getStaffRole(String(ctx.from.id))) return;
 
   const replyText = ctx.message.reply_to_message?.text || ctx.message.reply_to_message?.caption;
   if (!replyText) {
@@ -502,7 +511,7 @@ const unmuteCommand = async (ctx: Context): Promise<void> => {
  * Add internal note: /note <text>
  */
 const noteCommand = async (ctx: Context): Promise<void> => {
-  if (!ctx.session.admin) return;
+  if (!ctx.session.admin || !team.getStaffRole(String(ctx.from.id))) return;
   const args = ctx.match?.trim();
   if (!args) {
     await middleware.reply(ctx, 'Использование: /note <текст внутренней заметки>');
@@ -529,7 +538,7 @@ const noteCommand = async (ctx: Context): Promise<void> => {
  * Show internal notes: /notes
  */
 const notesCommand = async (ctx: Context): Promise<void> => {
-  if (!ctx.session.admin) return;
+  if (!ctx.session.admin || !team.getStaffRole(String(ctx.from.id))) return;
 
   const replyText = ctx.message.reply_to_message?.text || ctx.message.reply_to_message?.caption;
   if (!replyText) {
@@ -550,7 +559,7 @@ const notesCommand = async (ctx: Context): Promise<void> => {
  * List staff members: /staff
  */
 const listStaffCommand = async (ctx: Context): Promise<void> => {
-  if (!ctx.session.admin) return;
+  if (!ctx.session.admin || !team.getStaffRole(String(ctx.from.id))) return;
   await team.listStaffCommand(ctx);
 };
 
@@ -560,7 +569,7 @@ const listStaffCommand = async (ctx: Context): Promise<void> => {
  * Show analytics stats: /stats
  */
 const statsCommand = async (ctx: Context): Promise<void> => {
-  if (!ctx.session.admin) return;
+  if (!ctx.session.admin || !team.getStaffRole(String(ctx.from.id))) return;
 
   // Check permission to view analytics
   if (!team.canPerformAction(ctx.from.id.toString(), 'view_analytics')) {
@@ -586,7 +595,7 @@ const parseTicketArg = (arg?: string): number | null => {
  * Show ticket details: /ticket <id> (or reply to a ticket message) (#85)
  */
 const ticketCommand = async (ctx: Context): Promise<void> => {
-  if (!ctx.session.admin) return;
+  if (!ctx.session.admin || !team.getStaffRole(String(ctx.from.id))) return;
   const { language, parse_mode, anonymous_tickets } = cache.config;
   const esc = middleware.strictEscape;
 
@@ -664,7 +673,8 @@ const ticketCommand = async (ctx: Context): Promise<void> => {
  * Broadcast a message to every known user: /broadcast <text> (allow_broadcast, #159)
  */
 const broadcastCommand = async (ctx: Context): Promise<void> => {
-  if (!ctx.session.admin) return;
+  if (!team.canPerformAction(String(ctx.from.id), 'manage_team')) return;
+  if (!ctx.session.admin || !team.getStaffRole(String(ctx.from.id))) return;
   const { language, allow_broadcast } = cache.config;
   if (!allow_broadcast) {
     await middleware.reply(ctx, 'Рассылка отключена в настройках.');
@@ -697,7 +707,7 @@ const broadcastCommand = async (ctx: Context): Promise<void> => {
  * List canned responses: /templates
  */
 const templatesCommand = async (ctx: Context): Promise<void> => {
-  if (!ctx.session.admin) return;
+  if (!ctx.session.admin || !team.getStaffRole(String(ctx.from.id))) return;
   const output = workflows.listCannedResponses();
   await middleware.reply(ctx, output, { parse_mode: cache.config.parse_mode });
 };

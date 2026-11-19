@@ -240,7 +240,7 @@ describe('ticketCommand (#85)', () => {
 
   it('denies another engineer\'s personal ticket before rendering any detail', async () => {
     const team = jest.requireMock('../src/team');
-    team.getStaffRole.mockReturnValueOnce('agent');
+    team.getStaffRole.mockReturnValueOnce('agent').mockReturnValueOnce('agent');
     mockGetByTicketId.mockResolvedValue(ticket);
     await commands.ticketCommand(makeCtx(true, { match: '1234' } as Partial<Context>));
     expect(mockReply).toHaveBeenCalledTimes(1);

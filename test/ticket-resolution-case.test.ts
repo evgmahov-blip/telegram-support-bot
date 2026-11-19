@@ -63,6 +63,14 @@ describe('human-recorded ticket resolution flow', () => {
     expect(cb).toHaveBeenCalledWith('Кнопка устарела или принадлежит другому сотруднику.', true);
   });
 
+  it('rejects confirmation after authority is revoked following preview', async () => {
+    db.getResolutionIntent.mockResolvedValue({ ...intent, status: 'preview', cause: 'Причина', actions: 'Действия' });
+    team.canPerformAction.mockReturnValue(false);
+    await flow.handleCallback(ctx('rs:save:tok:3'), ['rs','save','tok','3']);
+    expect(db.claimResolutionSave).not.toHaveBeenCalled();
+    expect(db.saveClaimedResolution).not.toHaveBeenCalled();
+  });
+
   it('cancels without saving when the ticket was reopened mid-flow', async () => {
     db.getResolutionIntent.mockResolvedValue({ ...intent, status: 'preview' }); db.getTicketById.mockResolvedValue({ ...ticket, status: 'open' });
     await flow.handleCallback(ctx('rs:save:tok:3'), ['rs','save','tok','3']);
@@ -79,6 +87,17 @@ describe('human-recorded ticket resolution flow', () => {
     expect(db.recordAnalyticsEventBestEffort).toHaveBeenCalledWith('ticket.resolution_saved', 7, '42', { version: 1 });
     expect(refresh).toHaveBeenCalledWith(7); expect(reply).not.toHaveBeenCalled();
     expect(answer.mock.calls.at(-1)[1]).toContain('не стало автоматически одобренным навыком');
+  });
+
+  it.each(['refresh', 'screen'])('reports the saved resolution when %s fails without saving twice', async (failure) => {
+    const preview = { ...intent, status: 'preview', cause: 'Причина', actions: 'Действия' };
+    db.getResolutionIntent.mockResolvedValue(preview); db.claimResolutionSave.mockResolvedValue(preview);
+    db.saveClaimedResolution.mockResolvedValue({ current_version: 1, versions: [preview] });
+    (failure === 'refresh' ? refresh : answer).mockRejectedValueOnce(new Error('Telegram unavailable'));
+    await expect(flow.handleCallback(ctx('rs:save:tok:3'), ['rs','save','tok','3'])).resolves.toBe(true);
+    expect(db.saveClaimedResolution).toHaveBeenCalledTimes(1);
+    expect(reply).toHaveBeenCalledWith(expect.anything(), 'Для пользователя 42: Решение сохранено. Обновите карточку для актуального состояния.', { parse_mode: undefined, message_thread_id: 9 });
+    expect(db.abandonClaimedResolution).not.toHaveBeenCalled();
   });
 
   it('abandons an atomic save claim if the ticket reopens between preview and persistence', async () => {

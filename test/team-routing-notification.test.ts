@@ -14,7 +14,7 @@ jest.mock('../src/cache', () => ({ __esModule: true, default: {
   ]),
 } }));
 import { transferTicketCommand } from '../src/team';
-const ctx: any = { from: { id: 42 } };
+const ctx: any = { from: { id: 42 }, chat: { id: 42, type: 'private' } };
 beforeEach(() => jest.clearAllMocks());
 it('uses the routing offer as the only recipient notification', async () => {
   read.mockResolvedValue({ ticketId: 7, assigned_to: '42', routing: { version: 1 } });
