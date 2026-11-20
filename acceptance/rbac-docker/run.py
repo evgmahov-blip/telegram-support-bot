@@ -61,6 +61,21 @@ def first_ack(result, text=None):
     if text is not None:
         assert text in acknowledgements[0].get('text', ''), acknowledgements[0]
 
+def silent_ack(result, update):
+    # A consumed update_id only stops the client spinner: one bare answer, nothing else.
+    assert [c['method'] for c in result['calls']] == ['answerCallbackQuery'], result
+    payload = result['calls'][0]['payload']
+    assert payload.get('callback_query_id') == update['callback_query']['id'], payload
+    assert not payload.get('text') and not payload.get('show_alert'), payload
+
+def unchanged(reference):
+    state = api('state')
+    assert durable(state) == durable(reference)
+    assert state['etag'] == reference['etag']
+    assert state['value']['staff_roles'] == reference['value']['staff_roles']
+    assert state['runtime'] == reference['runtime']
+    assert state['value']['team_settings_history'] == reference['value']['team_settings_history']
+
 def preview(actor=101, target=103, role='supervisor'):
     click('sn:list:0', actor)
     click(f'sn:pick:{target}:0', actor)
@@ -110,7 +125,7 @@ initial = {'bot_token': '999001:SYNTHETIC_ONLY', 'owner_id': 101, 'staffchat_id'
                            for i, role in [(101, 'admin'), (102, 'admin'), (103, 'agent')]],
            'team_settings_history': []}
 backup = (json.dumps(initial) + '\n').encode()  # Synthetic JSON is valid YAML.
-SCENARIOS = ['old_readonly_callback_unchanged', 'authorized_callback_one_audit_preserved_fields', 'application_callback_etag_changes_with_saved_state', 'same_update_id_fresh_confirmation_no_calls_no_audit', 'fresh_update_id_control_applies_same_confirmation_once', 'second_admin_invalidates_card_no_extra_audit', 'authority_revoked_between_preview_and_apply_no_audit', 'compose_restart_new_process_same_role_and_audit', 'stale_no_second_audit', 'insufficient_authority_no_second_audit', 'replay_no_second_audit', 'application_rollback_one_audit_stale_repeat_refused', 'backup_restore_old_readonly_package_original_state']
+SCENARIOS = ['old_readonly_callback_unchanged', 'authorized_callback_one_audit_preserved_fields', 'application_callback_etag_changes_with_saved_state', 'same_update_id_fresh_confirmation_silent_ack_no_audit', 'fresh_update_id_control_applies_same_confirmation_once', 'second_admin_invalidates_card_no_extra_audit', 'authority_revoked_between_preview_and_apply_no_audit', 'compose_restart_new_process_same_role_and_audit', 'stale_no_second_audit', 'insufficient_authority_no_second_audit', 'replay_no_second_audit', 'application_rollback_one_audit_stale_repeat_refused', 'backup_restore_old_readonly_package_original_state']
 evidence = {'status': 'RUNNING', 'candidate_sha': None, 'run_url': None, 'contracts': [], 'checks': []}
 try:
     OUT.mkdir(parents=True, exist_ok=True)
@@ -178,9 +193,9 @@ try:
     duplicate = copy.deepcopy(replay)
     duplicate['callback_query']['data'] = fresh
     rejected, _ = click('', update=duplicate)
-    assert rejected['calls'] == [], rejected
-    assert durable(api('state')) == durable(after)
-    evidence['checks'].append('same_update_id_fresh_confirmation_no_calls_no_audit')
+    silent_ack(rejected, duplicate)
+    unchanged(after)
+    evidence['checks'].append('same_update_id_fresh_confirmation_silent_ack_no_audit')
     fresh_update = copy.deepcopy(duplicate)
     fresh_update['update_id'] += 1000000
     fresh_update['callback_query']['id'] = 'fresh-control'
@@ -228,11 +243,11 @@ try:
         ('replay', '', 101, replay, None),
     ]:
         rejected, _ = click(data, actor, update)
-        assert durable(api('state')) == durable(after)
+        unchanged(after)
         if reason:
             first_ack(rejected, reason)
         else:
-            assert rejected['calls'] == []
+            silent_ack(rejected, update)
         evidence['checks'].append(label + '_no_second_audit')
     # Exercise application rollback with the same permission and etag checks.
     result, _ = click('sn:undo')
