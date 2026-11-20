@@ -49,3 +49,37 @@ jobs:
             test.log
           if-no-files-found: ignore
           retention-days: 3
+
+  configuration-node24:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      # Configuration checks need no native addons or image build.
+      - run: npm ci --ignore-scripts
+      - name: Validate deployment configuration and preserved regressions
+        run: npm test -- test/vm3902-packaging.test.ts test/logger-readonly.test.ts
+
+  docker-validation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      # Separate checkout; never consumes node_modules/build/config from other jobs.
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Build and run exact candidate in Docker
+        run: node scripts/docker-validation.cjs "$(git rev-parse HEAD)" "$RUNNER_TEMP/docker-validation"
+      - name: Upload SHA-bound Docker result and diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-validation-${{ github.sha }}
+          path: ${{ runner.temp }}/docker-validation/
+          if-no-files-found: error
+          retention-days: 7
