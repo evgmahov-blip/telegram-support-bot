@@ -69,17 +69,19 @@ Next controller action: publish this worktree as a new candidate, run its
 ordinary PR CI and route that same candidate through existing independent review.
 Use the existing dispatcher and its admitted fallback without changing global
 models, providers, budgets, approvals or historical accounting. Attach the new
-CI URL and `rbac-docker-acceptance-RUN-ATTEMPT` artifact to the new PR. Any failure
+CI URL and `rbac-docker-acceptance-HEAD_SHA-RUN-ATTEMPT` artifact to the new PR. Any failure
 remains BLOCKED with its exact CI step/artifact until resolved.
 
 
 ## Revision 2 — Fable REVISE 41e4b03e87ec8357 remediation
 
-PR #53 was read via GitHub: draft/open, observed head
-`54209a872ad8e0f093887dd7b9c890f6e31ce6ae`. This worktree contains
-uncommitted edits; it is not a published candidate and has no CI run URL.
-The saved Fable payload was unavailable through the exposed tools; the
-requested regressions were implemented from the user's explicit list.
+The previous PR #53 observation was head
+`54209a872ad8e0f093887dd7b9c890f6e31ce6ae`. The trusted controller handoff
+identifies the reviewed candidate/checkpoint as
+`bda108965311120a779e2f98237e786ab745df3c`. Revision 3 edits below still need
+a new controller-owned candidate SHA and a fresh PR head observation; the
+checkpoint must not be presented as the SHA of this changed diff.
+The saved Fable REVISE 41e4b03e87ec8357 feedback is supplied in this task.
 Historical review records and PR #51/#52 remain untouched.
 
 The new matrix checks the first answerCallbackQuery text on success/refusal;
@@ -115,3 +117,31 @@ actual Actions URL and SHA-named artifact, then submit that same diff/SHA to
 independent Fable review. Do not merge or deploy. Telegram Desktop remains a
 separate check after agreed installation. No VM3902/VM4090 connection or real
 role/ticket operation was performed.
+
+
+## Revision 3 — saved review remediation
+
+Removed tracked Python bytecode and excluded future bytecode from Git and
+Docker contexts. Setup now runs inside the evidence handler, so an existing
+synthetic lab produces BLOCKED result.json. Cleanup errors are recorded, mark
+the run BLOCKED and fail the process without replacing the primary exception.
+The matrix now records etags extracted from actual sn:apply callback_data,
+checks equality with the file digest, and requires the application token to
+change after saving. result.json exposes candidate_sha from provenance and
+uses only an actual Actions environment for run_url.
+
+Publication/acceptance remains pending: this editor cannot commit and has no
+Docker executable or CI dispatch endpoint. Do not treat previous local checks,
+the reviewed checkpoint or local-evidence/result.json as new Docker evidence.
+Controller must publish this diff, run MOST Core CI on that exact PR #53 head,
+attach PASS result.json and its actual run URL, then submit the same head/diff
+for independent review. Preserve Fable REVISE and all earlier review history.
+No merge, deployment, VM access, real role/ticket changes or Telegram Desktop
+installation is authorized by this handoff.
+
+Revision 3 local validation: Node v22.23.2, TypeScript build PASS, Jest
+71 suites / 901 tests PASS; two runner failure regressions PASS via
+`python3 -B acceptance/rbac-docker/test_runner.py` (also added to CI). Bash,
+Python and transport JavaScript syntax PASS. Node 24 remains a CI requirement;
+these local checks do not establish a Node 24 or Docker PASS. Updated local
+result.json retains the previous local evidence as historical data.

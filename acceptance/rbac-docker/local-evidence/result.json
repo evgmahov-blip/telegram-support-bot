@@ -1,25 +1,52 @@
 {
   "status": "BLOCKED",
-  "scope": "local editor verification; not Docker acceptance",
-  "review_reference": "Fable REVISE 41e4b03e87ec8357 (contents unavailable to editor)",
-  "observed_pr_head_sha": "54209a872ad8e0f093887dd7b9c890f6e31ce6ae",
+  "scope": "revision 3 local editor verification; not Docker acceptance",
+  "review_reference": "Fable REVISE 41e4b03e87ec8357; saved feedback supplied by controller",
+  "reviewed_checkpoint_sha": "bda108965311120a779e2f98237e786ab745df3c",
   "candidate_sha": null,
   "run_url": null,
   "checks": {
-    "node": "v24.22.2",
+    "node": "v22.23.2",
     "typescript_build": "PASS",
     "jest": {
       "suites": 71,
       "tests": 901,
       "status": "PASS"
     },
-    "bash_python_javascript_syntax": "PASS",
-    "workflow_compose_yaml": "PASS"
+    "runner_failure_regressions": {
+      "tests": 2,
+      "status": "PASS"
+    },
+    "bash_python_javascript_syntax": "PASS"
   },
   "blockers": [
     "Docker executable unavailable locally",
-    "New candidate publication and CI dispatch belong to orchestrator; editor must not commit",
-    "Saved Fable review and its independent review endpoint unavailable"
+    "git execution denied in managed editor; publication belongs to orchestrator",
+    "No callable CI dispatch or independent Fable endpoint; new candidate must be published before acceptance/review"
   ],
-  "docker_executable": null
+  "previous_local_evidence": {
+    "status": "BLOCKED",
+    "scope": "local editor verification; not Docker acceptance",
+    "review_reference": "Fable REVISE 41e4b03e87ec8357 (contents unavailable to editor)",
+    "observed_pr_head_sha": "54209a872ad8e0f093887dd7b9c890f6e31ce6ae",
+    "candidate_sha": null,
+    "run_url": null,
+    "checks": {
+      "node": "v24.22.2",
+      "typescript_build": "PASS",
+      "jest": {
+        "suites": 71,
+        "tests": 901,
+        "status": "PASS"
+      },
+      "bash_python_javascript_syntax": "PASS",
+      "workflow_compose_yaml": "PASS"
+    },
+    "blockers": [
+      "Docker executable unavailable locally",
+      "New candidate publication and CI dispatch belong to orchestrator; editor must not commit",
+      "Saved Fable review and its independent review endpoint unavailable"
+    ],
+    "docker_executable": null
+  }
 }

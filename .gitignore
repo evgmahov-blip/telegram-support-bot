@@ -69,3 +69,7 @@ test/testing.js
 test/support.test.js
 config/support.db.old
 config/config.yaml
+
+# Python bytecode
+__pycache__/
+*.py[cod]

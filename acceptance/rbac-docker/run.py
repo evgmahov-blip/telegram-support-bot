@@ -8,18 +8,10 @@ import sys
 import time
 
 HERE = Path(__file__).resolve().parent
-TREE = Path(sys.argv[1]).resolve()
-OUT = Path(sys.argv[2]).resolve()
-OUT.mkdir(parents=True, exist_ok=True)
-LAB = OUT / 'private-synthetic'
-LAB.mkdir(mode=0o700)
-CONFIG = LAB / 'config'
-CONFIG.mkdir(mode=0o700)
-FILE = CONFIG / 'config.yaml'
-PROJECT = 'rbac-lab-' + os.environ.get('GITHUB_RUN_ID', str(os.getpid())) + '-' + os.environ.get('GITHUB_RUN_ATTEMPT', '1')
-os.environ.update(LAB_TAG=PROJECT, LAB_CONFIG=str(CONFIG),
-                  LAB_TARGET='/bot/config', LAB_READONLY='false')
-COMPOSE = ['docker', 'compose', '--project-name', PROJECT, '--file', str(HERE / 'compose.yaml')]
+# Keep setup inside the evidence handler, including failures on a repeated run.
+OUT = Path(sys.argv[2]).resolve() if len(sys.argv) > 2 else HERE / 'local-evidence'
+COMPOSE = None
+
 
 def run(args, capture=True):
     return subprocess.check_output(args, text=True) if capture else subprocess.run(args, check=True)
@@ -76,6 +68,11 @@ def preview(actor=101, target=103, role='supervisor'):
     result, _ = click(button(result, f'sn:change:{target}:{role}:'), actor)
     return button(result, f'sn:apply:{target}:{role}:')
 
+def application_etag(confirmation):
+    etag = confirmation.rsplit(':', 1)[-1]
+    assert len(etag) == 24 and all(c in '0123456789abcdef' for c in etag), confirmation
+    return etag
+
 def durable(state):
     return {k: state[k] for k in ('etag', 'value', 'runtime')}
 
@@ -113,15 +110,31 @@ initial = {'bot_token': '999001:SYNTHETIC_ONLY', 'owner_id': 101, 'staffchat_id'
                            for i, role in [(101, 'admin'), (102, 'admin'), (103, 'agent')]],
            'team_settings_history': []}
 backup = (json.dumps(initial) + '\n').encode()  # Synthetic JSON is valid YAML.
-evidence = {'status': 'RUNNING', 'contracts': [], 'checks': []}
+evidence = {'status': 'RUNNING', 'candidate_sha': None, 'run_url': None, 'contracts': [], 'checks': []}
 try:
+    OUT.mkdir(parents=True, exist_ok=True)
+    if len(sys.argv) != 3:
+        raise ValueError('usage: run.py BUILD_INPUT EVIDENCE_DIRECTORY')
+    TREE = Path(sys.argv[1]).resolve()
+    evidence['provenance'] = json.loads((OUT / 'provenance.json').read_text())
+    evidence['candidate_sha'] = evidence['provenance']['candidate_sha']
+    if os.environ.get('GITHUB_REPOSITORY') and os.environ.get('GITHUB_RUN_ID'):
+        evidence['run_url'] = ('https://github.com/' + os.environ['GITHUB_REPOSITORY']
+                               + '/actions/runs/' + os.environ['GITHUB_RUN_ID'])
+    LAB = OUT / 'private-synthetic'
+    LAB.mkdir(mode=0o700)
+    CONFIG = LAB / 'config'
+    CONFIG.mkdir(mode=0o700)
+    FILE = CONFIG / 'config.yaml'
+    PROJECT = 'rbac-lab-' + os.environ.get('GITHUB_RUN_ID', str(os.getpid())) + '-' + os.environ.get('GITHUB_RUN_ATTEMPT', '1')
+    os.environ.update(LAB_TAG=PROJECT, LAB_CONFIG=str(CONFIG),
+                      LAB_TARGET='/bot/config', LAB_READONLY='false')
+    COMPOSE = ['docker', 'compose', '--project-name', PROJECT, '--file', str(HERE / 'compose.yaml')]
     assert run([os.environ['NODE24_BIN'], '--version']).strip().startswith('v24.')
     FILE.write_bytes(backup)
     FILE.chmod(0o600)
     run(['sudo', 'chown', '-R', '1000:1000', str(LAB)])
-    evidence.update(provenance=json.loads((OUT / 'provenance.json').read_text()),
-                    run_url='https://github.com/' + os.environ.get('GITHUB_REPOSITORY', 'unknown') + '/actions/runs/' + os.environ.get('GITHUB_RUN_ID', 'local'),
-                    kernel=run(['uname', '-srmo']).strip(),
+    evidence.update(kernel=run(['uname', '-srmo']).strip(),
                     docker=run(['docker', 'version', '--format', '{{json .}}']).strip(),
                     compose=run(['docker', 'compose', 'version', '--short']).strip())
     base_image = 'rbac-application:' + PROJECT
@@ -138,6 +151,8 @@ try:
     evidence['checks'].append('old_readonly_callback_unchanged')
     before = mount('new')
     confirmation = preview()
+    original_application_etag = application_etag(confirmation)
+    assert original_application_etag == before['etag']
     stale_confirmation = confirmation
     result, replay = click(confirmation)
     first_ack(result, 'Сохранено.')
@@ -154,6 +169,11 @@ try:
     # A fresh, otherwise valid confirmation makes this a dedup regression:
     # without the Mongo update_id claim this would add a second audit entry.
     fresh = preview(role='agent')
+    saved_application_etag = application_etag(fresh)
+    assert saved_application_etag == after['etag']
+    assert saved_application_etag != original_application_etag
+    evidence['application_callback_etags'] = {'before': original_application_etag, 'after': saved_application_etag}
+    evidence['checks'].append('application_callback_etag_changes_with_saved_state')
     duplicate = copy.deepcopy(replay)
     duplicate['callback_query']['data'] = fresh
     rejected, _ = click('', update=duplicate)
@@ -254,5 +274,13 @@ except Exception as error:
     evidence.update(status='BLOCKED', reason=type(error).__name__ + ': ' + str(error)[:300])
     raise
 finally:
+    # Cleanup must neither mask the primary failure nor leave a false PASS.
+    if COMPOSE is not None:
+        try:
+            compose('down', '--volumes', '--remove-orphans')
+        except Exception as cleanup_error:
+            evidence['cleanup_error'] = type(cleanup_error).__name__ + ': ' + str(cleanup_error)[:300]
+            evidence['status'] = 'BLOCKED'
     (OUT / 'result.json').write_text(json.dumps(evidence, indent=2) + '\n')
-    compose('down', '--volumes', '--remove-orphans')
+    if evidence.get('cleanup_error') and sys.exc_info()[0] is None:
+        raise SystemExit(1)

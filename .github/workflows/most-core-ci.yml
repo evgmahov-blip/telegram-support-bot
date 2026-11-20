@@ -58,6 +58,8 @@ jobs:
           npm ci
           npm run build
           npm test
+      - name: Verify acceptance failure evidence
+        run: python3 -B candidate/acceptance/rbac-docker/test_runner.py
       - name: Real isolated Docker Compose acceptance
         run: sudo --preserve-env=GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_REPOSITORY env NODE24_BIN="$(command -v node)" python3 candidate/acceptance/rbac-docker/run.py "$GITHUB_WORKSPACE/evidence/build-input" "$GITHUB_WORKSPACE/evidence"
       - name: Upload synthetic acceptance and provenance
