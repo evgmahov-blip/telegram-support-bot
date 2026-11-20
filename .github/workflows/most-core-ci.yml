@@ -13,6 +13,54 @@ permissions:
   contents: read
 
 jobs:
+  rbac-docker-acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout acceptance candidate
+        uses: actions/checkout@v4
+        with:
+          path: candidate
+          persist-credentials: false
+      - name: Checkout exact PR 51 source
+        uses: actions/checkout@v4
+        with:
+          ref: e48f6e5a520d9d04af4a4a36f4684e1794274ca1
+          path: integrated
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Checkout exact PR 52 package
+        uses: actions/checkout@v4
+        with:
+          ref: c4add43d45c34c1c74c9ae8b7b0a952b9ae15e8d
+          path: package
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify provenance and materialize one-use integrated tree
+        run: bash candidate/acceptance/rbac-docker/prepare.sh "$GITHUB_WORKSPACE/integrated" "$GITHUB_WORKSPACE/package" "$GITHUB_WORKSPACE/evidence"
+      - name: Use Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Verify integrated project
+        working-directory: integrated
+        run: |
+          npm ci
+          npm run build
+          npm test
+      - name: Real isolated Docker Compose acceptance
+        run: sudo --preserve-env=GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT python3 candidate/acceptance/rbac-docker/run.py "$GITHUB_WORKSPACE/integrated" "$GITHUB_WORKSPACE/evidence"
+      - name: Upload synthetic acceptance and provenance
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rbac-docker-acceptance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            evidence/provenance.json
+            evidence/apply.txt
+            evidence/result.json
+          if-no-files-found: warn
+          retention-days: 3
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 15
