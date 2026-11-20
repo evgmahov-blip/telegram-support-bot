@@ -15,21 +15,43 @@ This directory is a reviewed-candidate input for the owner-authorized replacemen
 
 `log_level: ERROR` is compatible with the read-only root filesystem and read-only config mount: errors are redacted and emitted to container stderr; the optional `config/debug.log` append fails harmlessly and never crashes the process.
 
-## Candidate validation (no services started)
+## Candidate validation (no bot services started)
 
-From the repository root:
+Configuration and Docker validation are separate jobs in `most-core-ci.yml`.
+The configuration job uses Node 24 and `npm ci --ignore-scripts` from the tracked
+lockfile, then runs the deployment packaging and read-only logger regressions.
+It does not build an image or create a runtime configuration containing a token.
+The existing full build/unit-test job remains required as well.
+
+The Docker job uses its own checkout and does not install dependencies into it.
+Run the same validation on an isolated Docker-capable CI host after the
+orchestrator creates the new candidate commit:
 
 ```bash
-cp deploy/vm3902/config-sample.yaml deploy/vm3902/config.yaml
-chmod 0600 deploy/vm3902/config.yaml
-# Replace YOUR_BOT_TOKEN only through the approved secret path.
-docker compose --project-name most-support-bot --file deploy/vm3902/compose.yaml config --quiet
-npm ci
-npm test
-npm run build
+node scripts/docker-validation.cjs <full-new-candidate-sha> /tmp/support-bot-docker-result
 ```
 
-The Dockerfile pins Node 24.15.0 / Alpine 3.22 by digest. Build/run checks require an available Docker runtime and must not be reported as performed otherwise.
+The runner exports only that commit with `git archive` into a temporary clean
+context. It builds a separate test image with `npm ci`, compiles TypeScript,
+runs the complete Jest suite without network access, then builds the production
+Dockerfile independently. Both builds disable layer-cache reuse and refresh the
+pinned base. A non-root, read-only, network-disabled production container checks
+Node 24, required runtime/native modules and ERROR logging against the non-secret
+sample configuration. It overrides the entrypoint and never starts polling,
+Compose, MongoDB, production networks or the live bot.
+
+`result.json` records the exact commit SHA, outcome, step exit codes, image IDs
+and timestamps; adjacent logs contain diagnostics. CI uploads these artifacts
+also on failure. Only `status: passed` with all expected stages for the new SHA
+is evidence of this Docker run. A missing runtime, failed test or missing stage
+is not success. Temporary source and validation images are removed afterwards.
+The Dockerfile pins Node 24.15.0 / Alpine 3.22 by digest.
+
+The source candidate is input only: its approvals, exhausted review budget and
+SUCCESS/UNKNOWN effects do not carry over. This task must pass existing AOR
+admission, a fresh independent review and CI for the new SHA. These checks grant
+no production permission; release and activation still require their separate
+gates. No live installation is changed by this validation.
 
 ## Proposed pre-switch checks
 
