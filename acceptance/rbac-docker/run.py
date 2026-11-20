@@ -63,12 +63,18 @@ def button(result, prefix):
                     return item['callback_data']
     raise AssertionError('Expected application button missing: ' + prefix)
 
-def preview():
-    click('sn:list:0')
-    click('sn:pick:103:0')
-    result, _ = click('sn:access:103')
-    result, _ = click(button(result, 'sn:change:103:supervisor:'))
-    return button(result, 'sn:apply:103:supervisor:')
+def first_ack(result, text=None):
+    acknowledgements = [c['payload'] for c in result['calls'] if c['method'] == 'answerCallbackQuery']
+    assert acknowledgements, 'Missing answerCallbackQuery'
+    if text is not None:
+        assert text in acknowledgements[0].get('text', ''), acknowledgements[0]
+
+def preview(actor=101, target=103, role='supervisor'):
+    click('sn:list:0', actor)
+    click(f'sn:pick:{target}:0', actor)
+    result, _ = click(f'sn:access:{target}', actor)
+    result, _ = click(button(result, f'sn:change:{target}:{role}:'), actor)
+    return button(result, f'sn:apply:{target}:{role}:')
 
 def durable(state):
     return {k: state[k] for k in ('etag', 'value', 'runtime')}
@@ -94,7 +100,7 @@ def mount(mode):
                       LAB_READONLY='false' if mode == 'new' else 'true')
     if mode == 'new':
         # Execute the unchanged package's directory and rendered-contract checks.
-        run(['node', str(TREE / 'deploy/vm3902/check-runtime.cjs'), str(CONFIG),
+        run([os.environ['NODE24_BIN'], str(TREE / 'deploy/vm3902/check-runtime.cjs'), str(CONFIG),
              '--project-name', PROJECT, '--file', str(HERE / 'compose.yaml')])
     compose('up', '-d', 'supportbot')
     state = ready()
@@ -106,15 +112,18 @@ initial = {'bot_token': '999001:SYNTHETIC_ONLY', 'owner_id': 101, 'staffchat_id'
            'staff_roles': [{'telegram_id': str(i), 'name': 'Synthetic ' + str(i), 'role': role, 'active': True}
                            for i, role in [(101, 'admin'), (102, 'admin'), (103, 'agent')]],
            'team_settings_history': []}
-backup = (json.dumps(initial) + '\n').encode()  # JSON is valid YAML, includes only synthetic data.
-FILE.write_bytes(backup)
-FILE.chmod(0o600)
-run(['sudo', 'chown', '-R', '1000:1000', str(LAB)])
-evidence = {'status': 'RUNNING', 'contracts': [], 'checks': [], 'provenance': json.loads((OUT / 'provenance.json').read_text()),
-            'kernel': run(['uname', '-srmo']).strip(),
-            'docker': run(['docker', 'version', '--format', '{{json .}}']).strip(),
-            'compose': run(['docker', 'compose', 'version', '--short']).strip()}
+backup = (json.dumps(initial) + '\n').encode()  # Synthetic JSON is valid YAML.
+evidence = {'status': 'RUNNING', 'contracts': [], 'checks': []}
 try:
+    assert run([os.environ['NODE24_BIN'], '--version']).strip().startswith('v24.')
+    FILE.write_bytes(backup)
+    FILE.chmod(0o600)
+    run(['sudo', 'chown', '-R', '1000:1000', str(LAB)])
+    evidence.update(provenance=json.loads((OUT / 'provenance.json').read_text()),
+                    run_url='https://github.com/' + os.environ.get('GITHUB_REPOSITORY', 'unknown') + '/actions/runs/' + os.environ.get('GITHUB_RUN_ID', 'local'),
+                    kernel=run(['uname', '-srmo']).strip(),
+                    docker=run(['docker', 'version', '--format', '{{json .}}']).strip(),
+                    compose=run(['docker', 'compose', 'version', '--short']).strip())
     base_image = 'rbac-application:' + PROJECT
     run(['docker', 'build', '-t', base_image, str(TREE)], capture=False)
     evidence['application_image_id'] = run(['docker', 'image', 'inspect', '--format', '{{.Id}}', base_image]).strip()
@@ -125,12 +134,13 @@ try:
     confirmation = preview()
     result, _ = click(confirmation)
     assert durable(api('state')) == durable(before)
-    assert any('недоступна для записи' in str(c['payload']) for c in result['calls'])
+    first_ack(result, 'недоступна для записи')
     evidence['checks'].append('old_readonly_callback_unchanged')
     before = mount('new')
     confirmation = preview()
     stale_confirmation = confirmation
     result, replay = click(confirmation)
+    first_ack(result, 'Сохранено.')
     after = api('state')
     expected = copy.deepcopy(initial)
     expected['staff_roles'][2]['role'] = 'supervisor'
@@ -141,6 +151,52 @@ try:
     assert after['value'] == expected and after['etag'] != before['etag']
     assert after['runtime'] == expected['staff_roles']
     evidence['checks'].append('authorized_callback_one_audit_preserved_fields')
+    # A fresh, otherwise valid confirmation makes this a dedup regression:
+    # without the Mongo update_id claim this would add a second audit entry.
+    fresh = preview(role='agent')
+    duplicate = copy.deepcopy(replay)
+    duplicate['callback_query']['data'] = fresh
+    rejected, _ = click('', update=duplicate)
+    assert rejected['calls'] == [], rejected
+    assert durable(api('state')) == durable(after)
+    evidence['checks'].append('same_update_id_fresh_confirmation_no_calls_no_audit')
+    fresh_update = copy.deepcopy(duplicate)
+    fresh_update['update_id'] += 1000000
+    fresh_update['callback_query']['id'] = 'fresh-control'
+    accepted, _ = click('', update=fresh_update)
+    first_ack(accepted, 'Сохранено.')
+    control = api('state')
+    assert control['value']['staff_roles'][2]['role'] == 'agent'
+    assert len(control['value']['team_settings_history']) == 2
+    assert control['etag'] != after['etag']
+    evidence['checks'].append('fresh_update_id_control_applies_same_confirmation_once')
+
+    # Admin 102 changes the same employee while 101 holds an old card.
+    stale = preview()
+    second = preview(actor=102)
+    accepted, _ = click(second, actor=102)
+    first_ack(accepted, 'Сохранено.')
+    after = api('state')
+    assert len(after['value']['team_settings_history']) == 3
+    assert after['value']['team_settings_history'][-1]['actor'] == '102'
+    assert after['etag'] != control['etag']
+    rejected, _ = click(stale)
+    first_ack(rejected, 'устарела')
+    assert durable(api('state')) == durable(after)
+    evidence['checks'].append('second_admin_invalidates_card_no_extra_audit')
+
+    # 102 previews while authorized; owner 101 then removes that authority.
+    pending = preview(actor=102, role='agent')
+    demote = preview(target=102, role='agent')
+    accepted, _ = click(demote)
+    first_ack(accepted, 'Сохранено.')
+    after = api('state')
+    assert len(after['value']['team_settings_history']) == 4
+    rejected, _ = click(pending, actor=102)
+    first_ack(rejected, 'администратору')
+    assert durable(api('state')) == durable(after)
+    evidence['checks'].append('authority_revoked_between_preview_and_apply_no_audit')
+
     compose('restart', 'supportbot')
     restarted = ready()
     assert restarted['boot'] != after['boot'] and durable(restarted) == durable(after)
@@ -153,10 +209,26 @@ try:
         rejected, _ = click(data, actor, update)
         assert durable(api('state')) == durable(after)
         if reason:
-            assert any(reason in str(c['payload']) for c in rejected['calls'])
+            first_ack(rejected, reason)
         else:
-            assert all(c['method'] == 'answerCallbackQuery' for c in rejected['calls'])
+            assert rejected['calls'] == []
         evidence['checks'].append(label + '_no_second_audit')
+    # Exercise application rollback with the same permission and etag checks.
+    result, _ = click('sn:undo')
+    undo = button(result, 'sn:undoapply:')
+    accepted, _ = click(undo)
+    first_ack(accepted, 'Откат сохранён.')
+    undone = api('state')
+    expected_undo = copy.deepcopy(after['value']['staff_roles'])
+    expected_undo[1] = initial['staff_roles'][1]
+    assert undone['value']['staff_roles'] == expected_undo
+    assert undone['runtime'] == expected_undo
+    assert len(undone['value']['team_settings_history']) == 5
+    assert undone['etag'] != after['etag']
+    rejected, _ = click(undo)
+    first_ack(rejected, 'устарела')
+    assert durable(api('state')) == durable(undone)
+    evidence['checks'].append('application_rollback_one_audit_stale_repeat_refused')
     compose('stop', 'supportbot')
     # Stopped sole writer: fsync sibling, atomic rename, directory fsync.
     temp = CONFIG / 'restore.tmp'
@@ -170,7 +242,8 @@ try:
     finally: os.close(fd)
     restored = mount('old')
     assert restored['value'] == initial and restored['etag'] == before['etag']
-    click(preview())
+    refused, _ = click(preview())
+    first_ack(refused, 'недоступна для записи')
     assert durable(api('state')) == durable(restored)
     evidence['checks'].append('backup_restore_old_readonly_package_original_state')
     evidence.update(status='PASS', node=restarted['node'], replay_update_id=replay['update_id'],

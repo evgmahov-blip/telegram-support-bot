@@ -20,6 +20,7 @@ jobs:
       - name: Checkout acceptance candidate
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           path: candidate
           persist-credentials: false
       - name: Checkout exact PR 51 source
@@ -36,7 +37,15 @@ jobs:
           path: package
           fetch-depth: 0
           persist-credentials: false
+      - name: Bind evidence to candidate head
+        env:
+          CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          test "$(git -C candidate rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test -z "$(git -C candidate status --porcelain --untracked-files=all)"
       - name: Verify provenance and materialize one-use integrated tree
+        env:
+          CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: bash candidate/acceptance/rbac-docker/prepare.sh "$GITHUB_WORKSPACE/integrated" "$GITHUB_WORKSPACE/package" "$GITHUB_WORKSPACE/evidence"
       - name: Use Node.js 24
         uses: actions/setup-node@v4
@@ -45,16 +54,17 @@ jobs:
       - name: Verify integrated project
         working-directory: integrated
         run: |
+          node -e "if (process.versions.node.split('.')[0] !== '24') process.exit(1)"
           npm ci
           npm run build
           npm test
       - name: Real isolated Docker Compose acceptance
-        run: sudo --preserve-env=GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT python3 candidate/acceptance/rbac-docker/run.py "$GITHUB_WORKSPACE/integrated" "$GITHUB_WORKSPACE/evidence"
+        run: sudo --preserve-env=GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_REPOSITORY env NODE24_BIN="$(command -v node)" python3 candidate/acceptance/rbac-docker/run.py "$GITHUB_WORKSPACE/evidence/build-input" "$GITHUB_WORKSPACE/evidence"
       - name: Upload synthetic acceptance and provenance
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: rbac-docker-acceptance-${{ github.run_id }}-${{ github.run_attempt }}
+          name: rbac-docker-acceptance-${{ github.event.pull_request.head.sha || github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             evidence/provenance.json
             evidence/apply.txt

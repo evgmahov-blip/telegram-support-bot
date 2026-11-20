@@ -1,0 +1,25 @@
+{
+  "status": "BLOCKED",
+  "scope": "local editor verification; not Docker acceptance",
+  "review_reference": "Fable REVISE 41e4b03e87ec8357 (contents unavailable to editor)",
+  "observed_pr_head_sha": "54209a872ad8e0f093887dd7b9c890f6e31ce6ae",
+  "candidate_sha": null,
+  "run_url": null,
+  "checks": {
+    "node": "v24.22.2",
+    "typescript_build": "PASS",
+    "jest": {
+      "suites": 71,
+      "tests": 901,
+      "status": "PASS"
+    },
+    "bash_python_javascript_syntax": "PASS",
+    "workflow_compose_yaml": "PASS"
+  },
+  "blockers": [
+    "Docker executable unavailable locally",
+    "New candidate publication and CI dispatch belong to orchestrator; editor must not commit",
+    "Saved Fable review and its independent review endpoint unavailable"
+  ],
+  "docker_executable": null
+}

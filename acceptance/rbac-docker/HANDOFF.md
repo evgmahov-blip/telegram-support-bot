@@ -71,3 +71,47 @@ Use the existing dispatcher and its admitted fallback without changing global
 models, providers, budgets, approvals or historical accounting. Attach the new
 CI URL and `rbac-docker-acceptance-RUN-ATTEMPT` artifact to the new PR. Any failure
 remains BLOCKED with its exact CI step/artifact until resolved.
+
+
+## Revision 2 — Fable REVISE 41e4b03e87ec8357 remediation
+
+PR #53 was read via GitHub: draft/open, observed head
+`54209a872ad8e0f093887dd7b9c890f6e31ce6ae`. This worktree contains
+uncommitted edits; it is not a published candidate and has no CI run URL.
+The saved Fable payload was unavailable through the exposed tools; the
+requested regressions were implemented from the user's explicit list.
+Historical review records and PR #51/#52 remain untouched.
+
+The new matrix checks the first answerCallbackQuery text on success/refusal;
+reuses a consumed update_id with a freshly generated, valid confirmation,
+then proves that exact confirmation works under a new update_id; invalidates
+an old card through a real change by administrator 102; and revokes 102's
+rights after preview and before apply. Rejected operations preserve the exact
+etag, YAML projection and runtime roles. Accepted operations count audit
+entries, restart preserves roles and history, and application rollback is
+followed by rejection of its stale repeat. Backup restore still runs only with
+the sole writer stopped, and restores the original read-only mount.
+
+The candidate checkout, provenance and artifact name use the PR head SHA
+rather than the merge ref. The Docker context is a fresh Git archive of the
+recorded integrated tree, separate from npm build/test outputs. Node 24 is
+checked in CI and the absolute setup-node executable is passed through sudo
+to the runtime checker. Configuration preparation and Docker discovery errors
+now produce BLOCKED result.json through the same error handler.
+
+Local verification on Node 24.22.2: build PASS; 71 suites / 901 tests PASS;
+Bash/Python/JavaScript syntax and workflow/Compose YAML PASS. Dependency
+installation used --ignore-scripts locally; this does not validate native
+module installation. CI retains ordinary npm ci and immutable application
+Docker builds. See local-evidence/result.json: BLOCKED, not Docker PASS.
+
+Independent local read-only review found sudo PATH and config ownership
+issues; the fix keeps the privileged isolated driver with an explicit Node 24
+path. This local review does not replace Fable or close its saved verdict.
+
+Controller continuation: publish this diff without altering historical reviews,
+run MOST Core CI on the new PR #53 head, require PASS result.json plus its
+actual Actions URL and SHA-named artifact, then submit that same diff/SHA to
+independent Fable review. Do not merge or deploy. Telegram Desktop remains a
+separate check after agreed installation. No VM3902/VM4090 connection or real
+role/ticket operation was performed.
