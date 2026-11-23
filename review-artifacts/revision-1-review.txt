@@ -1,0 +1,20 @@
+Revision 1, isolated managed worktree ao-rem-7528983d200f. No deployment or commit.
+Trusted checkpoint (input only): f441bedaedee244a549ffac82727a8bc6ef510db
+Requested base (input only): 61144e82fe9379bb897389d47ac14e8226901fbb
+Git executable denied by environment; no exact candidate commit SHA or base-relative diff was verified. Do not use checkpoint SHA as the modified result SHA.
+
+Changes in this revision:
+- src/callback-ack.ts: 1500ms neutral fallback before DB/session/locks; primary private callback answer remains available; one business answer; ACK transport errors only logged; cleanup on every ingress exit, including duplicates/claim failure.
+- src/addons/telegram/index.ts: remove conversion of callback answers to group messages; install/finalize fallback around entire ingress lease lifecycle.
+- src/handlers.ts: restore answer-once guard and remove public callback error fallback.
+- src/write-presentation.ts: address saved-write fallback to actor in originating topic.
+- src/ticket-ui.ts: transfer follow-up failure explicitly mentions pending offer/audit delivery.
+- Tests: timer boundary, slow DB claim, duplicate delivery, repeated answer, expired/network ACK, private group denials, actor-addressed save feedback, revoked save authority. Existing tests cover real writer lock, stale version, double save and actor/chat/topic guards.
+
+Independent review: separate agent independent_review read final files; no new blocking ACK findings. Independently ran callback-ack, telegram-addon, handlers-callback-await, write-presentation: 41 tests passed (Node 22.23.2). CAS/audit outbox/authority/session bindings preserved.
+Limitations: writer-lock timer unit case models waiting; existing team-settings test uses a real lock. No real Telegram GUI performed, no hosted CI triggered, no full base-relative independent review. Late toast visibility after neutral ACK requires real Telegram verification; private responses are never converted to shared messages.
+Known pre-existing risks: authority revocation during routingCommand getTicketById await for common/transfer; YAML fsync/cleanup after atomic rename can report an error after persistence. Neither was changed in this revision.
+
+Rollback: before release discard this isolated worktree via orchestrator. After a separately authorized release, revert its eventual commit and run previous immutable artifact. Do not reset YAML/Mongo; preserve audit/outbox records. No production action authorized or performed.
+
+Final local CI equivalent: Node 24.22.2, npm ci completed, npm run build PASS, npm test PASS (75 suites, 942 tests). First run exposed two outdated confirmation-text expectations; corrected and full build/test rerun passed. Output: revision-1-ci.txt. Hosted GitHub Actions status remains unverified.

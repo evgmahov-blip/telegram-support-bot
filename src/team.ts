@@ -130,7 +130,7 @@ export async function transferTicketCommand(
         await middleware.reply(ctx, 'Заявка не найдена.');
         return;
     }
-    if (!canManageTicket(actorId, current.assigned_to)) {
+    if (!canManageTicket(actorId, current.assigned_to) || (ctx.chat?.type !== 'private' && !visibility.isCommonTicket(current))) {
         await middleware.reply(ctx, 'Передать заявку может её владелец, руководитель или администратор.');
         return;
     }
@@ -180,7 +180,7 @@ export async function waitingUserCommand(ctx: Context, ticketId: number): Promis
         await middleware.reply(ctx, 'Заявка не найдена.');
         return;
     }
-    if (!canManageTicket(actorId, current.assigned_to)) {
+    if (!canManageTicket(actorId, current.assigned_to) || (ctx.chat?.type !== 'private' && !visibility.isCommonTicket(current))) {
         await middleware.reply(ctx, 'Сначала возьмите заявку или попросите руководителя изменить её состояние.');
         return;
     }
@@ -199,6 +199,7 @@ export async function waitingUserCommand(ctx: Context, ticketId: number): Promis
  * Assigns a ticket to a specific staff member.
  */
 export async function assignTicketCommand(ctx: Context, targetId: string, ticketId: number): Promise<void> {
+    if (!canPerformAction(String(ctx.from.id), 'assign')) return;
     const role = getStaffRole(targetId);
     if (!role) {
         await middleware.reply(ctx, 'Выбранный пользователь не зарегистрирован как сотрудник.');
@@ -206,6 +207,7 @@ export async function assignTicketCommand(ctx: Context, targetId: string, ticket
     }
 
     const current = await db.getTicketById(ticketId, null);
+    if (!canPerformAction(String(ctx.from.id), 'assign') || !current || (ctx.chat?.type !== 'private' && !visibility.isCommonTicket(current))) return;
     if (current?.routing) {
       const changed = await routing.routingCommand(ticketId, String(ctx.from.id), current.routing.version, 'transfer', targetId);
       if (changed) { await routing.flushRoutingAudit(changed); await routing.deliverOffer(changed); }
@@ -234,7 +236,9 @@ export async function assignTicketCommand(ctx: Context, targetId: string, ticket
  * Unassigns a ticket from its current assignee.
  */
 export async function unassignTicketCommand(ctx: Context, ticketId: number): Promise<void> {
+    if (!canPerformAction(String(ctx.from.id), 'assign')) return;
     const current = await db.getTicketById(ticketId, null);
+    if (!canPerformAction(String(ctx.from.id), 'assign') || !current || (ctx.chat?.type !== 'private' && !visibility.isCommonTicket(current))) return;
     if (current?.routing) {
       const changed = await routing.routingCommand(ticketId, String(ctx.from.id), current.routing.version, 'common');
       if (changed) await routing.flushRoutingAudit(changed);
@@ -244,10 +248,18 @@ export async function unassignTicketCommand(ctx: Context, ticketId: number): Pro
     await middleware.reply(ctx, cache.config.language.ticketUnassigned);
 }
 
+/** Resolve command authority afresh; a shared chat never manages personal work. */
+async function canEditTicketHere(ctx: Context, ticketId: number): Promise<boolean> {
+    const ticket = await db.getTicketById(ticketId, null);
+    return Boolean(ticket && canManageTicket(String(ctx.from.id), ticket.assigned_to)
+      && (ctx.chat?.type === 'private' || visibility.isCommonTicket(ticket)));
+}
+
 /**
  * Adds tags to a ticket.
  */
 export async function addTagsCommand(ctx: Context, ticketId: number, tags: string[]): Promise<void> {
+    if (!await canEditTicketHere(ctx, ticketId)) return;
     await db.addTags(ticketId, tags);
     await middleware.reply(ctx, `Метки добавлены: ${tags.join(', ')}`);
 }
@@ -256,6 +268,7 @@ export async function addTagsCommand(ctx: Context, ticketId: number, tags: strin
  * Removes a tag from a ticket.
  */
 export async function removeTagCommand(ctx: Context, ticketId: number, tag: string): Promise<void> {
+    if (!await canEditTicketHere(ctx, ticketId)) return;
     await db.removeTag(ticketId, tag);
     await middleware.reply(ctx, `Метка удалена: ${tag}`);
 }
@@ -268,6 +281,7 @@ export async function setPriorityCommand(
     ticketId: number,
     priority: 'low' | 'normal' | 'high' | 'urgent',
 ): Promise<void> {
+    if (!await canEditTicketHere(ctx, ticketId)) return;
     await db.setPriority(ticketId, priority as any);
 
     const icons: Record<string, string> = { urgent: '🔴', high: '🟠', normal: '🟡', low: '⚪' };
@@ -279,6 +293,7 @@ export async function setPriorityCommand(
  * Mutes notifications for a ticket.
  */
 export async function muteTicketCommand(ctx: Context, ticketId: number): Promise<void> {
+    if (!await canEditTicketHere(ctx, ticketId)) return;
     cache.mutedTickets.add(ticketId.toString());
     await middleware.reply(ctx, `🔇 Уведомления по заявке № ${ticketId} отключены.`);
 }
@@ -287,6 +302,7 @@ export async function muteTicketCommand(ctx: Context, ticketId: number): Promise
  * Unmutes notifications for a ticket.
  */
 export async function unmuteTicketCommand(ctx: Context, ticketId: number): Promise<void> {
+    if (!await canEditTicketHere(ctx, ticketId)) return;
     cache.mutedTickets.delete(ticketId.toString());
     await middleware.reply(ctx, `🔊 Уведомления по заявке № ${ticketId} включены.`);
 }
@@ -333,6 +349,7 @@ export async function showNotesCommand(ctx: Context, ticketId: number): Promise<
  * Lists all staff members and their roles.
  */
 export async function listStaffCommand(ctx: Context): Promise<void> {
+    if (!canPerformAction(String(ctx.from.id), 'manage_team')) return;
     if (cache.staffMembers.size === 0) {
         await middleware.reply(ctx, 'Сотрудники не настроены.');
         return;

@@ -1,0 +1,37 @@
+services:
+  supportbot:
+    image: rbac-acceptance:${LAB_TAG:?}
+    user: '1000:1000'
+    read_only: true
+    scale: 1
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    tmpfs: ['/tmp:rw,noexec,nosuid,nodev,size=64m']
+    volumes:
+      - type: bind
+        source: ${LAB_CONFIG:?}
+        target: ${LAB_TARGET:?}
+        read_only: ${LAB_READONLY:?}
+        bind:
+          create_host_path: false
+    command: ['node', '/bot/acceptance/transport.cjs']
+    environment:
+      MONGO_URI: mongodb://mongodb:27017/synthetic_acceptance
+      MONGO_COLLECTION: synthetic_acceptance
+    networks: [lab]
+    depends_on:
+      mongodb:
+        condition: service_healthy
+  mongodb:
+    image: mongo:8.0
+    tmpfs: ['/data/db', '/data/configdb']
+    networks: [lab]
+    healthcheck:
+      test: ['CMD', 'mongosh', '--quiet', '--eval', 'quit(db.adminCommand({ping:1}).ok === 1 ? 0 : 1)']
+      interval: 2s
+      timeout: 5s
+      retries: 30
+networks:
+  lab:
+    internal: true
+

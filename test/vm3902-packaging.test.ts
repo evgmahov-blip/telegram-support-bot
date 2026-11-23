@@ -54,7 +54,7 @@ describe('VM3902 deployment packaging', () => {
     const ignore = read('.gitignore');
 
     expect(ignore).toMatch(/(^|\n)config\.yaml\r?($|\n)/);
-    expect(compose).toContain('./config.yaml:/bot/config/config.yaml:ro');
+    expect(YAML.parse(compose).services.supportbot.volumes).toEqual([{type: 'bind', source: './persistent-config', target: '/bot/config', read_only: false, bind: {create_host_path: false}}]);
     expect(compose).not.toContain('config-sample.yaml:/bot/config/config.yaml');
     expect(compose).toContain('ipv4_address: 172.31.109.3');
     expect(compose).toContain('- 172.31.109.1');
