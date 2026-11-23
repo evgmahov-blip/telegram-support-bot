@@ -12,6 +12,7 @@ import { getStaffRole } from '../../team';
 import { registerCommonHandlers } from '../../handlers';
 import * as log from '../../logger'
 import { assertDeliverableRecipient } from '../../manual-ticket-guard';
+import { acknowledgeCallbackIngress } from '../../callback-ack';
 
 type BotContext = GrammyContext & SessionFlavor<SessionData>;
 
@@ -91,7 +92,8 @@ class TelegramAddon implements Addon {
       initial,
       getSessionKey: (ctx) => {
         if (!ctx.from) return undefined;
-        return `${ctx.from.id}:${ctx.chat?.id ?? ctx.from.id}`;
+        const thread = ctx.message?.message_thread_id ?? ctx.callbackQuery?.message?.message_thread_id ?? 0;
+        return `${ctx.from.id}:${ctx.chat?.id ?? ctx.from.id}:${thread}`;
       },
     });
   }
@@ -264,31 +266,34 @@ class TelegramAddon implements Addon {
     // Claim update_id before any session or business middleware mutates state.
     // The claim is completed only after the entire downstream chain resolves.
     this.bot.use(async (ctx: BotContext, next) => {
-      const updateId = ctx.update.update_id;
-      const claimId = await updateDedup.claimTelegramUpdate(updateId);
-      if (!claimId) {
-        log.info(`Skipping duplicate Telegram update ${updateId}.`);
-        return;
-      }
-
-      let downstreamCompleted = false;
+      const finishAck = acknowledgeCallbackIngress(ctx, err => log.error('Fallback callback ACK failed:', err));
       try {
-        await next();
-        downstreamCompleted = true;
-        await updateDedup.completeTelegramUpdate(updateId, claimId);
-      } catch (err) {
-        // Handler failures release only the lease owned by this worker. If the
-        // handler succeeded but completion persistence failed, keep the claim
-        // leased rather than immediately risking duplicate side effects.
-        if (!downstreamCompleted) {
-          try {
-            await updateDedup.releaseTelegramUpdate(updateId, claimId);
-          } catch (releaseErr) {
-            log.error(`Failed to release Telegram update ${updateId}:`, releaseErr);
-          }
+        const updateId = ctx.update.update_id;
+        const claimId = await updateDedup.claimTelegramUpdate(updateId);
+        if (!claimId) {
+          log.info(`Skipping duplicate Telegram update ${updateId}.`);
+          return;
         }
-        throw err;
-      }
+
+        let downstreamCompleted = false;
+        try {
+          await next();
+          downstreamCompleted = true;
+          await updateDedup.completeTelegramUpdate(updateId, claimId);
+        } catch (err) {
+          // Handler failures release only the lease owned by this worker. If the
+          // handler succeeded but completion persistence failed, keep the claim
+          // leased rather than immediately risking duplicate side effects.
+          if (!downstreamCompleted) {
+            try {
+              await updateDedup.releaseTelegramUpdate(updateId, claimId);
+            } catch (releaseErr) {
+              log.error(`Failed to release Telegram update ${updateId}:`, releaseErr);
+            }
+          }
+          throw err;
+        }
+      } finally { await finishAck(); }
     });
 
     this.bot.use(this.initSession());

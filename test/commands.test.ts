@@ -93,6 +93,7 @@ jest.mock('../src/ticket-resolution-case', () => ({ startClose: mockStartClose }
 import * as commands from '../src/commands';
 import { Context, Messenger } from '../src/interfaces';
 import cache from '../src/cache';
+import * as team from '../src/team';
 
 describe('Commands Module', () => {
   beforeEach(() => {
@@ -247,7 +248,7 @@ describe('Commands Module', () => {
 
       await commands.reopenCommand(ctx);
 
-      expect(mockTransitionTicketStatus).toHaveBeenCalledWith(1001, 'open');
+      expect(mockTransitionTicketStatus).toHaveBeenCalledWith(1001, 'closed', 'open', null, undefined, undefined);
     });
   });
 
@@ -272,6 +273,28 @@ describe('Commands Module', () => {
     });
   });
 
+  it('rejects legacy commands after role revocation despite a retained staff session', async () => {
+    const ctx=createMockContext(true);
+    (team.getStaffRole as jest.Mock).mockReturnValueOnce(null);
+    await commands.openCommand(ctx);
+    expect(mockReply).not.toHaveBeenCalled();
+    (team.getStaffRole as jest.Mock).mockReturnValueOnce(null);
+    await commands.reopenCommand(ctx);
+    expect(mockTransitionTicketStatus).not.toHaveBeenCalled();
+  });
+  it('rejects reopening another engineer private ticket', async () => {
+    const ctx=createMockContext(true);
+    (team.canManageTicket as jest.Mock).mockReturnValueOnce(false);
+    await commands.reopenCommand(ctx);
+    expect(mockTransitionTicketStatus).not.toHaveBeenCalled(); expect(mockSendMessage).not.toHaveBeenCalled();
+  });
+  it('rejects account moderation and broadcasts without the required role', async () => {
+    const ctx=createMockContext(true);
+    (team.canPerformAction as jest.Mock).mockReturnValueOnce(false); await commands.banCommand(ctx);
+    (team.canPerformAction as jest.Mock).mockReturnValueOnce(false); await commands.unbanCommand(ctx);
+    (team.canPerformAction as jest.Mock).mockReturnValueOnce(false); await commands.broadcastCommand(ctx);
+    expect(mockBanUser).not.toHaveBeenCalled(); expect(mockUnbanUser).not.toHaveBeenCalled(); expect(mockSendMessage).not.toHaveBeenCalled();
+  });
   describe('Error handling', () => {
     it('should handle missing reply message gracefully', async () => {
       const ctx = createMockContext(true);

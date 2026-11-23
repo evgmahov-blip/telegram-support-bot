@@ -52,3 +52,22 @@ describe('Permissions Module', () => {
     expect(settled).toBe(true);
   });
 });
+
+import cache from '../src/cache';
+it('does not treat presence in staffchat or a stale session as staff authority', async () => {
+  const ctx: any = { from:{id:999}, chat:{id:'staff1',type:'supergroup'}, session:{admin:true,staffRole:'admin'}, messenger:'telegram' };
+  const next=jest.fn();
+  await checkPermissions(ctx,next,{categories:[],staffchat_id:'staff1'} as any);
+  expect(ctx.session.admin).toBe(false); expect(ctx.session.staffRole).toBeUndefined();
+});
+it('refreshes active role on every DM entry and revokes it on the next update', async () => {
+  const ctx: any = { from:{id:999}, chat:{id:999,type:'private'}, session:{}, messenger:'telegram' };
+  cache.staffMembers.set('999',{telegram_id:'999',name:'Test',role:'agent',active:true} as any);
+  try {
+    await checkPermissions(ctx,jest.fn(),{categories:[],staffchat_id:'staff1'} as any);
+    expect(ctx.session.admin).toBe(true); expect(ctx.session.staffRole).toBe('agent');
+    cache.staffMembers.get('999').active=false;
+    await checkPermissions(ctx,jest.fn(),{categories:[],staffchat_id:'staff1'} as any);
+    expect(ctx.session.admin).toBe(false); expect(ctx.session.staffRole).toBeUndefined();
+  } finally { cache.staffMembers.delete('999'); }
+});

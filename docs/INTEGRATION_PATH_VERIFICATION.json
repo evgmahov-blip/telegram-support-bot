@@ -1,0 +1,452 @@
+{
+  "manifest_sha256": "4fcb15a2c9114c54cfccd553838a5b824539f3e6c2a36924936bbd6bf3c86938",
+  "preimages_verified": 61,
+  "paths": {
+    ".dockerignore": {
+      "compose-tested-tree": {
+        "expected_sha256": "5f14a17e461b43377d94b3ea7daf2bbe42735808218e5b0b5e358c663c12a3ca",
+        "actual_sha256": "5f14a17e461b43377d94b3ea7daf2bbe42735808218e5b0b5e358c663c12a3ca",
+        "equal": true
+      }
+    },
+    ".gitignore": {
+      "compose-tested-tree": {
+        "expected_sha256": "32c9a78ee1c1becd3d13200920dbf808a5bb90858eaf4ed5f64a027937872bca",
+        "actual_sha256": "32c9a78ee1c1becd3d13200920dbf808a5bb90858eaf4ed5f64a027937872bca",
+        "equal": true
+      }
+    },
+    "README.md": {
+      "compose-tested-tree": {
+        "expected_sha256": "6b998dbda3cc1afe62f2fe2d19376b653cd68715e55cd8bdfdb7045e62cb0f21",
+        "actual_sha256": "6b998dbda3cc1afe62f2fe2d19376b653cd68715e55cd8bdfdb7045e62cb0f21",
+        "equal": true
+      }
+    },
+    "deploy/vm3902/PERSISTENCE.md": {
+      "compose-tested-tree": {
+        "expected_sha256": "c4163d24b128b6f411fed2c6817b80d957c1faa7c17742da73831b9cf4da1e76",
+        "actual_sha256": "c4cc1576875bf606112f55db2cf7e95915aeae7f61275fc3be5326438a660222",
+        "equal": false
+      }
+    },
+    "deploy/vm3902/README.md": {
+      "compose-tested-tree": {
+        "expected_sha256": "f5b4a10b7692c6cfa5186a5c32d464b8f909b3043846b7b900dcbe67683a1230",
+        "actual_sha256": "532b773c022209aac56362e391a5e97b7077e9ace5e49ef97790fe60001f01ff",
+        "equal": false
+      },
+      "pr57": {
+        "expected_sha256": "9a73cb734c4a2de13670376ea1f7809ef45e80946fabeead5b123fd7c36f4a7e",
+        "actual_sha256": "532b773c022209aac56362e391a5e97b7077e9ace5e49ef97790fe60001f01ff",
+        "equal": false
+      }
+    },
+    "deploy/vm3902/check-runtime.cjs": {
+      "compose-tested-tree": {
+        "expected_sha256": "daf228e5e25665bec9db10c4aef935ae6f4e56b1ff2630a04dc1feff5dd81b48",
+        "actual_sha256": "daf228e5e25665bec9db10c4aef935ae6f4e56b1ff2630a04dc1feff5dd81b48",
+        "equal": true
+      }
+    },
+    "deploy/vm3902/compose.yaml": {
+      "compose-tested-tree": {
+        "expected_sha256": "90dbef15147590c83e10309dbbae49d551049102d7ce16d3f87aae8d76527dc0",
+        "actual_sha256": "90dbef15147590c83e10309dbbae49d551049102d7ce16d3f87aae8d76527dc0",
+        "equal": true
+      }
+    },
+    "deploy/vm3902/config-sample.yaml": {
+      "compose-tested-tree": {
+        "expected_sha256": "7b393fdc7404ee6a462e9a6f2030357da6c7c1cd90a9c7585fa0be9fef3290c1",
+        "actual_sha256": "7b393fdc7404ee6a462e9a6f2030357da6c7c1cd90a9c7585fa0be9fef3290c1",
+        "equal": true
+      }
+    },
+    "deploy/vm3902/evidence/2026-11-19.json": {
+      "compose-tested-tree": {
+        "expected_sha256": "ec08332f3a2dd7b96cbe5c86a0c8f7c75e149c109aa11de69748c1983a77402e",
+        "actual_sha256": "ec08332f3a2dd7b96cbe5c86a0c8f7c75e149c109aa11de69748c1983a77402e",
+        "equal": true
+      }
+    },
+    "deploy/vm3902/most-support-bot.service": {
+      "compose-tested-tree": {
+        "expected_sha256": "f06f6a0119f8d204c448314d80e40f4c70a3bd1934bc8f83de7c984989731618",
+        "actual_sha256": "f06f6a0119f8d204c448314d80e40f4c70a3bd1934bc8f83de7c984989731618",
+        "equal": true
+      }
+    },
+    "deploy/vm3902/prepare-config.cjs": {
+      "compose-tested-tree": {
+        "expected_sha256": "cfb75dce9ad752c032ea5ea04c68939e91b2f5a1274f70f7691b5dea24454d0b",
+        "actual_sha256": "cfb75dce9ad752c032ea5ea04c68939e91b2f5a1274f70f7691b5dea24454d0b",
+        "equal": true
+      }
+    },
+    "docker-compose.yml": {
+      "compose-tested-tree": {
+        "expected_sha256": "6ceeba35d26c4d015e253285c969ad27a77b0d7ae0c16711e6176f0af2eebe4d",
+        "actual_sha256": "6ceeba35d26c4d015e253285c969ad27a77b0d7ae0c16711e6176f0af2eebe4d",
+        "equal": true
+      }
+    },
+    "docs/ENGINEERS_RBAC_CANDIDATE.sha256": {
+      "compose-tested-tree": {
+        "expected_sha256": "c83060fb0575a4e1ed7f22c6517e808391e307f1687287ff574ce50d2aaed794",
+        "actual_sha256": "c83060fb0575a4e1ed7f22c6517e808391e307f1687287ff574ce50d2aaed794",
+        "equal": true
+      }
+    },
+    "docs/ENGINEERS_RBAC_HANDOFF.md": {
+      "compose-tested-tree": {
+        "expected_sha256": "9201304a7b4045534cbbdf67c86aa6fef8f7c83fc4e4fdb2a340b1e7f8713822",
+        "actual_sha256": "9201304a7b4045534cbbdf67c86aa6fef8f7c83fc4e4fdb2a340b1e7f8713822",
+        "equal": true
+      }
+    },
+    "review-artifacts/changed-files.sha256": {
+      "compose-tested-tree": {
+        "expected_sha256": "54e73b6829b9159520c8a5875913df8ba1578a22d9945ab253f5d7188d616d19",
+        "actual_sha256": "54e73b6829b9159520c8a5875913df8ba1578a22d9945ab253f5d7188d616d19",
+        "equal": true
+      }
+    },
+    "review-artifacts/review.txt": {
+      "compose-tested-tree": {
+        "expected_sha256": "95193e334c73b798ed1c280f6fb15e8d10421571e1f57ff0909573ba5a2fa8a0",
+        "actual_sha256": "95193e334c73b798ed1c280f6fb15e8d10421571e1f57ff0909573ba5a2fa8a0",
+        "equal": true
+      }
+    },
+    "review-artifacts/revision-1-ci.txt": {
+      "compose-tested-tree": {
+        "expected_sha256": "ca6e60ee3bc780db89624840e2d6837d519760060f7bd929167f8f870213a891",
+        "actual_sha256": "ca6e60ee3bc780db89624840e2d6837d519760060f7bd929167f8f870213a891",
+        "equal": true
+      }
+    },
+    "review-artifacts/revision-1-files.sha256": {
+      "compose-tested-tree": {
+        "expected_sha256": "575c5fc42c2acd3014d3ceba6642b77686e9bfc7d28258ebc731ea8995fc9ec6",
+        "actual_sha256": "575c5fc42c2acd3014d3ceba6642b77686e9bfc7d28258ebc731ea8995fc9ec6",
+        "equal": true
+      }
+    },
+    "review-artifacts/revision-1-review.txt": {
+      "compose-tested-tree": {
+        "expected_sha256": "b24febdb6a0accc43e718f994f7d83b4b3595eadc9952902aff26a422ee583d1",
+        "actual_sha256": "b24febdb6a0accc43e718f994f7d83b4b3595eadc9952902aff26a422ee583d1",
+        "equal": true
+      }
+    },
+    "src/addons/telegram/index.ts": {
+      "compose-tested-tree": {
+        "expected_sha256": "7fff11555f5b9e3628cd870a5e8a402eaa764d1bffac24445d24b8dea7d1ad69",
+        "actual_sha256": "7fff11555f5b9e3628cd870a5e8a402eaa764d1bffac24445d24b8dea7d1ad69",
+        "equal": true
+      }
+    },
+    "src/callback-ack.ts": {
+      "compose-tested-tree": {
+        "expected_sha256": "f22585395e8945cbb020c9d5719c29e8b1175c615da01126704efa4184c6b32b",
+        "actual_sha256": "f22585395e8945cbb020c9d5719c29e8b1175c615da01126704efa4184c6b32b",
+        "equal": true
+      }
+    },
+    "src/commands.ts": {
+      "compose-tested-tree": {
+        "expected_sha256": "355d8ec752257b0bcf7f1ac2376977217edf41c0846596c2dc2551e671f7a82f",
+        "actual_sha256": "355d8ec752257b0bcf7f1ac2376977217edf41c0846596c2dc2551e671f7a82f",
+        "equal": true
+      }
+    },
+    "src/db.ts": {
+      "compose-tested-tree": {
+        "expected_sha256": "0dd4101d1de7e2657cac7d66fe588850b1512069ef4b7ce73691e9a96217380b",
+        "actual_sha256": "0dd4101d1de7e2657cac7d66fe588850b1512069ef4b7ce73691e9a96217380b",
+        "equal": true
+      }
+    },
+    "src/handlers.ts": {
+      "compose-tested-tree": {
+        "expected_sha256": "2b08e672df73b24e269ed9655651bfaa081257875d49c0a909ad5abeb04f1f38",
+        "actual_sha256": "2b08e672df73b24e269ed9655651bfaa081257875d49c0a909ad5abeb04f1f38",
+        "equal": true
+      }
+    },
+    "src/permissions.ts": {
+      "compose-tested-tree": {
+        "expected_sha256": "8ad7d9d4c9afd8b5b4566ee6aeb9488d3cef22238d34694b724e36cb40c72dc3",
+        "actual_sha256": "8ad7d9d4c9afd8b5b4566ee6aeb9488d3cef22238d34694b724e36cb40c72dc3",
+        "equal": true
+      }
+    },
+    "src/routing-admin-ui.ts": {
+      "compose-tested-tree": {
+        "expected_sha256": "dbd9a831fb5a8aec39eb4dc99732d6712c1641836c0f87fec803e545538c1fd4",
+        "actual_sha256": "dbd9a831fb5a8aec39eb4dc99732d6712c1641836c0f87fec803e545538c1fd4",
+        "equal": true
+      }
+    },
+    "src/staff-access-gate.ts": {
+      "compose-tested-tree": {
+        "expected_sha256": "b2c5a116436076c3492764ae07411cfc5c813b885173073c1e186705bc0fbb75",
+        "actual_sha256": "b2c5a116436076c3492764ae07411cfc5c813b885173073c1e186705bc0fbb75",
+        "equal": true
+      }
+    },
+    "src/staff-name-editor.ts": {
+      "compose-tested-tree": {
+        "expected_sha256": "bfd4a42b32056992645e8bd8f479cb10433f760ea71a423ab985d4a9d933ab52",
+        "actual_sha256": "bfd4a42b32056992645e8bd8f479cb10433f760ea71a423ab985d4a9d933ab52",
+        "equal": true
+      }
+    },
+    "src/team-settings.ts": {
+      "compose-tested-tree": {
+        "expected_sha256": "40fa021b857a00182f3da805cc78754755962242c4cd7f9821ecfbce692adedd",
+        "actual_sha256": "40fa021b857a00182f3da805cc78754755962242c4cd7f9821ecfbce692adedd",
+        "equal": true
+      }
+    },
+    "src/team.ts": {
+      "compose-tested-tree": {
+        "expected_sha256": "91b68cee55efce2f1fbf5ecad571241fec6cc37ce26e912e74e2d3798340236a",
+        "actual_sha256": "91b68cee55efce2f1fbf5ecad571241fec6cc37ce26e912e74e2d3798340236a",
+        "equal": true
+      }
+    },
+    "src/ticket-resolution-case.ts": {
+      "compose-tested-tree": {
+        "expected_sha256": "d56bbd683bc0295e0b8d45f67c37c930b525cec21debf1f3c82597e53387aa98",
+        "actual_sha256": "d56bbd683bc0295e0b8d45f67c37c930b525cec21debf1f3c82597e53387aa98",
+        "equal": true
+      }
+    },
+    "src/ticket-ui.ts": {
+      "compose-tested-tree": {
+        "expected_sha256": "b46fa1d44665e1cc506ea262edf2fda48b2b8dbdfd3ff70419edeac90d966b80",
+        "actual_sha256": "b46fa1d44665e1cc506ea262edf2fda48b2b8dbdfd3ff70419edeac90d966b80",
+        "equal": true
+      }
+    },
+    "src/write-presentation.ts": {
+      "compose-tested-tree": {
+        "expected_sha256": "d15a93ab4a51ca7ad4f43036f8d27679628da42d1ddc01e71d3bc6c505757761",
+        "actual_sha256": "d15a93ab4a51ca7ad4f43036f8d27679628da42d1ddc01e71d3bc6c505757761",
+        "equal": true
+      }
+    },
+    "test/callback-ack.test.ts": {
+      "compose-tested-tree": {
+        "expected_sha256": "168ca43d2596ab14f130f27628d74d728b7b710170deef43f238d5dd33298290",
+        "actual_sha256": "168ca43d2596ab14f130f27628d74d728b7b710170deef43f238d5dd33298290",
+        "equal": true
+      }
+    },
+    "test/commands.test.ts": {
+      "compose-tested-tree": {
+        "expected_sha256": "a5513ea8491a38651abf9b1440f63c69790dc1c12d1079ef2bf8c36c84946e7d",
+        "actual_sha256": "a5513ea8491a38651abf9b1440f63c69790dc1c12d1079ef2bf8c36c84946e7d",
+        "equal": true
+      }
+    },
+    "test/config-persistence-packaging.test.ts": {
+      "compose-tested-tree": {
+        "expected_sha256": "2a8be130abc5fa65ad31b44f9a774c2152fe35ab9f041fe6bd14ce7df5f3a71c",
+        "actual_sha256": "2a8be130abc5fa65ad31b44f9a774c2152fe35ab9f041fe6bd14ce7df5f3a71c",
+        "equal": true
+      }
+    },
+    "test/features-commands.test.ts": {
+      "compose-tested-tree": {
+        "expected_sha256": "5a8312b7fe89cf1c409194e66c38b045493f6f8e247bb92845f81d111aee95e1",
+        "actual_sha256": "5a8312b7fe89cf1c409194e66c38b045493f6f8e247bb92845f81d111aee95e1",
+        "equal": true
+      }
+    },
+    "test/permissions.test.ts": {
+      "compose-tested-tree": {
+        "expected_sha256": "1e418834f7e18811e024a62ef135d3e5194b58513ce2651ed3aab71f4eb80228",
+        "actual_sha256": "1e418834f7e18811e024a62ef135d3e5194b58513ce2651ed3aab71f4eb80228",
+        "equal": true
+      }
+    },
+    "test/routing-admin-ui.test.ts": {
+      "compose-tested-tree": {
+        "expected_sha256": "10cd4e1242c89a3ba100451688767bba5f59b59ccb2dd4f733f46ab6824f0119",
+        "actual_sha256": "10cd4e1242c89a3ba100451688767bba5f59b59ccb2dd4f733f46ab6824f0119",
+        "equal": true
+      }
+    },
+    "test/staff-access-gate.test.ts": {
+      "compose-tested-tree": {
+        "expected_sha256": "6d7b2d4b280194daa1db205ff54667786c674d745c22723cd1f688eef290c597",
+        "actual_sha256": "6d7b2d4b280194daa1db205ff54667786c674d745c22723cd1f688eef290c597",
+        "equal": true
+      }
+    },
+    "test/staff-name-editor.test.ts": {
+      "compose-tested-tree": {
+        "expected_sha256": "54c7b0493bac0615fa7292a0f24417e22ca784c2e91696e1a2797b54da0739b7",
+        "actual_sha256": "54c7b0493bac0615fa7292a0f24417e22ca784c2e91696e1a2797b54da0739b7",
+        "equal": true
+      }
+    },
+    "test/team-routing-notification.test.ts": {
+      "compose-tested-tree": {
+        "expected_sha256": "c3a1fec77fce1e48224b47e70b0347cd65337fcac3d1e4b5aae4276a790f7600",
+        "actual_sha256": "c3a1fec77fce1e48224b47e70b0347cd65337fcac3d1e4b5aae4276a790f7600",
+        "equal": true
+      }
+    },
+    "test/team-settings.test.ts": {
+      "compose-tested-tree": {
+        "expected_sha256": "5bcd2a3273e6a7840d46071e67638ef7b7ed3525e539b13c04962736a84e3ed2",
+        "actual_sha256": "5bcd2a3273e6a7840d46071e67638ef7b7ed3525e539b13c04962736a84e3ed2",
+        "equal": true
+      }
+    },
+    "test/telegram-addon.test.ts": {
+      "compose-tested-tree": {
+        "expected_sha256": "12fe3a950abf5cc6be449ea9ff605ea2689eae3044cfc81c50cc1dda0c34fe4e",
+        "actual_sha256": "12fe3a950abf5cc6be449ea9ff605ea2689eae3044cfc81c50cc1dda0c34fe4e",
+        "equal": true
+      }
+    },
+    "test/telegram-live-buttons-regression.test.ts": {
+      "compose-tested-tree": {
+        "expected_sha256": "b971d85f77f0b4238ad8b733e38293ee884b5737d0ad9871b3558413ba73ab3b",
+        "actual_sha256": "b971d85f77f0b4238ad8b733e38293ee884b5737d0ad9871b3558413ba73ab3b",
+        "equal": true
+      }
+    },
+    "test/ticket-resolution-case.test.ts": {
+      "compose-tested-tree": {
+        "expected_sha256": "4de583ad6eab4341207f7c63b7f972216d97016d9d527c3f5d5189a33d766a59",
+        "actual_sha256": "4de583ad6eab4341207f7c63b7f972216d97016d9d527c3f5d5189a33d766a59",
+        "equal": true
+      }
+    },
+    "test/vm3902-packaging.test.ts": {
+      "compose-tested-tree": {
+        "expected_sha256": "73eaa327bf698f13540b56fd9279c1fd1cae13ffa7332406c861eea6d0f64c27",
+        "actual_sha256": "73eaa327bf698f13540b56fd9279c1fd1cae13ffa7332406c861eea6d0f64c27",
+        "equal": true
+      }
+    },
+    "test/write-presentation.test.ts": {
+      "compose-tested-tree": {
+        "expected_sha256": "cad2d22d428ab4c10afa91f388a232b9d3784e1d6def893d173a50ff59f877ab",
+        "actual_sha256": "cad2d22d428ab4c10afa91f388a232b9d3784e1d6def893d173a50ff59f877ab",
+        "equal": true
+      }
+    },
+    ".github/workflows/most-core-ci.yml": {
+      "pr57": {
+        "expected_sha256": "356bd60fe92a1daac6d931f6f9c4a13179085d3ec557c6fae6ff6304eb92fbee",
+        "actual_sha256": "e7d7680318b2229a45eeb295f41e7e53b1df740cbbdc6ed5d2f4f1b22f7eba5b",
+        "equal": false
+      }
+    },
+    "acceptance/rbac-docker/.dockerignore": {
+      "pr57": {
+        "expected_sha256": "eba0056d6958d8778b4f9a63f3647313a96fdefe7828d26700254cda1134195b",
+        "actual_sha256": "eba0056d6958d8778b4f9a63f3647313a96fdefe7828d26700254cda1134195b",
+        "equal": true
+      }
+    },
+    "acceptance/rbac-docker/Dockerfile": {
+      "pr57": {
+        "expected_sha256": "cb73bfd28825579bf7229f77eff21a15bca799e225eb16590a2511e5c7a2d2d0",
+        "actual_sha256": "cb73bfd28825579bf7229f77eff21a15bca799e225eb16590a2511e5c7a2d2d0",
+        "equal": true
+      }
+    },
+    "acceptance/rbac-docker/HANDOFF.md": {
+      "pr57": {
+        "expected_sha256": "3ec6aaa4ee515990642feaf66aa1eb4b8b47d9616341dfae820417a29f653098",
+        "actual_sha256": "26407318a2bb9c87c5d2573c5706b07162c893eb6d87410766aea2d1ea89b97b",
+        "equal": false
+      }
+    },
+    "acceptance/rbac-docker/compose.yaml": {
+      "pr57": {
+        "expected_sha256": "bbdc781de671973edde73a5fd68a8884eaa53b448f5774347ebf742e968ac1d6",
+        "actual_sha256": "bbdc781de671973edde73a5fd68a8884eaa53b448f5774347ebf742e968ac1d6",
+        "equal": true
+      }
+    },
+    "acceptance/rbac-docker/prepare.sh": {
+      "pr57": {
+        "expected_sha256": "98e59e27eac632f8d8ba8c8c23e01c124df555279fa04c78abda1f2814944064",
+        "actual_sha256": "193a52b62421b3fc286dfcd3b610067a37a8e9cd284d65d39b29c154c08076fa",
+        "equal": false
+      }
+    },
+    "acceptance/rbac-docker/run.py": {
+      "pr57": {
+        "expected_sha256": "7c9711b47708f67279239c26fa3d174dc3b0134e5f9468e2f38d993155b950f4",
+        "actual_sha256": "7c9711b47708f67279239c26fa3d174dc3b0134e5f9468e2f38d993155b950f4",
+        "equal": true
+      }
+    },
+    "acceptance/rbac-docker/test_runner.py": {
+      "pr57": {
+        "expected_sha256": "5219019483f3d74504b15d7e335226262acfca3f2d88082be6b4f8d959d85679",
+        "actual_sha256": "5219019483f3d74504b15d7e335226262acfca3f2d88082be6b4f8d959d85679",
+        "equal": true
+      }
+    },
+    "acceptance/rbac-docker/transport.cjs": {
+      "pr57": {
+        "expected_sha256": "b257d4db69c766107c2739c3843889856fe591a5c8f2ac7ec5ae0fa94e0886b5",
+        "actual_sha256": "b257d4db69c766107c2739c3843889856fe591a5c8f2ac7ec5ae0fa94e0886b5",
+        "equal": true
+      }
+    },
+    "docker/Dockerfile.ci": {
+      "pr57": {
+        "expected_sha256": "798fb970bb1f571ca69fbdb1ddc2ed0910e4a3990e84134c791bd7ae95ae904e",
+        "actual_sha256": "798fb970bb1f571ca69fbdb1ddc2ed0910e4a3990e84134c791bd7ae95ae904e",
+        "equal": true
+      }
+    },
+    "docker/Dockerfile.ci.dockerignore": {
+      "pr57": {
+        "expected_sha256": "cab159dc0d9caf20a922753025750e05c484b69561da356b8a83ae06507d2feb",
+        "actual_sha256": "cab159dc0d9caf20a922753025750e05c484b69561da356b8a83ae06507d2feb",
+        "equal": true
+      }
+    },
+    "scripts/docker-validation.cjs": {
+      "pr57": {
+        "expected_sha256": "5d65a688e129e1a9a9a23743b3e86a6a35b1cddcd8d77983d6ba1ea85863883a",
+        "actual_sha256": "5d65a688e129e1a9a9a23743b3e86a6a35b1cddcd8d77983d6ba1ea85863883a",
+        "equal": true
+      }
+    },
+    "Dockerfile": {
+      "compose-tested-tree": {
+        "expected_sha256": "f8e4d4a7e418f08b031f0b7833bfc7839bfcf4a8e4e617d3101b2d8a088082ea",
+        "actual_sha256": "f8e4d4a7e418f08b031f0b7833bfc7839bfcf4a8e4e617d3101b2d8a088082ea",
+        "equal": true
+      }
+    },
+    "package.json": {
+      "compose-tested-tree": {
+        "expected_sha256": "db9c67aa1eb7ae5a7815a0fc15caef58306b58d55942471860321e73008124da",
+        "actual_sha256": "db9c67aa1eb7ae5a7815a0fc15caef58306b58d55942471860321e73008124da",
+        "equal": true
+      }
+    },
+    "package-lock.json": {
+      "compose-tested-tree": {
+        "expected_sha256": "dd927f5e6663c91ec79d2b56fd84ddd73f5ad11b690978ac4595c35aa088532b",
+        "actual_sha256": "dd927f5e6663c91ec79d2b56fd84ddd73f5ad11b690978ac4595c35aa088532b",
+        "equal": true
+      }
+    }
+  }
+}
