@@ -6,6 +6,9 @@ const cancel = jest.fn();
 const save = jest.fn();
 const revise = jest.fn();
 const compose = jest.fn().mockResolvedValue(null);
+const readTeam = jest.fn();
+const saveMember = jest.fn();
+jest.mock('../src/team-settings', () => ({ readTeamSettings: (...args: unknown[]) => readTeam(...args), saveTeamMember: (...args: unknown[]) => saveMember(...args), undoTeamChange: jest.fn() }));
 const intake = jest.fn().mockResolvedValue(null);
 
 jest.mock('../src/middleware', () => ({ reply }));
@@ -95,5 +98,97 @@ describe('staff display-name editor', () => {
     expect(cache.staffNameOverrides?.has('2')).toBe(false);
     save.mockResolvedValue({ telegram_id: '2', display_name: 'Новый Иван' });
     await handleCallback(ctx, ['sn','save','8']); expect(cache.staffNameOverrides?.get('2')).toBe('Новый Иван');
+  });
+});
+
+describe('engineer access controls', () => {
+  function dm(actor = 1, text = 'forwarded') {
+    const ctx = context(actor, text, undefined, actor); ctx.chat.type = 'private';
+    ctx.session.admin = false; delete ctx.message.message_thread_id; delete ctx.callbackQuery.message.message_thread_id;
+    return ctx;
+  }
+  beforeEach(() => {
+    jest.clearAllMocks();
+    readTeam.mockResolvedValue({etag:'a'.repeat(24),members:[...cache.staffMembers.values()],history:[]});
+    compose.mockResolvedValue(null); intake.mockResolvedValue(null); cancel.mockResolvedValue(null);
+  });
+  it('opens the existing section in the admin own DM without group session authority', async () => {
+    await showList(dm()); expect(answer).toHaveBeenCalledWith(expect.anything(),expect.stringContaining('Инженеры'),expect.anything());
+    expect(JSON.stringify(answer.mock.calls.at(-1)[2])).toContain('sn:connect');
+    expect(JSON.stringify(answer.mock.calls.at(-1)[2])).toContain('cfg:home');
+  });
+  it('explains read-only persistence failure without confirming success', async () => {
+    saveMember.mockRejectedValueOnce(new Error('team_readonly'));
+    const ctx = dm();
+    await handleCallback(ctx, ['sn','apply','2','supervisor','a'.repeat(24)]);
+    expect(ctx.answerCbQuery).toHaveBeenCalledWith(expect.stringContaining('Права не сохранены'),true);
+    expect(ctx.answerCbQuery).not.toHaveBeenCalledWith('Сохранено.');
+  });
+  it.each(['agent','supervisor'])('rejects %s even with a forged management callback', async role => {
+    const previous=cache.staffMembers.get('2');
+    try {
+      cache.staffMembers.set('2',{...previous,role} as any);
+      const ctx=dm(2); await handleCallback(ctx,['sn','apply','1','admin','a'.repeat(24)]);
+      expect(saveMember).not.toHaveBeenCalled(); expect(ctx.answerCbQuery).toHaveBeenCalledWith(expect.stringContaining('администратору'),true);
+    } finally { cache.staffMembers.set('2',previous); }
+  });
+  it('accepts identity only from Telegram visible user origin; requires confirmation and starts disabled', async () => {
+    const ctx=dm(); await handleCallback(ctx,['sn','connect']);
+    ctx.message.text='@someone'; await handleTextInput(ctx); expect(saveMember).not.toHaveBeenCalled();
+    (ctx.message as any).forward_origin={type:'hidden_user',sender_user_name:'Person'};
+    await handleTextInput(ctx); expect(saveMember).not.toHaveBeenCalled();
+    (ctx.message as any).forward_origin={type:'user',sender_user:{id:9876,first_name:'Verified Person'}};
+    await handleTextInput(ctx);
+    const oldData=answer.mock.calls.at(-1)[2][0][0].callback_data;
+    await handleTextInput(ctx);
+    const data=answer.mock.calls.at(-1)[2][0][0].callback_data;
+    expect(data).not.toBe(oldData);
+    await handleCallback(ctx,oldData.split(':')); expect(saveMember).not.toHaveBeenCalled();
+    expect(data).toMatch(/^sn:join:/); expect(saveMember).not.toHaveBeenCalled();
+    // The real persistence projects the new member; mimic that for the card renderer.
+    saveMember.mockImplementationOnce(async (_actor, _etag, member) => { cache.staffMembers.set(member.telegram_id,member); });
+    try {
+      await handleCallback(ctx,data.split(':'));
+      expect(saveMember).toHaveBeenCalledWith('1','a'.repeat(24),expect.objectContaining({telegram_id:'9876',active:false,role:'agent'}),true);
+      saveMember.mockClear(); await handleCallback(ctx,data.split(':')); expect(saveMember).not.toHaveBeenCalled();
+    } finally { cache.staffMembers.delete('9876'); }
+  });
+  it('reports successful access apply despite a failed screen refresh', async () => {
+    const ctx = dm();
+    saveMember.mockResolvedValueOnce(undefined);
+    answer.mockRejectedValueOnce(new Error('screen unavailable'));
+    await expect(handleCallback(ctx, ['sn','apply','2','supervisor','a'.repeat(24)])).resolves.toBe(true);
+    expect(saveMember).toHaveBeenCalledTimes(1);
+    expect(ctx.answerCbQuery).toHaveBeenCalledWith('Сохранено.');
+    expect(ctx.answerCbQuery).not.toHaveBeenCalledWith(expect.stringContaining('не подтверждено'), true);
+  });
+  it('keeps enrollment saved and prevents a duplicate join after screen failure', async () => {
+    const ctx = dm(); await handleCallback(ctx, ['sn','connect']);
+    (ctx.message as any).forward_origin = { type:'user', sender_user:{ id:9877, first_name:'Engineer' } };
+    await handleTextInput(ctx);
+    const data = answer.mock.calls.at(-1)[2][0][0].callback_data;
+    saveMember.mockImplementationOnce(async (_actor, _etag, member) => { cache.staffMembers.set(member.telegram_id, member); });
+    answer.mockRejectedValueOnce(new Error('screen unavailable'));
+    try {
+      await expect(handleCallback(ctx, data.split(':'))).resolves.toBe(true);
+      expect(saveMember).toHaveBeenCalledTimes(1);
+      expect(ctx.answerCbQuery).toHaveBeenCalledWith('Сохранено.');
+      await handleCallback(ctx, data.split(':'));
+      expect(saveMember).toHaveBeenCalledTimes(1);
+    } finally { cache.staffMembers.delete('9877'); }
+  });
+  it('rejects an outdated access confirmation without persistence', async () => {
+    const ctx = dm();
+    await handleCallback(ctx, ['sn','apply','2','supervisor','b'.repeat(24)]);
+    expect(saveMember).not.toHaveBeenCalled();
+    expect(ctx.answerCbQuery).toHaveBeenCalledWith(expect.stringContaining('устарела'), true);
+  });
+  it('revocation denies stale callbacks and unfinished input immediately', async () => {
+    const ctx=dm(), original=cache.staffMembers.get('1'); await handleCallback(ctx,['sn','connect']);
+    try {
+      cache.staffMembers.set('1',{...original,active:false});
+      await handleCallback(ctx,['sn','access','2']); expect(readTeam).toHaveBeenCalledTimes(1);
+      expect(await handleTextInput(ctx)).toBe(false); expect(saveMember).not.toHaveBeenCalled();
+    } finally { cache.staffMembers.set('1',original); }
   });
 });

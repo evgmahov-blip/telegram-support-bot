@@ -2073,3 +2073,10 @@ export async function completeResolutionIntent(token: string) {
 
 export { TicketMessage, AnalyticsEvent, WebhookCursor, InternalNote, TicketCounter, UserBan, ManualIntakeDraft,
   StaffDisplayNameOverride, StaffNameEditIntent, ResolutionIntent, TicketResolution, ClientProfile };
+
+/** Includes outstanding routing offers, not only accepted assignments. */
+export async function hasActiveStaffAssignments(telegramId: string): Promise<boolean> {
+  return Boolean(await Supportee.exists({ status: { $ne: 'closed' }, $or: [
+    { assigned_to: telegramId }, { 'routing.offered_to': telegramId, 'routing.state': 'offered' },
+  ] }));
+}

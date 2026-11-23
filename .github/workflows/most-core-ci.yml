@@ -13,6 +13,63 @@ permissions:
   contents: read
 
 jobs:
+  rbac-docker-acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout acceptance candidate
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: candidate
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Archive exact published candidate head
+        env:
+          CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: bash candidate/acceptance/rbac-docker/prepare.sh "$GITHUB_WORKSPACE/candidate" "$GITHUB_WORKSPACE/evidence"
+      - name: Use Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Verify integrated project
+        working-directory: candidate
+        run: |
+          node -e "if (process.versions.node.split('.')[0] !== '24') process.exit(1)"
+          npm ci
+          npm run build
+          npm test
+      - name: Verify host checker dependency isolation
+        env:
+          NODE_PATH: ${{ github.workspace }}/candidate/node_modules
+        run: |
+          test ! -e evidence/build-input/node_modules
+          node - <<'NODE'
+          const assert = require('node:assert/strict');
+          const path = require('node:path');
+          const {createRequire} = require('node:module');
+          assert.equal(process.versions.node.split('.')[0], '24');
+          const checker = createRequire(path.resolve('evidence/build-input/deploy/vm3902/check-runtime.cjs'));
+          assert.ok(checker.resolve('yaml').startsWith(path.resolve('candidate/node_modules') + path.sep));
+          checker('./check-runtime.cjs');
+          NODE
+      - name: Verify acceptance failure evidence
+        run: python3 -B candidate/acceptance/rbac-docker/test_runner.py
+      - name: Real isolated Docker Compose acceptance
+        # Host checker resolves lockfile dependencies from the verified checkout,
+        # never from the clean archived Docker build context.
+        run: sudo --preserve-env=GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_REPOSITORY env NODE24_BIN="$(command -v node)" NODE_PATH="$GITHUB_WORKSPACE/candidate/node_modules" python3 candidate/acceptance/rbac-docker/run.py "$GITHUB_WORKSPACE/evidence/build-input" "$GITHUB_WORKSPACE/evidence"
+      - name: Upload synthetic acceptance and provenance
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rbac-docker-acceptance-${{ github.event.pull_request.head.sha || github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            evidence/provenance.json
+            evidence/result.json
+          if-no-files-found: warn
+          retention-days: 3
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -49,3 +106,37 @@ jobs:
             test.log
           if-no-files-found: ignore
           retention-days: 3
+
+  configuration-node24:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      # Configuration checks need no native addons or image build.
+      - run: npm ci --ignore-scripts
+      - name: Validate deployment configuration and preserved regressions
+        run: npm test -- test/vm3902-packaging.test.ts test/logger-readonly.test.ts
+
+  docker-validation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      # Separate checkout; never consumes node_modules/build/config from other jobs.
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Build and run exact candidate in Docker
+        run: node scripts/docker-validation.cjs "$(git rev-parse HEAD)" "$RUNNER_TEMP/docker-validation"
+      - name: Upload SHA-bound Docker result and diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-validation-${{ github.sha }}
+          path: ${{ runner.temp }}/docker-validation/
+          if-no-files-found: error
+          retention-days: 7

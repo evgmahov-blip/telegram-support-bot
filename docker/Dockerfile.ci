@@ -1,0 +1,15 @@
+# Test dependencies and source are isolated from the production build context.
+FROM node:24.15.0-alpine3.22@sha256:b689d4005875ae167178471a7a622ec2909459a3bbb32277260be1971af7a99f
+WORKDIR /bot
+RUN apk add --no-cache python3 build-base
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY tsconfig.json jest.config.js jest.setup.js ./
+COPY src ./src
+COPY test ./test
+COPY deploy ./deploy
+COPY Dockerfile .gitignore ./
+RUN npm run build
+# Installer checks refuse root; run tests as the production container UID/GID.
+USER 1000:1000
+CMD ["npm", "test"]
