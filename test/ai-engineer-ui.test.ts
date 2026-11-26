@@ -1,6 +1,7 @@
 const mockFind = jest.fn(), mockUpdate = jest.fn(), mockRead = jest.fn(), mockRepair = jest.fn();
 const mockSubmit = jest.fn(), mockRework = jest.fn(), mockHandoff = jest.fn(), mockCancel = jest.fn();
 const mockReply = jest.fn(), mockBinding = jest.fn(), mockConsume = jest.fn(), mockClear = jest.fn();
+const mockReadRevision = jest.fn();
 let mockReady = true, mockPolicy: any;
 jest.mock('../src/cache', () => ({ __esModule: true, default: { config: {
   staffchat_id: '-100', staffchat_thread_id: 5, staffchat_type: 'telegram', bot_token: '123456:ABCDEFGHIJKLMNOPQRSTUV', llm_api_key: 'sk-secret-key-value',
@@ -13,7 +14,7 @@ jest.mock('../src/db', () => ({
 }));
 jest.mock('../src/ai-engineer-store', () => ({ EngineerStore: jest.fn(() => ({
   read: mockRead, repair: mockRepair, submit: mockSubmit, rework: mockRework, handoff: mockHandoff, cancel: mockCancel,
-})), readEngineerRevision: jest.fn() }));
+})), readEngineerRevision: mockReadRevision }));
 jest.mock('../src/ai-engineer-bridge', () => ({ engineerPolicy: () => mockPolicy }));
 jest.mock('../src/ai-engineer-readiness', () => ({ engineerReady: () => mockReady }));
 jest.mock('../src/ai-engineer-catalog', () => ({ requireCatalogBinding: mockBinding, readCatalog: jest.fn() }));
@@ -121,6 +122,40 @@ describe('staff-only AI engineer task flow', () => {
     await handleEngineerCallback(ctx, ['ae', 'handoff', '42', 'obsolete']);
     expect(mockHandoff).not.toHaveBeenCalled();
     expect(mockConsume).toHaveBeenCalledWith(42, `ae:${job.request_id}`, 'obsolete', '1');
+  });
+  it('shows an unavailable standard conclusion with retry only when rework is actually offered', async () => {
+    const job = ai.createTask(ticket, mockPolicy, '1', binding, ai.snapshotInput('Проверить'), Date.now());
+    job.state = 'failed'; job.failure_code = 'model_unavailable'; job.projection_pending = null;
+    ticket.ai_engineer = job;
+    await handleEngineerCallback(ctx, ['ae', 'view', '42']);
+    const text = String(mockReply.mock.calls[0][1]);
+    const markup = JSON.stringify(mockReply.mock.calls[0][2].reply_markup);
+    expect(text).toContain('Можно повторить диагностику или продолжить вручную.');
+    expect(markup).toContain('ae:rework:');
+  });
+  it('renders the stored conclusion as a staff draft with escaping', async () => {
+    const job = ai.createTask(ticket, mockPolicy, '1', binding, ai.snapshotInput('Проверить <host>'), Date.now());
+    job.state = 'awaiting_operator'; job.projection_pending = null;
+    job.conclusion = { summary: 'Доступен <host>', verified_findings: [{ text: 'Факт & проверен', evidence_refs: ['check-1'] }],
+      hypotheses: [], unknowns: [], recommended_next_steps: ['Проверить вручную'],
+      customer_reply_draft: 'Черновик <ответа>' };
+    ticket.ai_engineer = job;
+    await handleEngineerCallback(ctx, ['ae', 'view', '42']);
+    const text = String(mockReply.mock.calls[0][1]);
+    expect(text).toContain('Доступен &lt;host&gt;');
+    expect(text).toContain('Факт &amp; проверен');
+    expect(text).toContain('Черновик ответа — клиенту не отправлен');
+    expect(text).toContain('Черновик &lt;ответа&gt;');
+  });
+  it('opens a stored previous revision through the existing history entrypoint', async () => {
+    const current = ai.createTask(ticket, mockPolicy, '1', binding, ai.snapshotInput('Текущая'), Date.now());
+    current.revision = 2; current.state = 'awaiting_operator'; current.projection_pending = null;
+    const previous = { ...current, revision: 1, input: ai.snapshotInput('Предыдущая редакция') };
+    ticket.ai_engineer = current; mockReadRevision.mockResolvedValue(previous);
+    await handleEngineerCallback(ctx, ['ae', 'section', '42', '1', '0']);
+    expect(mockReadRevision).toHaveBeenCalledWith(current.scope, 42, current.task_id, 1);
+    expect(String(mockReply.mock.calls[0][1])).toContain('Редакция 1 · Задание');
+    expect(String(mockReply.mock.calls[0][1])).toContain('Предыдущая редакция');
   });
   it('shows bounded failure reasons and retry text only when rework exists', () => {
     const job = ai.createTask(ticket, mockPolicy, '1', binding, ai.snapshotInput('x'), Date.now());
